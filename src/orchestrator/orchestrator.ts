@@ -236,16 +236,27 @@ export class Orchestrator {
     name: string;
     description?: string;
     discordChannelId?: string;
+    baseBranch?: string;
+    lane?: string;
+    epicId?: string;
   }) {
     const project = this.getProject(params.projectId);
     const adapter = this.getAdapter(params.projectId);
     const sm = this.getStateMachine(params.projectId);
+    if (project.requireEpicForWorktree && !params.baseBranch) {
+      throw new Error(
+        `Project "${project.id}" requires an epic/base branch selection before Maverick can create a worktree.`
+      );
+    }
+
     const workstreamId = randomUUID();
     const workspace = await provisionWorktree({
       repoPath: project.repoPath,
       projectId: params.projectId,
       workstreamId,
       name: params.name,
+      lane: params.lane,
+      baseRef: params.baseBranch,
     });
 
     if (workspace.mode === "worktree") {
@@ -283,6 +294,8 @@ export class Orchestrator {
         threadId: thread.id,
         cwd: workspace.cwd,
         branch: workspace.branch,
+        baseBranch: params.baseBranch ?? null,
+        epicId: params.epicId ?? null,
         workspaceMode: workspace.mode,
       },
       source: "orchestrator",

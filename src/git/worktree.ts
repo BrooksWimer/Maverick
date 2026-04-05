@@ -22,6 +22,27 @@ function slugify(value: string): string {
   return normalized.length > 0 ? normalized : "workstream";
 }
 
+export function deriveWorktreeNames(params: {
+  projectId: string;
+  workstreamId: string;
+  name: string;
+  lane?: string | null;
+}) {
+  const slug = slugify(params.name);
+  const shortId = params.workstreamId.split("-")[0] ?? params.workstreamId;
+  const laneSegment = params.lane ? slugify(params.lane) : null;
+  const leafName = `${slug}-${shortId}`;
+  const relativeSegments = [params.projectId, ...(laneSegment ? [laneSegment] : []), leafName];
+  const branch = ["maverick", params.projectId, ...(laneSegment ? [laneSegment] : []), leafName].join("/");
+
+  return {
+    laneSegment,
+    leafName,
+    relativeSegments,
+    branch,
+  };
+}
+
 function execGit(args: string[], cwd: string): Promise<ExecResult> {
   return new Promise((resolvePromise, rejectPromise) => {
     execFile("git", args, { cwd, timeout: 30_000 }, (error, stdout, stderr) => {
@@ -58,6 +79,8 @@ export async function provisionWorktree(params: {
   projectId: string;
   workstreamId: string;
   name: string;
+  lane?: string | null;
+  baseRef?: string;
   generatedRoot?: string;
 }): Promise<WorktreeProvisionResult> {
   if (!(await isGitRepository(params.repoPath))) {
@@ -68,18 +91,16 @@ export async function provisionWorktree(params: {
     };
   }
 
-  const slug = slugify(params.name);
-  const shortId = params.workstreamId.split("-")[0] ?? params.workstreamId;
-  const branch = `maverick/${params.projectId}/${slug}-${shortId}`;
+  const names = deriveWorktreeNames(params);
   const generatedRoot = params.generatedRoot ?? resolve(process.cwd(), ".generated", "worktrees");
-  const worktreePath = resolve(generatedRoot, params.projectId, `${slug}-${shortId}`);
+  const worktreePath = resolve(generatedRoot, ...names.relativeSegments);
 
   mkdirSync(dirname(worktreePath), { recursive: true });
-  await execGit(["worktree", "add", "-b", branch, worktreePath, "HEAD"], params.repoPath);
+  await execGit(["worktree", "add", "-b", names.branch, worktreePath, params.baseRef ?? "HEAD"], params.repoPath);
 
   return {
     cwd: worktreePath,
-    branch,
+    branch: names.branch,
     mode: "worktree",
   };
 }

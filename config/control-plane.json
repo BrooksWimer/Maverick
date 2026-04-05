@@ -50,6 +50,27 @@
       "id": "netwise",
       "name": "Netwise",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Sentry\\netwise",
+      "epicBranches": [
+        {
+          "id": "laptop-wifi-scanner",
+          "branch": "codex/laptop-wifi-scanner-epic",
+          "workstreamPrefix": "laptop-wifi-scanner",
+          "description": "Go agent and scanner research work for laptop-based Wi-Fi discovery and labeling"
+        },
+        {
+          "id": "mobile-wifi-scanner",
+          "branch": "codex/mobile-wifi-scanner-epic",
+          "workstreamPrefix": "mobile-wifi-scanner",
+          "description": "Expo and iOS Wi-Fi scanning work for the Netwise mobile client"
+        },
+        {
+          "id": "router-admin-ingestion",
+          "branch": "codex/router-admin-ingestion-epic",
+          "workstreamPrefix": "router-admin-ingestion",
+          "description": "Authenticated router admin ingestion and router-only inventory extraction"
+        }
+      ],
+      "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 3,
       "metadata": {
         "description": "First onboarded project for orchestrator validation"
@@ -94,7 +115,8 @@
       {
         "projectId": "netwise",
         "channelId": "1490449866642690220",
-        "purpose": "workstreams"
+        "purpose": "workstreams",
+        "epicId": "router-admin-ingestion"
       },
       {
         "projectId": "syncsonic",

@@ -23,7 +23,7 @@ import { eventBus } from "../orchestrator/event-bus.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantService } from "../assistant/index.js";
 import type { ApprovalRow, WorkstreamRow } from "../state/index.js";
-import type { DiscordRoute, OrchestratorConfig } from "../config/schema.js";
+import type { DiscordRoute, EpicBranchConfig, OrchestratorConfig, ProjectConfig } from "../config/schema.js";
 
 const log = createLogger("discord");
 
@@ -40,6 +40,18 @@ type SendableChannel = TextBasedChannel & {
 };
 
 const DISCORD_INLINE_RESULT_LIMIT = 1500;
+
+type ParsedEpicChoice = {
+  projectId: string;
+  epicId: string;
+};
+
+type ResolvedEpic = {
+  id: string;
+  branch: string;
+  lane: string;
+  source: "route" | "explicit" | "default";
+};
 
 function isDiscordApiError(error: unknown, code?: number): boolean {
   if (!error || typeof error !== "object") {
@@ -79,6 +91,12 @@ function subcommandBuilder(config: OrchestratorConfig) {
     name: project.name,
     value: project.id,
   }));
+  const epicChoices = config.projects.flatMap((project) =>
+    project.epicBranches.map((epic) => ({
+      name: `${project.name}: ${epic.id}`,
+      value: `${project.id}:${epic.id}`,
+    }))
+  );
 
   const workstream = new SlashCommandBuilder()
     .setName("workstream")
@@ -100,6 +118,15 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .addStringOption((option) =>
           option.setName("description").setDescription("Short description").setRequired(false)
         )
+        .addStringOption((option) => {
+          option
+            .setName("epic")
+            .setDescription("Epic lane to branch from when the route is not already pinned");
+          if (epicChoices.length > 0) {
+            option.addChoices(...epicChoices);
+          }
+          return option;
+        })
     )
     .addSubcommand((subcommand) =>
       subcommand
@@ -522,9 +549,10 @@ export class DiscordBot {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const providedProjectId = interaction.options.getString("project");
+    const route = this.resolveInteractionRoute(interaction);
     const projectId =
       providedProjectId ??
-      this.projectIdForChannel(interaction.channelId) ??
+      route?.projectId ??
       (this.config.projects.length === 1 ? this.config.projects[0]?.id : null);
 
     if (!projectId) {
@@ -556,13 +584,25 @@ export class DiscordBot {
   private async handleWorkstreamStart(interaction: ChatInputCommandInteraction): Promise<void> {
     const name = interaction.options.getString("name", true);
     const description = interaction.options.getString("description") ?? undefined;
-    const projectId = this.resolveProjectId(interaction, interaction.options.getString("project"));
+    const route = this.resolveInteractionRoute(interaction);
+    const explicitProjectId = interaction.options.getString("project");
+    const explicitEpic = this.parseEpicChoice(interaction.options.getString("epic"));
+    const projectId = this.resolveProjectId(
+      interaction,
+      explicitProjectId,
+      explicitEpic?.projectId ?? null,
+      route?.projectId ?? null
+    );
+    const epic = this.resolveEpic(projectId, route, explicitEpic);
 
     const workstream = await this.orchestrator.createWorkstream({
       projectId,
       name,
       description,
       discordChannelId: interaction.channelId,
+      baseBranch: epic?.branch,
+      lane: epic?.lane,
+      epicId: epic?.id,
     });
 
     await interaction.editReply(
@@ -570,6 +610,8 @@ export class DiscordBot {
         `Created workstream \`${workstream.name}\``,
         `ID: \`${workstream.id}\``,
         `Project: \`${projectId}\``,
+        epic ? `Epic: \`${epic.id}\` (${epic.source})` : null,
+        epic ? `Base branch: \`${epic.branch}\`` : null,
         workstream.branch ? `Branch: \`${workstream.branch}\`` : "Branch: shared repository root",
         workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
         `Codex thread: \`${workstream.codex_thread_id}\``,
@@ -692,12 +734,26 @@ export class DiscordBot {
     });
   }
 
-  private resolveProjectId(interaction: ChatInputCommandInteraction, explicitProjectId: string | null): string {
+  private resolveProjectId(
+    interaction: ChatInputCommandInteraction,
+    explicitProjectId: string | null,
+    epicProjectId: string | null,
+    routedProjectId: string | null
+  ): string {
+    if (explicitProjectId && epicProjectId && explicitProjectId !== epicProjectId) {
+      throw new Error(
+        `Epic selection belongs to project "${epicProjectId}", but the command specified project "${explicitProjectId}".`
+      );
+    }
+
     if (explicitProjectId) {
       return explicitProjectId;
     }
 
-    const routedProjectId = this.projectIdForChannel(interaction.channelId);
+    if (epicProjectId) {
+      return epicProjectId;
+    }
+
     if (routedProjectId) {
       return routedProjectId;
     }
@@ -754,9 +810,113 @@ export class DiscordBot {
       .join("\n");
   }
 
-  private projectIdForChannel(channelId: string): string | null {
-    const route = this.config.discord.routes.find((candidate) => candidate.channelId === channelId);
+  private projectIdForChannel(channelId: string, parentChannelId?: string | null): string | null {
+    const route = this.routeForChannel(channelId, parentChannelId);
     return route?.projectId ?? null;
+  }
+
+  private getProjectConfig(projectId: string): ProjectConfig {
+    const project = this.config.projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      throw new Error(`Unknown project: ${projectId}`);
+    }
+    return project;
+  }
+
+  private parseEpicChoice(rawEpicChoice: string | null): ParsedEpicChoice | null {
+    if (!rawEpicChoice) {
+      return null;
+    }
+
+    const [projectId, epicId] = rawEpicChoice.split(":", 2);
+    if (!projectId || !epicId) {
+      throw new Error(`Epic choice must look like "<project>:<epic>", got "${rawEpicChoice}".`);
+    }
+
+    return { projectId, epicId };
+  }
+
+  private resolveEpic(
+    projectId: string,
+    route: DiscordRoute | null,
+    explicitEpic: ParsedEpicChoice | null
+  ): ResolvedEpic | null {
+    const project = this.getProjectConfig(projectId);
+
+    if (explicitEpic && explicitEpic.projectId !== projectId) {
+      throw new Error(
+        `Epic selection "${explicitEpic.projectId}:${explicitEpic.epicId}" does not belong to project "${projectId}".`
+      );
+    }
+
+    const epicId = explicitEpic?.epicId ?? (route?.projectId === projectId ? route.epicId : undefined);
+    if (epicId) {
+      const epic = project.epicBranches.find((candidate) => candidate.id === epicId);
+      if (!epic) {
+        throw new Error(`Project "${projectId}" does not define epic "${epicId}".`);
+      }
+
+      return {
+        id: epic.id,
+        branch: epic.branch,
+        lane: this.workstreamLaneForEpic(epic),
+        source: explicitEpic ? "explicit" : "route",
+      };
+    }
+
+    if (project.requireEpicForWorktree) {
+      throw new Error(
+        `Project "${projectId}" requires an epic selection. Start the workstream in a routed epic channel or pass the epic option explicitly.`
+      );
+    }
+
+    if (!project.defaultWorktreeBaseBranch) {
+      return null;
+    }
+
+    return {
+      id: "default",
+      branch: project.defaultWorktreeBaseBranch,
+      lane: project.id,
+      source: "default",
+    };
+  }
+
+  private workstreamLaneForEpic(epic: EpicBranchConfig): string {
+    return epic.workstreamPrefix ?? epic.id;
+  }
+
+  private resolveInteractionRoute(interaction: ChatInputCommandInteraction): DiscordRoute | null {
+    return this.routeForChannel(interaction.channelId, this.parentChannelIdForInteraction(interaction));
+  }
+
+  private parentChannelIdForInteraction(interaction: ChatInputCommandInteraction): string | null {
+    const channel = interaction.channel;
+    if (!channel) {
+      return null;
+    }
+
+    switch (channel.type) {
+      case ChannelType.PublicThread:
+      case ChannelType.PrivateThread:
+      case ChannelType.AnnouncementThread:
+        return channel.parentId ?? null;
+      default:
+        return null;
+    }
+  }
+
+  private routeForChannel(channelId: string, parentChannelId?: string | null): DiscordRoute | null {
+    const directRoute = this.config.discord.routes.find((candidate) => candidate.channelId === channelId);
+    if (directRoute) {
+      return directRoute;
+    }
+
+    if (parentChannelId) {
+      return this.config.discord.routes.find((candidate) => candidate.channelId === parentChannelId) ?? null;
+    }
+
+    return null;
   }
 
   private isAssistantChannel(channelId: string): boolean {

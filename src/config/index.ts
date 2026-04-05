@@ -7,6 +7,7 @@ export {
   type OrchestratorConfig,
   type ProjectConfig,
   type RemoteHostConfig,
+  type EpicBranchConfig,
   type WorkflowConfig,
   type StateTransition,
   type EscalationRule,

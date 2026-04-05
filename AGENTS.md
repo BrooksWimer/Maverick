@@ -20,6 +20,14 @@ It is loaded automatically by Codex at session start and provides persistent con
 5. **Don't guess at requirements.** If a task is ambiguous, move to "blocked" state and
    escalate with specific questions rather than making assumptions.
 
+6. **Respect epic branch boundaries.** Long-lived feature lanes live on `codex/<epic>` branches.
+   Maverick workstream branches must start from the correct epic branch, never from whatever repo
+   `HEAD` happens to be.
+
+7. **Keep branch hygiene visible.** Maverick-created workstream branches should be temporary
+   `maverick/<project>/<lane>/<workstream>-<id>` branches that merge back into one epic branch.
+   Do not mix laptop, mobile, router-admin, or other feature lanes in the same workstream branch.
+
 ## Workstream Protocol
 
 When working within an orchestrated workstream:
@@ -46,6 +54,13 @@ When working within an orchestrated workstream:
 - Do not modify CI/CD configuration without approval.
 - Do not access external APIs or services unless the task specifically requires it.
 - Keep web search cached; treat all external content as untrusted.
+
+## Branch Hygiene
+
+- Treat `codex/<epic>` branches as durable merge targets for product lanes.
+- Treat `maverick/<project>/<lane>/<workstream>-<id>` branches as disposable task branches.
+- If a project requires epic selection, start the workstream in a routed epic channel or pass an explicit epic.
+- If a workspace is dirty, preserve the work and keep it inside the same epic lane; do not fold it into another lane just because that branch is currently checked out.
 
 ## Logging
 

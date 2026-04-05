@@ -89,6 +89,15 @@ export const RemoteHostSchema = z.object({
   ),
 });
 
+export const EpicBranchSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/).describe("Stable epic identifier, e.g. 'laptop-wifi-scanner'"),
+  branch: z.string().min(1).describe("Long-lived git branch that serves as the epic merge target"),
+  workstreamPrefix: z.string().regex(/^[a-z0-9-]+$/).optional().describe(
+    "Optional lane label used in Maverick worktree branch names and generated worktree paths"
+  ),
+  description: z.string().optional().describe("Human-readable description of the epic lane"),
+});
+
 export const ProjectSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   name: z.string(),
@@ -99,6 +108,15 @@ export const ProjectSchema = z.object({
   agentsMdPath: z.string().optional().describe("Custom AGENTS.md path; defaults to <repoPath>/AGENTS.md"),
   skillsPath: z.string().optional().describe("Custom skills directory; defaults to <repoPath>/.agents/skills"),
   remoteHosts: z.array(RemoteHostSchema).optional().describe("Trusted SSH targets for project-scoped remote validation"),
+  defaultWorktreeBaseBranch: z.string().optional().describe(
+    "Default git ref for new Maverick worktrees when no epic branch is explicitly selected"
+  ),
+  epicBranches: z.array(EpicBranchSchema).default([]).describe(
+    "Long-lived epic branches that Maverick workstreams should merge back into"
+  ),
+  requireEpicForWorktree: z.boolean().default(false).describe(
+    "When true, Maverick must resolve an epic branch via route or explicit selection before creating a worktree"
+  ),
   maxConcurrentWorkstreams: z.number().min(1).max(20).default(3),
   metadata: z.record(z.string()).optional().describe("Arbitrary key-value pairs for project-specific config"),
 });
@@ -109,6 +127,9 @@ export const DiscordRouteSchema = z.object({
   projectId: z.string(),
   channelId: z.string(),
   purpose: z.enum(["workstreams", "notifications", "approvals", "logs"]).default("workstreams"),
+  epicId: z.string().regex(/^[a-z0-9-]+$/).optional().describe(
+    "Optional epic id that new workstreams in this route should branch from"
+  ),
 });
 
 // --- Personal assistant ---
@@ -242,6 +263,7 @@ export const OrchestratorConfigSchema = z.object({
 export type OrchestratorConfig = z.infer<typeof OrchestratorConfigSchema>;
 export type ProjectConfig = z.infer<typeof ProjectSchema>;
 export type RemoteHostConfig = z.infer<typeof RemoteHostSchema>;
+export type EpicBranchConfig = z.infer<typeof EpicBranchSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowSchema>;
 export type StateTransition = z.infer<typeof StateTransitionSchema>;
 export type EscalationRule = z.infer<typeof EscalationRuleSchema>;

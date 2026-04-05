@@ -34,18 +34,38 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
 
   const config = result.data;
 
+  const projectById = new Map(config.projects.map((project) => [project.id, project]));
+
   // Validate project paths exist
   for (const project of config.projects) {
     if (!existsSync(project.repoPath)) {
       log.warn({ projectId: project.id, path: project.repoPath }, "Project repo path does not exist");
     }
+
+    const seenEpicIds = new Set<string>();
+    for (const epic of project.epicBranches) {
+      if (seenEpicIds.has(epic.id)) {
+        throw new Error(`Project "${project.id}" declares duplicate epic id "${epic.id}"`);
+      }
+      seenEpicIds.add(epic.id);
+    }
+
+    if (project.requireEpicForWorktree && project.epicBranches.length === 0) {
+      throw new Error(`Project "${project.id}" requires epic selection but defines no epicBranches`);
+    }
   }
 
   // Validate discord route references
-  const projectIds = new Set(config.projects.map(p => p.id));
   for (const route of config.discord.routes) {
-    if (!projectIds.has(route.projectId)) {
+    const project = projectById.get(route.projectId);
+    if (!project) {
       throw new Error(`Discord route references unknown project "${route.projectId}"`);
+    }
+
+    if (route.epicId && !project.epicBranches.some((epic) => epic.id === route.epicId)) {
+      throw new Error(
+        `Discord route ${route.channelId} references unknown epic "${route.epicId}" for project "${route.projectId}"`
+      );
     }
   }
 
