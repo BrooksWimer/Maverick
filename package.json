@@ -1,0 +1,36 @@
+{
+  "name": "codex-orchestrator",
+  "version": "0.1.0",
+  "description": "Multi-project orchestration agent with Discord control interface, powered by Codex",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "bootstrap:projects": "npm run build && node dist/projects/bootstrap-cli.js",
+    "db:migrate": "npm run build && node dist/state/migrate.js",
+    "smoke:app-server": "npm run build && node dist/codex/smoke-test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "discord.js": "^14.16.0",
+    "dotenv": "^16.4.0",
+    "fastify": "^5.0.0",
+    "zod": "^3.23.0",
+    "eventemitter3": "^5.0.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

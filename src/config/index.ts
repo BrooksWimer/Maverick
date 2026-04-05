@@ -1,0 +1,21 @@
+export { loadConfig } from "./loader.js";
+export {
+  OrchestratorConfigSchema,
+  ProjectSchema,
+  WorkflowSchema,
+  DEFAULT_WORKFLOW,
+  type OrchestratorConfig,
+  type ProjectConfig,
+  type RemoteHostConfig,
+  type WorkflowConfig,
+  type StateTransition,
+  type EscalationRule,
+  type EscalationTier,
+  type ExecutionBackend,
+  type DiscordRoute,
+  type AssistantConfig,
+  type AssistantDiscordConfig,
+  type AssistantSmsConfig,
+  type AssistantCalendarConfig,
+  type AssistantReminderConfig,
+} from "./schema.js";
