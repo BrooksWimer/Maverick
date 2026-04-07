@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface, type Interface as ReadLineInterface } from "node:readline";
 import { resolve } from "node:path";
@@ -7,6 +7,7 @@ import { createLogger } from "../logger.js";
 import type {
   ApprovalRequest,
   ExecutionBackendAdapter,
+  ExecutionInputItem,
   ExecutionThread,
   ReviewRequest,
   ReviewResult,
@@ -103,6 +104,38 @@ function textInput(text: string) {
   };
 }
 
+function imageInput(imageUrl: string) {
+  return {
+    type: "image",
+    image_url: imageUrl,
+  };
+}
+
+function localImageInput(path: string) {
+  return {
+    type: "local_image",
+    path,
+  };
+}
+
+function buildInputItems(inputItems: ExecutionInputItem[] | undefined, fallbackInstruction: string) {
+  if (!inputItems || inputItems.length === 0) {
+    return [textInput(fallbackInstruction)];
+  }
+
+  return inputItems.map((item) => {
+    switch (item.type) {
+      case "image":
+        return imageInput(item.imageUrl);
+      case "local_image":
+        return localImageInput(item.path);
+      case "text":
+      default:
+        return textInput(item.text);
+    }
+  });
+}
+
 function coerceString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -148,13 +181,51 @@ function dedupeWindowsEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return sanitized;
 }
 
-function resolveDefaultCodexJsPath(): string {
-  const appData = process.env.APPDATA;
-  if (appData) {
-    const candidate = resolve(appData, "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
+function resolveGlobalNpmRoot(): string | null {
+  try {
+    const result = execFileSync("npm", ["root", "-g"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+
+    return result.length > 0 ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolvePosixCodexJsPath(): string | null {
+  const npmRoot = resolveGlobalNpmRoot();
+  const candidates = [
+    npmRoot ? resolve(npmRoot, "@openai", "codex", "bin", "codex.js") : null,
+    "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+    "/usr/lib/node_modules/@openai/codex/bin/codex.js",
+    "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js",
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  for (const candidate of candidates) {
     if (existsSync(candidate)) {
       return candidate;
     }
+  }
+
+  return null;
+}
+
+function resolveDefaultCodexJsPath(): string {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA;
+    if (appData) {
+      const candidate = resolve(appData, "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  const posixPath = resolvePosixCodexJsPath();
+  if (posixPath) {
+    return posixPath;
   }
 
   throw new Error(
@@ -165,6 +236,10 @@ function resolveDefaultCodexJsPath(): string {
 function summarizeOutput(output: string): string {
   const trimmed = output.trim();
   return trimmed.length <= 500 ? trimmed : `${trimmed.slice(0, 497)}...`;
+}
+
+function isCodexStateDbWarning(line: string): boolean {
+  return /failed to open state db/i.test(line) || /migration \d+ missing/i.test(line);
 }
 
 export class CodexAppServerAdapter implements ExecutionBackendAdapter {
@@ -212,23 +287,7 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
     }
 
     this.startProcess();
-
-    await this.sendRequest("initialize", {
-      protocolVersion: "0.1.0",
-      clientInfo: {
-        name: "maverick",
-        version: "0.1.0",
-      },
-      capabilities: {
-        experimentalApi: this.options.persistExtendedHistory || this.options.experimentalRawEvents,
-      },
-    });
-
-    this.sendNotification("initialized", {});
-    await this.sendRequest("thread/list", {});
-
-    this.initialized = true;
-    log.info("Codex App Server adapter initialized");
+    await this.performInitializeHandshake();
   }
 
   async shutdown(): Promise<void> {
@@ -302,7 +361,7 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
 
     const response = asObject(await this.sendRequest("turn/start", {
       threadId: request.threadId,
-      input: [textInput(request.instruction)],
+      input: buildInputItems(request.inputItems, request.instruction),
       cwd: request.cwd,
       model: request.model ?? this.options.model ?? null,
     }));
@@ -520,6 +579,11 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
 
     this.stderrLines = createInterface({ input: this.process.stderr });
     this.stderrLines.on("line", (line) => {
+      if (isCodexStateDbWarning(line)) {
+        log.error({ line }, "codex app-server state database issue");
+        return;
+      }
+
       log.warn({ line }, "codex app-server stderr");
     });
   }
@@ -954,7 +1018,12 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
 
   private async ensureProcessRunning(): Promise<void> {
     if (!this.process || this.process.killed) {
+      const needsHandshake = this.initialized;
       this.startProcess();
+      if (needsHandshake) {
+        this.initialized = false;
+        await this.performInitializeHandshake();
+      }
     }
   }
 
@@ -993,5 +1062,24 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
 
     this.process = null;
     this.initialized = false;
+  }
+
+  private async performInitializeHandshake(): Promise<void> {
+    await this.sendRequest("initialize", {
+      protocolVersion: "0.1.0",
+      clientInfo: {
+        name: "maverick",
+        version: "0.1.0",
+      },
+      capabilities: {
+        experimentalApi: this.options.persistExtendedHistory || this.options.experimentalRawEvents,
+      },
+    });
+
+    this.sendNotification("initialized", {});
+    await this.sendRequest("thread/list", {});
+
+    this.initialized = true;
+    log.info("Codex App Server adapter initialized");
   }
 }

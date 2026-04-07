@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createLogger } from "../logger.js";
 import type { AssistantConfig } from "../config/index.js";
 import {
@@ -11,14 +12,23 @@ import { normalizeAssistantText, parseAssistantIntent } from "./parser.js";
 import { createCalendarProvider } from "./providers/calendar.js";
 import { createSmsProvider } from "./providers/sms.js";
 import type {
+  AssistantAttachment,
   AssistantMessageSource,
   AssistantInterpreter,
   AssistantProcessResult,
+  AssistantStructuredNoteInput,
   CalendarProvider,
   ParsedAssistantIntent,
   ReminderDispatchResult,
   SmsProvider,
+  WorkNoteKind,
+  WorkNotesConfig,
 } from "./types.js";
+import {
+  normalizeSmartGoalIds,
+  normalizeWorkNoteKind,
+  persistWorkNote,
+} from "./work-notes.js";
 
 const log = createLogger("assistant");
 
@@ -27,6 +37,7 @@ type AssistantServiceOptions = {
   smsProvider?: SmsProvider;
   interpreter?: AssistantInterpreter;
   now?: () => Date;
+  workNotes?: WorkNotesConfig | null;
 };
 
 type ReminderDispatcher = (params: {
@@ -40,6 +51,7 @@ export class AssistantService {
   private readonly smsProvider: SmsProvider;
   private readonly interpreter: AssistantInterpreter | null;
   private readonly now: () => Date;
+  private readonly workNotes: WorkNotesConfig | null;
   private reminderDispatcher: ReminderDispatcher | null = null;
   private reminderTimer: NodeJS.Timeout | null = null;
 
@@ -51,6 +63,7 @@ export class AssistantService {
     this.smsProvider = options.smsProvider ?? createSmsProvider(config);
     this.interpreter = options.interpreter ?? null;
     this.now = options.now ?? (() => new Date());
+    this.workNotes = options.workNotes ?? null;
   }
 
   start(): void {
@@ -89,10 +102,19 @@ export class AssistantService {
     body: string;
     from?: string | null;
     replyTarget?: string | null;
+    attachments?: AssistantAttachment[];
     metadata?: Record<string, unknown>;
+    structuredNote?: AssistantStructuredNoteInput;
   }): Promise<AssistantProcessResult> {
     const normalizedBody = normalizeAssistantText(params.body);
-    const metadataJson = params.metadata ? JSON.stringify(params.metadata) : null;
+    const serializedMetadata =
+      params.metadata || (params.attachments?.length ?? 0) > 0
+        ? {
+            ...(params.metadata ?? {}),
+            attachments: params.attachments ?? [],
+          }
+        : null;
+    const metadataJson = serializedMetadata ? JSON.stringify(serializedMetadata) : null;
     const inbound = assistantMessages.create({
       source: params.source,
       direction: "inbound",
@@ -133,30 +155,45 @@ export class AssistantService {
     const referenceTime = this.now();
     let intent: ParsedAssistantIntent;
 
-    try {
-      intent =
-        (await this.interpreter?.interpret({
-          text: normalizedBody,
-          now: referenceTime,
-          timeZone: this.config.timeZone,
-        })) ??
-        parseAssistantIntent(normalizedBody, {
+    if (params.structuredNote) {
+      intent = this.buildStructuredNoteIntent(params.structuredNote, normalizedBody, params.attachments ?? []);
+    } else {
+      try {
+        intent =
+          (await this.interpreter?.interpret({
+            text: normalizedBody,
+            now: referenceTime,
+            timeZone: this.config.timeZone,
+            attachments: params.attachments ?? [],
+          })) ??
+          parseAssistantIntent(normalizedBody, {
+            referenceDate: referenceTime,
+            defaultEventDurationMinutes: this.config.calendar.defaultEventDurationMinutes,
+            requireTimeForReminders: this.config.reminders.requireTimeForReminders,
+            attachments: params.attachments ?? [],
+            workSmartGoals: this.workNotes?.smartGoals ?? [],
+          });
+      } catch (error) {
+        log.warn({ err: error }, "Assistant interpreter failed; falling back to parser");
+        intent = parseAssistantIntent(normalizedBody, {
           referenceDate: referenceTime,
           defaultEventDurationMinutes: this.config.calendar.defaultEventDurationMinutes,
           requireTimeForReminders: this.config.reminders.requireTimeForReminders,
+          attachments: params.attachments ?? [],
+          workSmartGoals: this.workNotes?.smartGoals ?? [],
         });
-    } catch (error) {
-      log.warn({ err: error }, "Assistant interpreter failed; falling back to parser");
-      intent = parseAssistantIntent(normalizedBody, {
-        referenceDate: referenceTime,
-        defaultEventDurationMinutes: this.config.calendar.defaultEventDurationMinutes,
-        requireTimeForReminders: this.config.reminders.requireTimeForReminders,
-      });
+      }
     }
 
     switch (intent.kind) {
       case "note":
-        return this.handleNoteIntent(inbound.id, params.source, params.from ?? null, intent);
+        return this.handleNoteIntent(
+          inbound.id,
+          params.source,
+          params.from ?? null,
+          params.attachments ?? [],
+          intent
+        );
       case "reminder":
         return this.handleReminderIntent(
           inbound.id,
@@ -247,25 +284,94 @@ export class AssistantService {
     inboundMessageId: string,
     source: AssistantMessageSource,
     from: string | null,
+    attachments: AssistantAttachment[],
     intent: Extract<ParsedAssistantIntent, { kind: "note" }>
   ): Promise<AssistantProcessResult> {
+    const noteId = randomUUID();
+    const createdAt = this.now().toISOString();
+    const isWorkNote = intent.context === "work" && this.workNotes !== null;
+    const noteKind = isWorkNote
+      ? normalizeWorkNoteKind(intent.noteKind as WorkNoteKind | undefined, intent.projectName ?? null)
+      : null;
+    const smartGoalIds = isWorkNote
+      ? normalizeSmartGoalIds(intent.smartGoalIds, noteKind!, this.workNotes!)
+      : [];
+
+    let storagePath: string | null = null;
+    let persistedAttachmentsJson: string | null = null;
+    if (isWorkNote) {
+      const persisted = await persistWorkNote({
+        workNotes: this.workNotes!,
+        noteId,
+        title: intent.title,
+        content: intent.content,
+        noteKind: noteKind!,
+        projectName: intent.projectName ?? null,
+        smartGoalIds,
+        source,
+        sourceContact: from,
+        createdAt,
+        attachments,
+      });
+
+      storagePath = persisted.storagePath;
+      persistedAttachmentsJson = JSON.stringify(persisted.attachments);
+    } else if (attachments.length > 0) {
+      persistedAttachmentsJson = JSON.stringify(
+        attachments.map((attachment) => ({
+          originalName: attachment.name ?? "attachment",
+          sourceUrl: attachment.url ?? attachment.proxyUrl ?? null,
+          contentType: attachment.contentType ?? null,
+        }))
+      );
+    }
+
     const note = assistantNotes.create({
+      id: noteId,
       message_id: inboundMessageId,
       source_contact: from,
       title: intent.title,
       content: intent.content,
+      note_context: isWorkNote ? "work" : "general",
+      note_kind: noteKind,
+      project_name: isWorkNote ? intent.projectName ?? null : null,
+      smart_goal_ids_json: smartGoalIds.length > 0 ? JSON.stringify(smartGoalIds) : null,
+      attachments_json: persistedAttachmentsJson,
+      storage_path: storagePath,
     });
 
-    const reply = `Saved note: "${note.title}"`;
+    const reply = buildNoteReply(note.title, {
+      isWorkNote,
+      noteKind,
+      projectName: isWorkNote ? intent.projectName ?? null : null,
+      smartGoalIds,
+      storagePath,
+      attachmentCount: attachments.length,
+    });
     assistantMessages.update(inboundMessageId, {
       status: "processed",
       intent: "note",
-      metadata_json: JSON.stringify({ noteId: note.id, confidence: intent.confidence }),
+      metadata_json: JSON.stringify({
+        noteId: note.id,
+        confidence: intent.confidence,
+        noteContext: isWorkNote ? "work" : "general",
+        noteKind,
+        projectName: isWorkNote ? intent.projectName ?? null : null,
+        smartGoalIds,
+        storagePath,
+      }),
     });
 
     events.emit({
       event_type: "assistant.note.created",
-      payload: { messageId: inboundMessageId, noteId: note.id, title: note.title },
+      payload: {
+        messageId: inboundMessageId,
+        noteId: note.id,
+        title: note.title,
+        noteContext: isWorkNote ? "work" : "general",
+        noteKind,
+        projectName: isWorkNote ? intent.projectName ?? null : null,
+      },
       source: "assistant",
     });
 
@@ -276,6 +382,38 @@ export class AssistantService {
       intent: "note",
       messageId: inboundMessageId,
       createdRecordId: note.id,
+    };
+  }
+
+  private buildStructuredNoteIntent(
+    structuredNote: AssistantStructuredNoteInput,
+    normalizedBody: string,
+    attachments: AssistantAttachment[]
+  ): ParsedAssistantIntent {
+    const content = normalizeAssistantText(structuredNote.content ?? normalizedBody);
+    const explicitTitle = normalizeAssistantText(structuredNote.title ?? "");
+    const hasAttachments = attachments.length > 0;
+
+    if (!content && !explicitTitle && !hasAttachments) {
+      return {
+        kind: "clarification",
+        message: "Add note text or an attachment so I have something to save.",
+        confidence: 0.35,
+      };
+    }
+
+    const noteKind = structuredNote.noteKind;
+    const projectName = normalizeAssistantText(structuredNote.projectName ?? "");
+
+    return {
+      kind: "note",
+      title: explicitTitle || defaultStructuredNoteTitle(noteKind, projectName || null, content, hasAttachments),
+      content: content || explicitTitle || fallbackAttachmentContent(noteKind, projectName || null, attachments),
+      confidence: 0.98,
+      context: structuredNote.context ?? "work",
+      noteKind,
+      projectName: projectName || null,
+      smartGoalIds: structuredNote.smartGoalIds ?? [],
     };
   }
 
@@ -501,6 +639,79 @@ export class AssistantService {
 
     return this.smsProvider.sendMessage(destination, body);
   }
+}
+
+function buildNoteReply(
+  title: string,
+  params: {
+    isWorkNote: boolean;
+    noteKind: WorkNoteKind | null;
+    projectName: string | null;
+    smartGoalIds: string[];
+    storagePath: string | null;
+    attachmentCount: number;
+  }
+): string {
+  if (!params.isWorkNote) {
+    return `Saved note: "${title}"`;
+  }
+
+  const details = [
+    params.noteKind ? `kind: ${params.noteKind}` : null,
+    params.projectName ? `project: ${params.projectName}` : null,
+    params.smartGoalIds.length > 0 ? `smart goals: ${params.smartGoalIds.join(", ")}` : null,
+    params.attachmentCount > 0 ? `attachments: ${params.attachmentCount}` : null,
+  ].filter(Boolean);
+
+  return [
+    `Saved work note: "${title}"`,
+    details.length > 0 ? `(${details.join("; ")})` : null,
+    params.storagePath ? `File: ${params.storagePath}` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function defaultStructuredNoteTitle(
+  noteKind: WorkNoteKind | undefined,
+  projectName: string | null,
+  content: string,
+  hasAttachments: boolean
+): string {
+  const trimmed = content.trim();
+  if (trimmed) {
+    return trimmed.length <= 72 ? trimmed : `${trimmed.slice(0, 69).trimEnd()}...`;
+  }
+
+  switch (noteKind) {
+    case "acceptance-criteria":
+      return projectName ? `${projectName} acceptance criteria` : "Acceptance criteria capture";
+    case "study":
+      return projectName ? `${projectName} study note` : "Study note";
+    case "project":
+      return projectName ? `${projectName} project note` : "Project note";
+    case "general":
+    default:
+      return hasAttachments ? "Work attachment note" : "Work note";
+  }
+}
+
+function fallbackAttachmentContent(
+  noteKind: WorkNoteKind | undefined,
+  projectName: string | null,
+  attachments: AssistantAttachment[]
+): string {
+  const attachmentNames = attachments.map((attachment) => attachment.name ?? "attachment").join(", ");
+  const prefix =
+    noteKind === "acceptance-criteria"
+      ? "Acceptance criteria attachment"
+      : noteKind === "study"
+        ? "Study attachment"
+        : noteKind === "project"
+          ? "Project attachment"
+          : "Work attachment";
+
+  return `${prefix}${projectName ? ` for ${projectName}` : ""}: ${attachmentNames}`;
 }
 
 function formatDateTime(iso: string, timeZone: string): string {

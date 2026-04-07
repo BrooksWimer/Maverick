@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantConfig } from "../../src/config/index.js";
 import { AssistantService } from "../../src/assistant/service.js";
 import { closeDatabase, initDatabase } from "../../src/state/index.js";
+import type { WorkNotesConfig } from "../../src/assistant/types.js";
 
 const baseConfig: AssistantConfig = {
   enabled: true,
@@ -45,6 +46,7 @@ describe("AssistantService", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     closeDatabase();
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -178,5 +180,133 @@ describe("AssistantService", () => {
     expect(reminders).toHaveLength(1);
     expect(reminders[0].body).toBe("fart");
     expect(reminders[0].remind_at).toBe("2026-04-04T23:59:00.000Z");
+  });
+
+  it("stores work notes with attachments in the Work workspace", async () => {
+    const workRepo = join(tempDir, "Work");
+    const workNotes: WorkNotesConfig = {
+      projectId: "work",
+      repoPath: workRepo,
+      smartGoals: [
+        {
+          id: "business-context",
+          title: "Business Context Deep Dives",
+          description: "Business learning",
+        },
+        {
+          id: "engineering-learning",
+          title: "Independent Engineering Learning",
+          description: "Engineering learning",
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => Uint8Array.from([1, 2, 3, 4]).buffer,
+      }))
+    );
+
+    const service = new AssistantService(baseConfig, {
+      now: () => new Date("2026-04-05T09:15:00.000Z"),
+      workNotes,
+      interpreter: {
+        async interpret() {
+          return {
+            kind: "note",
+            title: "Checkout acceptance criteria",
+            content: "Captured acceptance criteria for the checkout ticket.",
+            confidence: 0.91,
+            context: "work",
+            noteKind: "acceptance-criteria",
+            projectName: "Checkout Revamp",
+            smartGoalIds: ["business-context"],
+          };
+        },
+      },
+    });
+
+    const result = await service.processIncomingMessage({
+      source: "discord",
+      from: "user-1",
+      replyTarget: "channel-1",
+      body: "Acceptance criteria screenshot from today's ticket",
+      attachments: [
+        {
+          name: "criteria.png",
+          contentType: "image/png",
+          url: "https://example.test/criteria.png",
+        },
+      ],
+    });
+
+    expect(result.intent).toBe("note");
+    const notes = service.listNotes();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].note_context).toBe("work");
+    expect(notes[0].note_kind).toBe("acceptance-criteria");
+    expect(notes[0].project_name).toBe("Checkout Revamp");
+    expect(notes[0].storage_path).toContain(join("Work", "projects", "checkout-revamp"));
+    expect(notes[0].attachments_json).toContain("criteria.png");
+
+    expect(notes[0].storage_path).not.toBeNull();
+    expect(existsSync(notes[0].storage_path!)).toBe(true);
+    const noteFile = readFileSync(notes[0].storage_path!, "utf8");
+    expect(noteFile).toContain("Checkout acceptance criteria");
+    expect(noteFile).toContain("Business Context Deep Dives");
+
+    const activityPath = join(workRepo, "smart-goals", "business-context", "activity.md");
+    expect(readFileSync(activityPath, "utf8")).toContain("Checkout acceptance criteria");
+  });
+
+  it("supports structured work-note capture without parser inference", async () => {
+    const workRepo = join(tempDir, "Work");
+    const workNotes: WorkNotesConfig = {
+      projectId: "work",
+      repoPath: workRepo,
+      smartGoals: [
+        {
+          id: "business-context",
+          title: "Business Context Deep Dives",
+          description: "Business learning",
+        },
+        {
+          id: "engineering-learning",
+          title: "Independent Engineering Learning",
+          description: "Engineering learning",
+        },
+      ],
+    };
+
+    const service = new AssistantService(baseConfig, {
+      now: () => new Date("2026-04-05T11:30:00.000Z"),
+      workNotes,
+    });
+
+    const result = await service.processIncomingMessage({
+      source: "discord",
+      from: "user-1",
+      replyTarget: "channel-1",
+      body: "",
+      structuredNote: {
+        title: "DDD study session",
+        content: "Read about domain-driven design aggregates and noted tradeoffs.",
+        context: "work",
+        noteKind: "study",
+        projectName: "design-patterns-gof",
+        smartGoalIds: ["engineering-learning"],
+      },
+    });
+
+    expect(result.intent).toBe("note");
+    const notes = service.listNotes();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].note_context).toBe("work");
+    expect(notes[0].note_kind).toBe("study");
+    expect(notes[0].project_name).toBe("design-patterns-gof");
+    expect(notes[0].smart_goal_ids_json).toContain("engineering-learning");
+    expect(notes[0].storage_path).toContain(join("Work", "study", "projects", "design-patterns-gof"));
   });
 });

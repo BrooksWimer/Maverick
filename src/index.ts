@@ -12,10 +12,20 @@ import { createHttpServer } from "./http/server.js";
 import { createDiscordBot } from "./discord/index.js";
 import { createLogger } from "./logger.js";
 import { createAssistantService } from "./assistant/index.js";
+import { DailyBriefService } from "./daily-brief/index.js";
 
 loadEnvironment();
 
 const log = createLogger("main");
+
+function isRecoverableHttpStartupError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { code?: unknown };
+  return candidate.code === "EADDRINUSE";
+}
 
 async function main() {
   log.info("Starting Codex Orchestrator");
@@ -36,21 +46,38 @@ async function main() {
 
   const assistant = createAssistantService(config);
   assistant.start();
+  const dailyBrief = new DailyBriefService(orchestrator, config);
+  dailyBrief.start();
 
   // Start HTTP server
   let httpServer: Awaited<ReturnType<typeof createHttpServer>> | undefined;
   if (config.http.enabled) {
-    httpServer = await createHttpServer(orchestrator, {
-      port: config.http.port,
-      host: config.http.host,
-      assistant,
-      assistantConfig: config.assistant,
-    });
+    try {
+      httpServer = await createHttpServer(orchestrator, {
+        port: config.http.port,
+        host: config.http.host,
+        assistant,
+        assistantConfig: config.assistant,
+      });
+    } catch (error) {
+      if (!isRecoverableHttpStartupError(error)) {
+        throw error;
+      }
+
+      log.error(
+        {
+          err: error,
+          host: config.http.host,
+          port: config.http.port,
+        },
+        "HTTP server failed to bind; continuing without HTTP"
+      );
+    }
   }
 
   let discordBot: ReturnType<typeof createDiscordBot> | null = null;
   if (config.discord.enabled) {
-    discordBot = createDiscordBot(orchestrator, config, assistant);
+    discordBot = createDiscordBot(orchestrator, config, assistant, dailyBrief);
     if (discordBot) {
       await discordBot.start();
     }
@@ -63,16 +90,36 @@ async function main() {
   log.info(`  Projects: ${config.projects.map(p => p.id).join(", ")}`);
 
   // Graceful shutdown
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
-    log.info({ signal }, "Shutting down");
-    if (discordBot) {
-      await discordBot.stop();
+    if (shuttingDown) {
+      return;
     }
-    assistant.shutdown();
-    await orchestrator.shutdown();
-    if (httpServer) await httpServer.close();
-    closeDatabase();
-    process.exit(0);
+    shuttingDown = true;
+    log.info({ signal }, "Shutting down");
+    let hadError = false;
+
+    const runShutdownStep = async (step: string, fn: () => Promise<void> | void) => {
+      try {
+        await fn();
+      } catch (error) {
+        hadError = true;
+        log.error({ err: error, step }, "Shutdown step failed");
+      }
+    };
+
+    if (discordBot) {
+      await runShutdownStep("discord-bot", () => discordBot!.stop());
+    }
+    await runShutdownStep("daily-brief", () => dailyBrief.shutdown());
+    await runShutdownStep("assistant", () => assistant.shutdown());
+    await runShutdownStep("orchestrator", () => orchestrator.shutdown());
+    if (httpServer) {
+      await runShutdownStep("http-server", () => httpServer!.close());
+    }
+    await runShutdownStep("database", () => closeDatabase());
+
+    process.exit(hadError ? 1 : 0);
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));

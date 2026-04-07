@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { createLogger } from "../logger.js";
 import type {
   ExecutionBackendAdapter,
+  ExecutionInputItem,
   ExecutionThread,
   TurnRequest,
   TurnResult,
@@ -97,15 +98,16 @@ export class CodexCliAdapter implements ExecutionBackendAdapter {
     const model = request.model ?? this.options.model!;
     const approvalMode = request.approvalMode ?? this.options.approvalMode!;
 
+    const instruction = serializeCliInstruction(request.instruction, request.inputItems);
     const args = [
       this.options.codexPath!,
       "--model", model,
       "--approval-mode", approvalMode,
       "--quiet",
-      request.instruction,
+      instruction,
     ];
 
-    log.info({ threadId: request.threadId, instruction: request.instruction.slice(0, 100) }, "Starting turn");
+    log.info({ threadId: request.threadId, instruction: instruction.slice(0, 100) }, "Starting turn");
 
     try {
       const output = await this.execInDir(args, request.cwd, request.threadId);
@@ -236,4 +238,26 @@ export class CodexCliAdapter implements ExecutionBackendAdapter {
   private exec(args: string[]): Promise<string> {
     return this.execInDir(args, process.cwd());
   }
+}
+
+function serializeCliInstruction(instruction: string, inputItems?: ExecutionInputItem[]): string {
+  if (!inputItems || inputItems.length === 0) {
+    return instruction;
+  }
+
+  const rendered = inputItems
+    .map((item) => {
+      switch (item.type) {
+        case "image":
+          return `[image attachment: ${item.imageUrl}]`;
+        case "local_image":
+          return `[local image attachment: ${item.path}]`;
+        case "text":
+        default:
+          return item.text;
+      }
+    })
+    .join("\n\n");
+
+  return rendered.trim() || instruction;
 }

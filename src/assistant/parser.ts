@@ -1,4 +1,4 @@
-import type { ParsedAssistantIntent } from "./types.js";
+import type { AssistantAttachment, ParsedAssistantIntent, WorkSmartGoal } from "./types.js";
 
 const WEEKDAY_INDEX: Record<string, number> = {
   sunday: 0,
@@ -15,6 +15,8 @@ type ParseAssistantIntentOptions = {
   defaultEventDurationMinutes?: number;
   defaultReminderHour?: number;
   requireTimeForReminders?: boolean;
+  attachments?: AssistantAttachment[];
+  workSmartGoals?: WorkSmartGoal[];
 };
 
 type ScheduleParseResult = {
@@ -33,7 +35,8 @@ export function parseAssistantIntent(
   options: ParseAssistantIntentOptions = {}
 ): ParsedAssistantIntent {
   const normalized = normalizeAssistantText(text);
-  if (!normalized) {
+  const hasAttachments = (options.attachments?.length ?? 0) > 0;
+  if (!normalized && !hasAttachments) {
     return {
       kind: "clarification",
       message: "Send a note, reminder, or calendar item with some text so I can store it.",
@@ -51,7 +54,7 @@ export function parseAssistantIntent(
     return calendar;
   }
 
-  return parseNoteIntent(normalized);
+  return parseNoteIntent(normalized, options);
 }
 
 function parseReminderIntent(
@@ -172,13 +175,101 @@ function extractReminderRemainder(text: string): string | null {
   return null;
 }
 
-function parseNoteIntent(text: string): ParsedAssistantIntent {
-  const content = text.replace(/^(?:note|remember|memo)[:\s-]*/i, "").trim() || text;
+function parseNoteIntent(text: string, options: ParseAssistantIntentOptions): ParsedAssistantIntent {
+  const attachments = options.attachments ?? [];
+  const fallbackContent =
+    attachments.length > 0
+      ? `Attachment note captured: ${attachments.map((attachment) => attachment.name ?? "attachment").join(", ")}`
+      : text;
+  const content = text.replace(/^(?:note|remember|memo)[:\s-]*/i, "").trim() || fallbackContent;
+  const workMetadata = inferWorkNoteMetadata(content, attachments, options.workSmartGoals ?? []);
+
   return {
     kind: "note",
     title: summarizeTitle(content),
     content,
-    confidence: 0.75,
+    confidence: workMetadata.context === "work" ? 0.72 : 0.75,
+    context: workMetadata.context,
+    noteKind: workMetadata.noteKind,
+    projectName: workMetadata.projectName,
+    smartGoalIds: workMetadata.smartGoalIds,
+  };
+}
+
+function inferWorkNoteMetadata(
+  content: string,
+  attachments: AssistantAttachment[],
+  workSmartGoals: WorkSmartGoal[]
+): {
+  context: "general" | "work";
+  noteKind: "general" | "project" | "study" | "acceptance-criteria" | undefined;
+  projectName: string | null;
+  smartGoalIds: string[];
+} {
+  const lowered = normalizeAssistantText(content).toLowerCase();
+  const attachmentLabel = attachments
+    .map((attachment) => `${attachment.name ?? ""} ${attachment.contentType ?? ""}`.trim().toLowerCase())
+    .join(" ");
+
+  const smartGoalIds = new Set<string>();
+  const allowedSmartGoals = new Set(workSmartGoals.map((goal) => goal.id));
+  let context: "general" | "work" = "general";
+  let noteKind: "general" | "project" | "study" | "acceptance-criteria" | undefined;
+  let projectName: string | null = null;
+
+  if (
+    /\b(study|reading|read|article|paper|book|learning|course|tutorial)\b/.test(lowered)
+  ) {
+    context = "work";
+    noteKind = "study";
+    if (allowedSmartGoals.has("engineering-learning")) {
+      smartGoalIds.add("engineering-learning");
+    }
+  }
+
+  if (
+    /\b(acceptance criteria|acceptance-criteria|user story|ticket|requirement|jira)\b/.test(lowered) ||
+    /\b(acceptance|criteria|ticket|story)\b/.test(attachmentLabel)
+  ) {
+    context = "work";
+    noteKind = "acceptance-criteria";
+    if (allowedSmartGoals.has("business-context")) {
+      smartGoalIds.add("business-context");
+    }
+  }
+
+  const projectMatch = content.match(/^(?:project|ticket)\s+([^:\-]+?)\s*[:\-]\s*(.+)$/i);
+  if (projectMatch) {
+    context = "work";
+    noteKind = noteKind === "acceptance-criteria" ? noteKind : "project";
+    projectName = cleanupSentence(projectMatch[1]);
+  } else {
+    const explicitProject = content.match(/\bfor project\s+([a-z0-9][a-z0-9 ._#/-]{1,60})$/i);
+    if (explicitProject) {
+      context = "work";
+      noteKind = noteKind === "acceptance-criteria" ? noteKind : "project";
+      projectName = cleanupSentence(explicitProject[1]);
+    }
+  }
+
+  if (
+    context === "general" &&
+    /\b(work note|manager|standup|sprint|retro|ticket|acceptance criteria|project|prod|production)\b/.test(lowered)
+  ) {
+    context = "work";
+    noteKind = projectName ? "project" : "general";
+  }
+
+  if (context === "general" && attachments.length > 0 && /\b(ticket|criteria|work|study)\b/.test(attachmentLabel)) {
+    context = "work";
+    noteKind = noteKind ?? "general";
+  }
+
+  return {
+    context,
+    noteKind,
+    projectName,
+    smartGoalIds: [...smartGoalIds],
   };
 }
 

@@ -2,8 +2,13 @@ import { createLogger } from "../logger.js";
 import type { ExecutionBackend } from "../config/index.js";
 import type { ProjectConfig } from "../config/index.js";
 import { createAdapter } from "../codex/index.js";
-import type { ExecutionBackendAdapter, ExecutionThread } from "../codex/index.js";
-import type { AssistantInterpreter, ParsedAssistantIntent } from "./types.js";
+import type { ExecutionBackendAdapter, ExecutionInputItem, ExecutionThread } from "../codex/index.js";
+import type {
+  AssistantAttachment,
+  AssistantInterpreter,
+  ParsedAssistantIntent,
+  WorkNotesConfig,
+} from "./types.js";
 
 const log = createLogger("assistant:agent");
 
@@ -13,6 +18,10 @@ type AgentEnvelope = {
   note?: {
     title?: string;
     content?: string;
+    context?: "general" | "work";
+    noteKind?: "general" | "project" | "study" | "acceptance-criteria";
+    projectName?: string | null;
+    smartGoalIds?: string[];
   } | null;
   reminder?: {
     body?: string;
@@ -38,7 +47,8 @@ export class CodexAssistantInterpreter implements AssistantInterpreter {
 
   constructor(
     private readonly project: ProjectConfig,
-    backend: ExecutionBackend
+    backend: ExecutionBackend,
+    private readonly workNotes: WorkNotesConfig | null = null
   ) {
     this.adapter = createAdapter(backend);
   }
@@ -47,12 +57,21 @@ export class CodexAssistantInterpreter implements AssistantInterpreter {
     text: string;
     now: Date;
     timeZone: string;
+    attachments?: AssistantAttachment[];
   }): Promise<ParsedAssistantIntent | null> {
     const thread = await this.ensureThread();
+    const prompt = buildInterpretationPrompt(
+      input.text,
+      input.now,
+      input.timeZone,
+      input.attachments ?? [],
+      this.workNotes
+    );
     const result = await this.adapter.startTurn({
       threadId: thread.id,
       cwd: this.project.repoPath,
-      instruction: buildInterpretationPrompt(input.text, input.now, input.timeZone),
+      instruction: prompt,
+      inputItems: buildInterpreterInputItems(prompt, input.attachments ?? []),
     });
 
     if (result.status !== "completed") {
@@ -87,7 +106,36 @@ export class CodexAssistantInterpreter implements AssistantInterpreter {
   }
 }
 
-function buildInterpretationPrompt(text: string, now: Date, timeZone: string): string {
+function buildInterpretationPrompt(
+  text: string,
+  now: Date,
+  timeZone: string,
+  attachments: AssistantAttachment[],
+  workNotes: WorkNotesConfig | null
+): string {
+  const attachmentSummaries = attachments.length > 0
+    ? [
+        "Attachments:",
+        ...attachments.map((attachment, index) =>
+          `- ${index + 1}. ${attachment.name ?? "attachment"} (${attachment.contentType ?? "unknown"})`
+        ),
+      ]
+    : ["Attachments: none"];
+
+  const workNoteGuidance = workNotes
+    ? [
+        "For notes, distinguish between generic notes and work notes.",
+        'If a note is work-related, return "context":"work" and classify it into one of:',
+        '- "general": a general work-progress or job note',
+        '- "project": a note tied to a named project or ticket',
+        '- "study": reading, study, or active learning for work',
+        '- "acceptance-criteria": screenshots or notes about ticket requirements or acceptance criteria',
+        "When a work note clearly belongs to a named project or ticket, set projectName.",
+        "When a work note supports one of these smart goals, include the matching ids in smartGoalIds:",
+        ...workNotes.smartGoals.map((goal) => `- ${goal.id}: ${goal.description}`),
+      ]
+    : [];
+
   return [
     "You are Maverick's personal assistant interpreter.",
     "Your job is to understand the user's message and return one JSON object only.",
@@ -99,18 +147,38 @@ function buildInterpretationPrompt(text: string, now: Date, timeZone: string): s
     '- "reminder": schedule a reminder at a specific future ISO timestamp',
     '- "calendar": create a calendar item with ISO timestamps',
     '- "clarification": ask a concise question if required information is missing',
+    ...workNoteGuidance,
     "Interpret natural language flexibly, including phrases like 'in 15 minutes', 'later tonight', 'next Monday at 9', and casual wording.",
     "Return shape:",
     '{' +
       '"intent":"note|reminder|calendar|clarification",' +
       '"confidence":0.0,' +
-      '"note":{"title":"...","content":"..."}|null,' +
+      '"note":{"title":"...","content":"...","context":"general|work","noteKind":"general|project|study|acceptance-criteria","projectName":"...","smartGoalIds":["..."]}|null,' +
       '"reminder":{"body":"...","remindAtIso":"..."}|null,' +
       '"calendar":{"title":"...","startsAtIso":"...","endsAtIso":"...","isAllDay":false,"details":"...","location":null}|null,' +
       '"clarification":{"message":"..."}|null' +
     '}',
+    ...attachmentSummaries,
     `User message: ${text}`,
   ].join("\n");
+}
+
+function buildInterpreterInputItems(prompt: string, attachments: AssistantAttachment[]) {
+  const items: ExecutionInputItem[] = [{ type: "text", text: prompt }];
+
+  for (const attachment of attachments.slice(0, 4)) {
+    const sourceUrl = attachment.url ?? attachment.proxyUrl ?? null;
+    if (!sourceUrl || !(attachment.contentType ?? "").startsWith("image/")) {
+      continue;
+    }
+
+    items.push({
+      type: "image",
+      imageUrl: sourceUrl,
+    });
+  }
+
+  return items;
 }
 
 function parseAgentEnvelope(output: string): AgentEnvelope | null {
@@ -151,6 +219,12 @@ function toParsedIntent(envelope: AgentEnvelope): ParsedAssistantIntent | null {
         title: envelope.note.title?.trim() || envelope.note.content.trim().slice(0, 72),
         content: envelope.note.content.trim(),
         confidence,
+        context: envelope.note.context === "work" ? "work" : "general",
+        noteKind: envelope.note.noteKind,
+        projectName: envelope.note.projectName ?? null,
+        smartGoalIds: Array.isArray(envelope.note.smartGoalIds)
+          ? envelope.note.smartGoalIds.filter((value): value is string => typeof value === "string")
+          : [],
       };
     case "reminder":
       if (!envelope.reminder?.body || !envelope.reminder?.remindAtIso) {

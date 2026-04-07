@@ -14,6 +14,28 @@ type SqliteDatabase = ReturnType<typeof Database>;
 
 let db: SqliteDatabase | null = null;
 
+function ensureColumn(database: SqliteDatabase, tableName: string, columnName: string, alterSql: string): void {
+  const columns = database.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+
+  database.exec(alterSql);
+  log.info({ tableName, columnName }, "Database column added");
+}
+
+function ensureIndex(database: SqliteDatabase, indexName: string, createSql: string): void {
+  const index = database
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
+    .get(indexName) as { name: string } | undefined;
+  if (index) {
+    return;
+  }
+
+  database.exec(createSql);
+  log.info({ indexName }, "Database index added");
+}
+
 function resolveSchemaPath(): string {
   const candidates = [
     resolve(__dirname, "schema.sql"),
@@ -53,6 +75,38 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
   const schemaPath = resolveSchemaPath();
   const schema = readFileSync(schemaPath, "utf-8");
   db.exec(schema);
+  ensureColumn(db, "workstreams", "epic_id", "ALTER TABLE workstreams ADD COLUMN epic_id TEXT");
+  ensureColumn(
+    db,
+    "assistant_notes",
+    "note_context",
+    "ALTER TABLE assistant_notes ADD COLUMN note_context TEXT NOT NULL DEFAULT 'general'"
+  );
+  ensureColumn(db, "assistant_notes", "note_kind", "ALTER TABLE assistant_notes ADD COLUMN note_kind TEXT");
+  ensureColumn(db, "assistant_notes", "project_name", "ALTER TABLE assistant_notes ADD COLUMN project_name TEXT");
+  ensureColumn(
+    db,
+    "assistant_notes",
+    "smart_goal_ids_json",
+    "ALTER TABLE assistant_notes ADD COLUMN smart_goal_ids_json TEXT"
+  );
+  ensureColumn(
+    db,
+    "assistant_notes",
+    "attachments_json",
+    "ALTER TABLE assistant_notes ADD COLUMN attachments_json TEXT"
+  );
+  ensureColumn(
+    db,
+    "assistant_notes",
+    "storage_path",
+    "ALTER TABLE assistant_notes ADD COLUMN storage_path TEXT"
+  );
+  ensureIndex(
+    db,
+    "idx_assistant_notes_project_name",
+    "CREATE INDEX IF NOT EXISTS idx_assistant_notes_project_name ON assistant_notes(project_name)"
+  );
 
   log.info({ schemaPath }, "Database schema applied");
   return db;

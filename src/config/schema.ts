@@ -89,6 +89,21 @@ export const RemoteHostSchema = z.object({
   ),
 });
 
+export const EpicCharterDocSchema = z.object({
+  path: z.string().min(1).describe("Repo-relative or absolute path to durable repo-owned documentation"),
+  purpose: z.string().min(1).optional().describe("Why agents should consult this document"),
+});
+
+export const EpicCharterSchema = z.object({
+  summary: z.string().min(1).describe("Concise durable product charter for the epic"),
+  bullets: z.array(z.string().min(1)).default([]).describe(
+    "Key durable goals, constraints, or reminders that every workstream should inherit"
+  ),
+  docs: z.array(EpicCharterDocSchema).default([]).describe(
+    "Pointers to durable project-owned docs, discovery notes, or implementation references"
+  ),
+});
+
 export const EpicBranchSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/).describe("Stable epic identifier, e.g. 'laptop-wifi-scanner'"),
   branch: z.string().min(1).describe("Long-lived git branch that serves as the epic merge target"),
@@ -96,6 +111,9 @@ export const EpicBranchSchema = z.object({
     "Optional lane label used in Maverick worktree branch names and generated worktree paths"
   ),
   description: z.string().optional().describe("Human-readable description of the epic lane"),
+  charter: EpicCharterSchema.optional().describe(
+    "Durable epic/product context that Maverick injects into new workstreams for this epic"
+  ),
 });
 
 export const ProjectSchema = z.object({
@@ -190,6 +208,35 @@ export const AssistantConfigSchema = z.object({
   }),
 });
 
+// --- Daily brief ---
+
+export const DailyBriefConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  timeZone: z.string().optional().describe(
+    "Optional timezone override for the brief schedule; falls back to assistant.timeZone"
+  ),
+  deliveryHour: z.number().int().min(0).max(23).default(21).describe("Local hour for nightly brief delivery"),
+  deliveryMinute: z.number().int().min(0).max(59).default(0).describe("Local minute for nightly brief delivery"),
+  pollIntervalMs: z.number().int().min(60_000).max(3_600_000).default(300_000).describe(
+    "How often Maverick checks whether the nightly brief should run"
+  ),
+  channelId: z.string().nullable().optional().describe(
+    "Optional Discord channel override for the nightly brief; falls back to the Discord default notification channel"
+  ),
+  artifactDirectory: z.string().default("./data/daily-briefs").describe(
+    "Directory where generated daily brief markdown artifacts are stored"
+  ),
+  maxProjectsInDigest: z.number().int().min(1).max(20).default(10).describe(
+    "Maximum project sections to include in the generated report"
+  ),
+  maxNotesInDigest: z.number().int().min(0).max(20).default(8).describe(
+    "Maximum recent notes to include in the generated report"
+  ),
+  maxRemindersInDigest: z.number().int().min(0).max(20).default(5).describe(
+    "Maximum scheduled reminders to include in the generated report"
+  ),
+});
+
 // --- Top-level config ---
 
 export const OrchestratorConfigSchema = z.object({
@@ -257,12 +304,25 @@ export const OrchestratorConfigSchema = z.object({
       requireTimeForReminders: false,
     },
   }),
+
+  dailyBrief: DailyBriefConfigSchema.default({
+    enabled: false,
+    deliveryHour: 21,
+    deliveryMinute: 0,
+    pollIntervalMs: 300_000,
+    artifactDirectory: "./data/daily-briefs",
+    maxProjectsInDigest: 10,
+    maxNotesInDigest: 8,
+    maxRemindersInDigest: 5,
+  }),
 });
 
 // Type exports
 export type OrchestratorConfig = z.infer<typeof OrchestratorConfigSchema>;
 export type ProjectConfig = z.infer<typeof ProjectSchema>;
 export type RemoteHostConfig = z.infer<typeof RemoteHostSchema>;
+export type EpicCharterConfig = z.infer<typeof EpicCharterSchema>;
+export type EpicCharterDocConfig = z.infer<typeof EpicCharterDocSchema>;
 export type EpicBranchConfig = z.infer<typeof EpicBranchSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowSchema>;
 export type StateTransition = z.infer<typeof StateTransitionSchema>;
@@ -275,3 +335,4 @@ export type AssistantDiscordConfig = z.infer<typeof AssistantDiscordConfigSchema
 export type AssistantSmsConfig = z.infer<typeof AssistantSmsConfigSchema>;
 export type AssistantCalendarConfig = z.infer<typeof AssistantCalendarConfigSchema>;
 export type AssistantReminderConfig = z.infer<typeof AssistantReminderConfigSchema>;
+export type DailyBriefConfig = z.infer<typeof DailyBriefConfigSchema>;

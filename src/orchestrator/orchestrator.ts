@@ -19,6 +19,7 @@ import { createAdapter, type ExecutionBackendAdapter } from "../codex/index.js";
 import type { ApprovalRequest, ExecutionThread } from "../codex/types.js";
 import type { EscalationTier, OrchestratorConfig, ProjectConfig, RemoteHostConfig } from "../config/schema.js";
 import { ensureProjectBootstrap, ensureWorktreeBootstrap, type BootstrapStatus } from "../projects/bootstrap.js";
+import { buildEpicCharterContext, requireEpicById, workstreamLaneForEpic } from "../projects/epics.js";
 import { provisionWorktree } from "../git/worktree.js";
 
 const log = createLogger("orchestrator");
@@ -243,7 +244,28 @@ export class Orchestrator {
     const project = this.getProject(params.projectId);
     const adapter = this.getAdapter(params.projectId);
     const sm = this.getStateMachine(params.projectId);
-    if (project.requireEpicForWorktree && !params.baseBranch) {
+    let resolvedBaseBranch = params.baseBranch;
+    let resolvedLane = params.lane;
+
+    if (params.epicId) {
+      const epic = requireEpicById(project, params.epicId);
+      const epicLane = workstreamLaneForEpic(epic);
+      if (params.baseBranch && params.baseBranch !== epic.branch) {
+        throw new Error(
+          `Workstream requested epic "${params.epicId}" but base branch "${params.baseBranch}" does not match "${epic.branch}".`
+        );
+      }
+      if (params.lane && params.lane !== epicLane) {
+        throw new Error(
+          `Workstream requested epic "${params.epicId}" but lane "${params.lane}" does not match "${epicLane}".`
+        );
+      }
+
+      resolvedBaseBranch ??= epic.branch;
+      resolvedLane ??= epicLane;
+    }
+
+    if (project.requireEpicForWorktree && !resolvedBaseBranch) {
       throw new Error(
         `Project "${project.id}" requires an epic/base branch selection before Maverick can create a worktree.`
       );
@@ -255,8 +277,8 @@ export class Orchestrator {
       projectId: params.projectId,
       workstreamId,
       name: params.name,
-      lane: params.lane,
-      baseRef: params.baseBranch,
+      lane: resolvedLane,
+      baseRef: resolvedBaseBranch,
     });
 
     if (workspace.mode === "worktree") {
@@ -270,6 +292,7 @@ export class Orchestrator {
     const ws = workstreams.create({
       id: workstreamId,
       project_id: params.projectId,
+      epic_id: params.epicId,
       name: params.name,
       description: params.description,
       cwd: workspace.cwd,
@@ -294,7 +317,7 @@ export class Orchestrator {
         threadId: thread.id,
         cwd: workspace.cwd,
         branch: workspace.branch,
-        baseBranch: params.baseBranch ?? null,
+        baseBranch: resolvedBaseBranch ?? null,
         epicId: params.epicId ?? null,
         workspaceMode: workspace.mode,
       },
@@ -317,6 +340,7 @@ export class Orchestrator {
 
     const dispatchWorkstream = await this.prepareWorkstreamForDispatch(ws);
     const adapter = this.getAdapter(dispatchWorkstream.project_id);
+    const preparedInstruction = this.prepareTurnInstruction(dispatchWorkstream, instruction);
 
     // Create turn record
     const turn = turns.create({
@@ -342,7 +366,12 @@ export class Orchestrator {
       workstream_id: workstreamId,
       project_id: dispatchWorkstream.project_id,
       event_type: "turn.started",
-      payload: { turnId: turn.id, instruction },
+      payload: {
+        turnId: turn.id,
+        instruction,
+        epicId: dispatchWorkstream.epic_id ?? null,
+        epicContextInjected: preparedInstruction.epicContextInjected,
+      },
       source: "orchestrator",
     });
 
@@ -350,7 +379,7 @@ export class Orchestrator {
     try {
       const result = await adapter.startTurn({
         threadId: dispatchWorkstream.codex_thread_id!,
-        instruction,
+        instruction: preparedInstruction.instruction,
         cwd: dispatchWorkstream.cwd ?? this.getProject(dispatchWorkstream.project_id).repoPath,
       });
 
@@ -1155,5 +1184,43 @@ export class Orchestrator {
     const sm = this.stateMachines.get(projectId);
     if (!sm) throw new Error(`No state machine for project: ${projectId}`);
     return sm;
+  }
+
+  private prepareTurnInstruction(
+    workstream: WorkstreamRow,
+    userInstruction: string
+  ): { instruction: string; epicContextInjected: boolean } {
+    if (!workstream.epic_id) {
+      return {
+        instruction: userInstruction,
+        epicContextInjected: false,
+      };
+    }
+
+    const project = this.getProject(workstream.project_id);
+    const epic = project.epicBranches.find((candidate) => candidate.id === workstream.epic_id);
+    if (!epic) {
+      log.warn(
+        { projectId: project.id, workstreamId: workstream.id, epicId: workstream.epic_id },
+        "Workstream references an epic that no longer exists in config"
+      );
+      return {
+        instruction: userInstruction,
+        epicContextInjected: false,
+      };
+    }
+
+    const epicContext = buildEpicCharterContext(project, epic);
+    if (!epicContext) {
+      return {
+        instruction: userInstruction,
+        epicContextInjected: false,
+      };
+    }
+
+    return {
+      instruction: `${epicContext}\n\nUser request:\n${userInstruction}`,
+      epicContextInjected: true,
+    };
   }
 }

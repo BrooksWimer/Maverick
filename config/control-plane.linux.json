@@ -40,7 +40,7 @@
     {
       "id": "maverick",
       "name": "Maverick",
-      "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
+      "repoPath": "/srv/maverick/app",
       "maxConcurrentWorkstreams": 3,
       "metadata": {
         "description": "Personal assistant and control-plane home project"
@@ -49,7 +49,7 @@
     {
       "id": "netwise",
       "name": "Netwise",
-      "repoPath": "C:\\Users\\wimer\\Desktop\\Sentry\\netwise",
+      "repoPath": "/srv/maverick/repos/netwise",
       "epicBranches": [
         {
           "id": "laptop-wifi-scanner",
@@ -94,7 +94,7 @@
     {
       "id": "syncsonic",
       "name": "SyncSonic",
-      "repoPath": "C:\\Users\\wimer\\Desktop\\SyncSonicPi",
+      "repoPath": "/srv/maverick/repos/syncsonic",
       "maxConcurrentWorkstreams": 3,
       "remoteHosts": [
         {
@@ -106,20 +106,6 @@
       ],
       "metadata": {
         "description": "Raspberry Pi BLE audio hub with Expo frontend and hardware validation via Pi SSH"
-      }
-    },
-    {
-      "id": "work",
-      "name": "Work",
-      "repoPath": "C:\\Users\\wimer\\Desktop\\Work",
-      "maxConcurrentWorkstreams": 2,
-      "metadata": {
-        "description": "Private work-note workspace for job progress, project notes, acceptance criteria, and active learning",
-        "note_workspace": "work",
-        "work_smart_goal_business_title": "Business Context Deep Dives",
-        "work_smart_goal_business_description": "Do a deep dive into facets of the business that come up through work to build stronger business understanding.",
-        "work_smart_goal_learning_title": "Independent Engineering Learning",
-        "work_smart_goal_learning_description": "Do independent software engineering reading, make notes on it, and keep track of active learning."
       }
     }
   ],
@@ -151,11 +137,6 @@
         "projectId": "syncsonic",
         "channelId": "1490171093615513742",
         "purpose": "workstreams"
-      },
-      {
-        "projectId": "work",
-        "channelId": "1490549869625081896",
-        "purpose": "workstreams"
       }
     ],
     "defaultNotificationChannelId": null
@@ -172,7 +153,7 @@
     "allowedPhoneNumbers": [],
     "discord": {
       "enabled": true,
-      "channelIds": ["1490188914861019197", "1490549869625081896"],
+      "channelIds": ["1490188914861019197"],
       "allowedUserIds": [],
       "replyInThread": true
     },
@@ -200,7 +181,7 @@
     "deliveryMinute": 0,
     "pollIntervalMs": 300000,
     "channelId": "1490188914861019197",
-    "artifactDirectory": "./data/daily-briefs",
+    "artifactDirectory": "/var/lib/maverick/daily-briefs",
     "maxProjectsInDigest": 10,
     "maxNotesInDigest": 8,
     "maxRemindersInDigest": 5

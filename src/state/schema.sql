@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS workstreams (
   id                  TEXT PRIMARY KEY,
   project_id          TEXT NOT NULL REFERENCES projects(id),
+  epic_id             TEXT,
   name                TEXT NOT NULL,
   description         TEXT,
   state               TEXT NOT NULL DEFAULT 'intake',
@@ -152,6 +153,12 @@ CREATE TABLE IF NOT EXISTS assistant_notes (
   source_contact  TEXT,
   title           TEXT NOT NULL,
   content         TEXT NOT NULL,
+  note_context    TEXT NOT NULL DEFAULT 'general',
+  note_kind       TEXT,
+  project_name    TEXT,
+  smart_goal_ids_json TEXT,
+  attachments_json TEXT,
+  storage_path    TEXT,
   tags_json       TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );

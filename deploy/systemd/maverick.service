@@ -1,0 +1,24 @@
+[Unit]
+Description=Maverick orchestrator service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maverick
+Group=maverick
+WorkingDirectory=/srv/maverick/app
+EnvironmentFile=/etc/maverick/maverick.env
+ExecStart=/usr/bin/env node dist/index.js --config config/control-plane.linux.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/maverick /var/lib/maverick
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

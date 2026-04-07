@@ -22,8 +22,11 @@ import { createLogger } from "../logger.js";
 import { eventBus } from "../orchestrator/event-bus.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantService } from "../assistant/index.js";
+import type { DailyBriefService } from "../daily-brief/index.js";
 import type { ApprovalRow, WorkstreamRow } from "../state/index.js";
 import type { DiscordRoute, EpicBranchConfig, OrchestratorConfig, ProjectConfig } from "../config/schema.js";
+import { workstreamLaneForEpic } from "../projects/epics.js";
+import type { AssistantAttachment } from "../assistant/types.js";
 
 const log = createLogger("discord");
 
@@ -52,6 +55,8 @@ type ResolvedEpic = {
   lane: string;
   source: "route" | "explicit" | "default";
 };
+
+type WorkSmartGoalChoice = "none" | "business-context" | "engineering-learning" | "both";
 
 function isDiscordApiError(error: unknown, code?: number): boolean {
   if (!error || typeof error !== "object") {
@@ -91,6 +96,28 @@ function subcommandBuilder(config: OrchestratorConfig) {
     name: project.name,
     value: project.id,
   }));
+  const smartGoalChoices = [
+    { name: "None", value: "none" },
+    { name: "Business Context", value: "business-context" },
+    { name: "Engineering Learning", value: "engineering-learning" },
+    { name: "Both Goals", value: "both" },
+  ] as const;
+  const addWorkAttachmentOptions = <T extends {
+    addAttachmentOption: (builder: (option: any) => any) => T;
+  }>(subcommand: T): T =>
+    subcommand
+      .addAttachmentOption((option) =>
+        option.setName("attachment").setDescription("Optional image or file").setRequired(false)
+      )
+      .addAttachmentOption((option) =>
+        option.setName("attachment_2").setDescription("Optional second image or file").setRequired(false)
+      )
+      .addAttachmentOption((option) =>
+        option.setName("attachment_3").setDescription("Optional third image or file").setRequired(false)
+      )
+      .addAttachmentOption((option) =>
+        option.setName("attachment_4").setDescription("Optional fourth image or file").setRequired(false)
+      );
   const epicChoices = config.projects.flatMap((project) =>
     project.epicBranches.map((epic) => ({
       name: `${project.name}: ${epic.id}`,
@@ -205,7 +232,109 @@ function subcommandBuilder(config: OrchestratorConfig) {
         )
     );
 
-  return [workstream.toJSON(), project.toJSON()] satisfies RESTPostAPIApplicationCommandsJSONBody[];
+  const work = new SlashCommandBuilder()
+    .setName("work")
+    .setDescription("Capture structured work notes")
+    .addSubcommand((subcommand) =>
+      addWorkAttachmentOptions(subcommand
+        .setName("general")
+        .setDescription("Save a general work note")
+        .addStringOption((option) =>
+          option.setName("details").setDescription("The note body or summary").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option.setName("title").setDescription("Optional short title").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("smart_goal")
+            .setDescription("Optionally file this note under a smart goal")
+            .setRequired(false)
+            .addChoices(...smartGoalChoices)
+        ))
+    )
+    .addSubcommand((subcommand) =>
+      addWorkAttachmentOptions(subcommand
+        .setName("project")
+        .setDescription("Save a project-specific work note")
+        .addStringOption((option) =>
+          option.setName("project").setDescription("Project or ticket name").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("details").setDescription("The note body or summary").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option.setName("title").setDescription("Optional short title").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("smart_goal")
+            .setDescription("Optionally file this note under a smart goal")
+            .setRequired(false)
+            .addChoices(...smartGoalChoices)
+        ))
+    )
+    .addSubcommand((subcommand) =>
+      addWorkAttachmentOptions(subcommand
+        .setName("acceptance")
+        .setDescription("Save ticket acceptance criteria or requirement capture")
+        .addStringOption((option) =>
+          option.setName("project").setDescription("Project, ticket, or feature name").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("details").setDescription("Short explanation of the capture").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option.setName("title").setDescription("Optional short title").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("smart_goal")
+            .setDescription("Override the default smart goal filing")
+            .setRequired(false)
+            .addChoices(...smartGoalChoices)
+        ))
+    )
+    .addSubcommand((subcommand) =>
+      addWorkAttachmentOptions(subcommand
+        .setName("study")
+        .setDescription("Save a study note for work reading or active learning")
+        .addStringOption((option) =>
+          option.setName("details").setDescription("What you studied or learned").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option.setName("title").setDescription("Optional short title").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option.setName("project").setDescription("Optional related work project").setRequired(false)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("smart_goal")
+            .setDescription("Override the default smart goal filing")
+            .setRequired(false)
+            .addChoices(...smartGoalChoices)
+        ))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("recent")
+        .setDescription("Show recently captured work notes")
+        .addIntegerOption((option) =>
+          option.setName("limit").setDescription("How many notes to show").setRequired(false).setMinValue(1).setMaxValue(10)
+        )
+    );
+
+  const brief = new SlashCommandBuilder()
+    .setName("brief")
+    .setDescription("Generate Maverick summary briefs")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("daily")
+        .setDescription("Generate a preview of today's daily brief")
+    );
+
+  return [workstream.toJSON(), project.toJSON(), work.toJSON(), brief.toJSON()] satisfies RESTPostAPIApplicationCommandsJSONBody[];
 }
 
 export class DiscordBot {
@@ -216,7 +345,8 @@ export class DiscordBot {
     private readonly orchestrator: Orchestrator,
     private readonly config: OrchestratorConfig,
     private readonly options: DiscordBotOptions,
-    private readonly assistant: AssistantService | null = null
+    private readonly assistant: AssistantService | null = null,
+    private readonly dailyBrief: DailyBriefService | null = null
   ) {
     this.client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -246,6 +376,33 @@ export class DiscordBot {
           error: error instanceof Error ? error.message : String(error),
         };
       }
+    });
+    this.dailyBrief?.setDispatcher(async ({
+      channelId,
+      headline,
+      preview,
+      markdown,
+      artifactFileName,
+      trigger,
+    }) => {
+      const channel = await this.fetchTextChannel(channelId);
+      if (!channel) {
+        throw new Error(`Daily brief channel ${channelId} is not accessible.`);
+      }
+
+      await this.safeSend(channel, {
+        content: [
+          headline,
+          trigger === "scheduled" ? "Nightly brief delivered." : "Daily brief preview.",
+          preview,
+          "Full brief attached as a Markdown file.",
+        ].join("\n\n"),
+        files: [
+          new AttachmentBuilder(Buffer.from(markdown, "utf8"), {
+            name: artifactFileName,
+          }),
+        ],
+      });
     });
   }
 
@@ -308,6 +465,7 @@ export class DiscordBot {
             `Maverick bound this thread to workstream \`${workstream.name}\`.`,
             `Workstream ID: \`${workstream.id}\``,
             `Project: \`${workstream.project_id}\``,
+            workstream.epic_id ? `Epic: \`${workstream.epic_id}\`` : null,
             workstream.branch ? `Branch: \`${workstream.branch}\`` : "Branch: shared repository root",
             workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
             workstream.codex_thread_id ? `Codex thread: \`${workstream.codex_thread_id}\`` : null,
@@ -449,7 +607,8 @@ export class DiscordBot {
     }
 
     const content = this.normalizeAssistantMessageContent(message.content).trim();
-    if (!content) {
+    const attachments = this.serializeAttachments(message);
+    if (!content && attachments.length === 0) {
       return;
     }
 
@@ -459,6 +618,7 @@ export class DiscordBot {
         body: content,
         from: message.author.id,
         replyTarget: message.channelId,
+        attachments,
         metadata: {
           channelId: message.channelId,
           guildId: message.guildId,
@@ -493,6 +653,16 @@ export class DiscordBot {
 
     if (interaction.commandName === "project") {
       await this.handleProjectCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "work") {
+      await this.handleWorkCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "brief") {
+      await this.handleBriefCommand(interaction);
     }
   }
 
@@ -576,6 +746,154 @@ export class DiscordBot {
       for (const workstream of status.workstreams.slice(0, 10)) {
         lines.push(`- \`${workstream.id}\` ${workstream.name} [${workstream.state}]`);
       }
+    }
+
+    await interaction.editReply(lines.join("\n"));
+  }
+
+  private async handleWorkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!this.assistant?.isEnabled()) {
+      await interaction.reply({
+        content: "The Maverick assistant is not enabled right now.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const subcommand = interaction.options.getSubcommand();
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    switch (subcommand) {
+      case "general":
+        await this.captureStructuredWorkNote(interaction, {
+          noteKind: "general",
+          defaultSmartGoalIds: [],
+        });
+        return;
+      case "project":
+        await this.captureStructuredWorkNote(interaction, {
+          noteKind: "project",
+          defaultSmartGoalIds: [],
+        });
+        return;
+      case "acceptance":
+        await this.captureStructuredWorkNote(interaction, {
+          noteKind: "acceptance-criteria",
+          defaultSmartGoalIds: ["business-context"],
+        });
+        return;
+      case "study":
+        await this.captureStructuredWorkNote(interaction, {
+          noteKind: "study",
+          defaultSmartGoalIds: ["engineering-learning"],
+        });
+        return;
+      case "recent":
+        await this.handleRecentWorkNotes(interaction);
+        return;
+      default:
+        await interaction.editReply(`Unsupported work subcommand: ${subcommand}`);
+    }
+  }
+
+  private async handleBriefCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!this.dailyBrief) {
+      await interaction.reply({
+        content: "The daily brief service is not configured right now.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand !== "daily") {
+      await interaction.reply({
+        content: `Unsupported brief subcommand: ${subcommand}`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const report = await this.dailyBrief.generateReport();
+    await interaction.editReply({
+      content: [report.headline, report.preview, `Artifact: \`${report.artifactPath}\``].join("\n\n"),
+      files: [
+        new AttachmentBuilder(Buffer.from(report.markdown, "utf8"), {
+          name: report.artifactFileName,
+        }),
+      ],
+    });
+  }
+
+  private async captureStructuredWorkNote(
+    interaction: ChatInputCommandInteraction,
+    params: {
+      noteKind: "general" | "project" | "study" | "acceptance-criteria";
+      defaultSmartGoalIds: string[];
+    }
+  ): Promise<void> {
+    const details = interaction.options.getString("details") ?? "";
+    const title = interaction.options.getString("title");
+    const projectName = interaction.options.getString("project");
+    const smartGoalChoice = interaction.options.getString("smart_goal") as WorkSmartGoalChoice | null;
+    const attachments = ["attachment", "attachment_2", "attachment_3", "attachment_4"]
+      .map((optionName) => interaction.options.getAttachment(optionName))
+      .filter((attachment): attachment is NonNullable<typeof attachment> => attachment !== null)
+      .map((attachment) => this.toAssistantAttachment(attachment));
+
+    if (!details.trim() && !title?.trim() && attachments.length === 0) {
+      await interaction.editReply("Add note details, a title, or an attachment so I have something to save.");
+      return;
+    }
+
+    const result = await this.assistant!.processIncomingMessage({
+      source: "discord",
+      body: details,
+      from: interaction.user.id,
+      replyTarget: interaction.channelId,
+      attachments,
+      metadata: {
+        channelId: interaction.channelId,
+        guildId: interaction.guildId,
+        interactionId: interaction.id,
+        username: interaction.user.username,
+        structuredCapture: true,
+        structuredSubcommand: interaction.options.getSubcommand(),
+      },
+      structuredNote: {
+        title,
+        content: details,
+        context: "work",
+        noteKind: params.noteKind,
+        projectName,
+        smartGoalIds: this.resolveWorkSmartGoalIds(smartGoalChoice, params.defaultSmartGoalIds),
+      },
+    });
+
+    await interaction.editReply(result.reply);
+  }
+
+  private async handleRecentWorkNotes(interaction: ChatInputCommandInteraction): Promise<void> {
+    const limit = interaction.options.getInteger("limit") ?? 5;
+    const notes = this.assistant!
+      .listNotes(limit * 4)
+      .filter((note) => note.note_context === "work")
+      .slice(0, limit);
+
+    if (notes.length === 0) {
+      await interaction.editReply("No work notes have been captured yet.");
+      return;
+    }
+
+    const lines = ["Recent work notes:"];
+    for (const note of notes) {
+      const parts = [
+        note.note_kind ? `[${note.note_kind}]` : null,
+        note.project_name ? `project: ${note.project_name}` : null,
+        note.storage_path ? `file: ${note.storage_path}` : null,
+      ].filter(Boolean);
+      lines.push(`- ${note.created_at}: ${note.title}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`);
     }
 
     await interaction.editReply(lines.join("\n"));
@@ -794,6 +1112,7 @@ export class DiscordBot {
       `Workstream: \`${workstream.name}\``,
       `ID: \`${workstream.id}\``,
       `Project: \`${workstream.project_id}\``,
+      workstream.epic_id ? `Epic: \`${workstream.epic_id}\`` : null,
       `State: \`${workstream.state}\``,
       workstream.branch ? `Branch: \`${workstream.branch}\`` : "Branch: shared repository root",
       workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
@@ -859,7 +1178,7 @@ export class DiscordBot {
       return {
         id: epic.id,
         branch: epic.branch,
-        lane: this.workstreamLaneForEpic(epic),
+        lane: workstreamLaneForEpic(epic),
         source: explicitEpic ? "explicit" : "route",
       };
     }
@@ -874,16 +1193,12 @@ export class DiscordBot {
       return null;
     }
 
-    return {
-      id: "default",
-      branch: project.defaultWorktreeBaseBranch,
-      lane: project.id,
-      source: "default",
-    };
-  }
-
-  private workstreamLaneForEpic(epic: EpicBranchConfig): string {
-    return epic.workstreamPrefix ?? epic.id;
+      return {
+        id: "default",
+        branch: project.defaultWorktreeBaseBranch,
+        lane: project.id,
+        source: "default",
+      };
   }
 
   private resolveInteractionRoute(interaction: ChatInputCommandInteraction): DiscordRoute | null {
@@ -932,6 +1247,50 @@ export class DiscordBot {
     }
 
     return content.replace(new RegExp(`^<@!?${botId}>\\s*`), "");
+  }
+
+  private serializeAttachments(message: Message): AssistantAttachment[] {
+    return [...message.attachments.values()].map((attachment) => this.toAssistantAttachment(attachment));
+  }
+
+  private toAssistantAttachment(attachment: {
+    id?: string | null;
+    url?: string | null;
+    proxyURL?: string | null;
+    name?: string | null;
+    contentType?: string | null;
+    size?: number | null;
+    width?: number | null;
+    height?: number | null;
+  }): AssistantAttachment {
+    return {
+      id: attachment.id ?? null,
+      url: attachment.url ?? null,
+      proxyUrl: attachment.proxyURL ?? null,
+      name: attachment.name ?? null,
+      contentType: attachment.contentType ?? null,
+      size: attachment.size ?? null,
+      width: attachment.width ?? null,
+      height: attachment.height ?? null,
+    };
+  }
+
+  private resolveWorkSmartGoalIds(
+    choice: WorkSmartGoalChoice | null,
+    defaults: string[]
+  ): string[] {
+    switch (choice) {
+      case "none":
+        return [];
+      case "business-context":
+        return ["business-context"];
+      case "engineering-learning":
+        return ["engineering-learning"];
+      case "both":
+        return ["business-context", "engineering-learning"];
+      default:
+        return defaults;
+    }
   }
 
   private async resolveNotificationChannelFromWorkstreamId(

@@ -7,6 +7,8 @@ export {
   type OrchestratorConfig,
   type ProjectConfig,
   type RemoteHostConfig,
+  type EpicCharterConfig,
+  type EpicCharterDocConfig,
   type EpicBranchConfig,
   type WorkflowConfig,
   type StateTransition,
@@ -19,4 +21,6 @@ export {
   type AssistantSmsConfig,
   type AssistantCalendarConfig,
   type AssistantReminderConfig,
+  type DailyBriefConfig,
+  DailyBriefConfigSchema,
 } from "./schema.js";

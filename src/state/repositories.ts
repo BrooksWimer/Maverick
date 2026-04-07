@@ -19,6 +19,7 @@ export interface ProjectRow {
 export interface WorkstreamRow {
   id: string;
   project_id: string;
+  epic_id: string | null;
   name: string;
   description: string | null;
   state: string;
@@ -94,6 +95,12 @@ export interface AssistantNoteRow {
   source_contact: string | null;
   title: string;
   content: string;
+  note_context: string;
+  note_kind: string | null;
+  project_name: string | null;
+  smart_goal_ids_json: string | null;
+  attachments_json: string | null;
+  storage_path: string | null;
   tags_json: string | null;
   created_at: string;
 }
@@ -171,6 +178,7 @@ export const workstreams = {
   create(data: {
     id?: string;
     project_id: string;
+    epic_id?: string;
     name: string;
     description?: string;
     cwd?: string;
@@ -181,9 +189,9 @@ export const workstreams = {
     const db = getDatabase();
     const id = data.id ?? randomUUID();
     db.prepare(`
-      INSERT INTO workstreams (id, project_id, name, description, cwd, branch, execution_backend, discord_channel_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, data.project_id, data.name, data.description ?? null,
+      INSERT INTO workstreams (id, project_id, epic_id, name, description, cwd, branch, execution_backend, discord_channel_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, data.project_id, data.epic_id ?? null, data.name, data.description ?? null,
       data.cwd ?? null, data.branch ?? null,
       data.execution_backend ?? "codex-app-server", data.discord_channel_id ?? null);
     return workstreams.getById(id)!;
@@ -371,6 +379,12 @@ export const events = {
     return db.prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?")
       .all(limit) as EventRow[];
   },
+
+  listByType(eventType: string, limit = 100): EventRow[] {
+    const db = getDatabase();
+    return db.prepare("SELECT * FROM events WHERE event_type = ? ORDER BY created_at DESC LIMIT ?")
+      .all(eventType, limit) as EventRow[];
+  },
 };
 
 // --- Assistant messages ---
@@ -448,19 +462,34 @@ export const assistantNotes = {
     source_contact?: string | null;
     title: string;
     content: string;
+    note_context?: string;
+    note_kind?: string | null;
+    project_name?: string | null;
+    smart_goal_ids_json?: string | null;
+    attachments_json?: string | null;
+    storage_path?: string | null;
     tags_json?: string | null;
   }): AssistantNoteRow {
     const db = getDatabase();
     const id = data.id ?? randomUUID();
     db.prepare(`
-      INSERT INTO assistant_notes (id, message_id, source_contact, title, content, tags_json)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO assistant_notes (
+        id, message_id, source_contact, title, content, note_context, note_kind,
+        project_name, smart_goal_ids_json, attachments_json, storage_path, tags_json
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.message_id ?? null,
       data.source_contact ?? null,
       data.title,
       data.content,
+      data.note_context ?? "general",
+      data.note_kind ?? null,
+      data.project_name ?? null,
+      data.smart_goal_ids_json ?? null,
+      data.attachments_json ?? null,
+      data.storage_path ?? null,
       data.tags_json ?? null
     );
     return assistantNotes.getById(id)!;

@@ -64,11 +64,12 @@ export async function createHttpServer(
   });
 
   app.post("/api/workstreams", async (req) => {
-    const body = req.body as { projectId: string; name: string; description?: string };
+    const body = req.body as { projectId: string; name: string; description?: string; epicId?: string };
     const ws = await orchestrator.createWorkstream({
       projectId: body.projectId,
       name: body.name,
       description: body.description,
+      epicId: body.epicId,
     });
     return ws;
   });
@@ -163,11 +164,28 @@ export async function createHttpServer(
     });
 
     app.post("/api/assistant/messages", async (req) => {
-      const body = req.body as { body: string; from?: string; source?: "sms" | "api" };
+      const body = req.body as {
+        body: string;
+        from?: string;
+        source?: "sms" | "api";
+        attachments?: Array<Record<string, unknown>>;
+      };
       const result = await options.assistant!.processIncomingMessage({
         source: body.source ?? "api",
         body: body.body,
         from: body.from ?? null,
+        attachments: Array.isArray(body.attachments)
+          ? body.attachments.map((attachment) => ({
+              id: typeof attachment.id === "string" ? attachment.id : null,
+              url: typeof attachment.url === "string" ? attachment.url : null,
+              proxyUrl: typeof attachment.proxyUrl === "string" ? attachment.proxyUrl : null,
+              name: typeof attachment.name === "string" ? attachment.name : null,
+              contentType: typeof attachment.contentType === "string" ? attachment.contentType : null,
+              size: typeof attachment.size === "number" ? attachment.size : null,
+              width: typeof attachment.width === "number" ? attachment.width : null,
+              height: typeof attachment.height === "number" ? attachment.height : null,
+            }))
+          : [],
         metadata: {
           route: "/api/assistant/messages",
         },

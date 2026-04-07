@@ -15,12 +15,27 @@ export interface ExecutionThread {
   status: "active" | "idle" | "waiting_approval" | "archived";
 }
 
+export type ExecutionInputItem =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "image";
+      imageUrl: string;
+    }
+  | {
+      type: "local_image";
+      path: string;
+    };
+
 export interface TurnRequest {
   threadId: string;
   instruction: string;
   cwd: string;
   model?: string;
   approvalMode?: string;
+  inputItems?: ExecutionInputItem[];
 }
 
 export interface TurnResult {

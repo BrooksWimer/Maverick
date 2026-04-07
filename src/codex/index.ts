@@ -1,5 +1,6 @@
 export type {
   ExecutionBackendAdapter,
+  ExecutionInputItem,
   ExecutionThread,
   TurnRequest,
   TurnResult,

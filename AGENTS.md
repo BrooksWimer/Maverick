@@ -62,6 +62,12 @@ When working within an orchestrated workstream:
 - If a project requires epic selection, start the workstream in a routed epic channel or pass an explicit epic.
 - If a workspace is dirty, preserve the work and keep it inside the same epic lane; do not fold it into another lane just because that branch is currently checked out.
 
+## Epic Charter Context
+
+- Maverick may prepend durable epic charter context from its control-plane config when a workstream is bound to an epic.
+- Treat that charter as high-level product intent and constraints, not as the durable implementation log.
+- Keep detailed implementation notes, discoveries, and router or vendor-specific findings in repo-owned docs referenced by the charter.
+
 ## Logging
 
 - Log every significant action and decision with rationale.

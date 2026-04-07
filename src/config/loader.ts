@@ -5,6 +5,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { OrchestratorConfigSchema, type OrchestratorConfig } from "./schema.js";
 import { createLogger } from "../logger.js";
+import { isEpicDocPathWithinProject, resolveEpicDocPath } from "../projects/epics.js";
 
 const log = createLogger("config");
 
@@ -48,6 +49,22 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
         throw new Error(`Project "${project.id}" declares duplicate epic id "${epic.id}"`);
       }
       seenEpicIds.add(epic.id);
+
+      for (const doc of epic.charter?.docs ?? []) {
+        if (!isEpicDocPathWithinProject(project, doc.path)) {
+          throw new Error(
+            `Project "${project.id}" epic "${epic.id}" doc path "${doc.path}" escapes repoPath "${project.repoPath}"`
+          );
+        }
+
+        const resolvedDocPath = resolveEpicDocPath(project, doc.path);
+        if (!existsSync(resolvedDocPath)) {
+          log.warn(
+            { projectId: project.id, epicId: epic.id, path: resolvedDocPath },
+            "Epic charter doc pointer does not exist yet"
+          );
+        }
+      }
     }
 
     if (project.requireEpicForWorktree && project.epicBranches.length === 0) {

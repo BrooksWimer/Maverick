@@ -56,4 +56,57 @@ describe("parseAssistantIntent", () => {
     expect(intent.startsAt).toBe("2026-04-07T18:30:00.000Z");
     expect(intent.endsAt).toBe("2026-04-07T19:15:00.000Z");
   });
+
+  it("classifies work study notes toward the engineering learning smart goal", () => {
+    const intent = parseAssistantIntent("Study note: read a distributed systems article and write takeaways", {
+      workSmartGoals: [
+        {
+          id: "business-context",
+          title: "Business Context Deep Dives",
+          description: "Business learning",
+        },
+        {
+          id: "engineering-learning",
+          title: "Independent Engineering Learning",
+          description: "Engineering learning",
+        },
+      ],
+    });
+
+    expect(intent.kind).toBe("note");
+    if (intent.kind !== "note") {
+      return;
+    }
+
+    expect(intent.context).toBe("work");
+    expect(intent.noteKind).toBe("study");
+    expect(intent.smartGoalIds).toContain("engineering-learning");
+  });
+
+  it("treats attachment-only captures as notes instead of clarification", () => {
+    const intent = parseAssistantIntent("", {
+      attachments: [
+        {
+          name: "acceptance-criteria.png",
+          contentType: "image/png",
+          url: "https://example.test/acceptance-criteria.png",
+        },
+      ],
+      workSmartGoals: [
+        {
+          id: "business-context",
+          title: "Business Context Deep Dives",
+          description: "Business learning",
+        },
+      ],
+    });
+
+    expect(intent.kind).toBe("note");
+    if (intent.kind !== "note") {
+      return;
+    }
+
+    expect(intent.context).toBe("work");
+    expect(intent.noteKind).toBe("acceptance-criteria");
+  });
 });
