@@ -10,7 +10,7 @@ SYNCSONIC_DIR="/srv/maverick/repos/syncsonic"
 STATE_DIR="/var/lib/maverick"
 ENV_TARGET="/etc/maverick/maverick.env"
 ENV_SOURCE=""
-MAVERICK_BRANCH="master"
+MAVERICK_BRANCH="server"
 NETWISE_BRANCH="master"
 SYNCSONIC_BRANCH="pi-stable-baseline-2026-04-05"
 MAVERICK_REPO_URL=""
@@ -27,7 +27,7 @@ Usage:
   bootstrap-linux-server.sh --maverick-repo <url> --netwise-repo <url> --syncsonic-repo <url> [options]
 
 Options:
-  --maverick-branch <branch>    Default: master
+  --maverick-branch <branch>    Default: server
   --netwise-branch <branch>     Default: master
   --syncsonic-branch <branch>   Default: pi-stable-baseline-2026-04-05
   --app-dir <path>              Default: /srv/maverick/app

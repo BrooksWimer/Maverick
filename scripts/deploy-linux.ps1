@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SshHost,
 
-    [string]$Branch = "master",
+    [string]$Branch = "server",
 
     [string]$RemoteName = "origin",
 

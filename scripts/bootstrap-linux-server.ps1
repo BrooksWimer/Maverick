@@ -9,7 +9,7 @@ param(
 
     [string]$SyncSonicRepoUrl,
 
-    [string]$MaverickBranch = "master",
+    [string]$MaverickBranch = "server",
 
     [string]$NetwiseBranch = "master",
 

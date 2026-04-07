@@ -40,12 +40,15 @@ Before the first bootstrap:
 
 1. Create a private Git remote for Maverick.
 2. Add the remote to the local Maverick repo.
-3. Push Maverick `master`.
-4. Push the Netwise epic branches Maverick depends on:
+3. Push the clean Maverick `master` baseline.
+4. Push a dedicated Maverick `server` branch for the Linux host.
+5. Push the Netwise epic branches Maverick depends on:
    - `codex/laptop-wifi-scanner-epic`
    - `codex/mobile-wifi-scanner-epic`
    - `codex/router-admin-ingestion-epic`
-5. Push SyncSonic `pi-stable-baseline-2026-04-05`.
+6. Push SyncSonic `pi-stable-baseline-2026-04-05`.
+
+`master` stays clean and is not used as the Linux deploy branch. The Linux host pulls Maverick from `server` by default.
 
 ## First-Time Bootstrap From Windows
 
@@ -77,7 +80,7 @@ If you want to bootstrap without copying the SQLite state yet:
 
 ## Ongoing Deploys From Windows
 
-Deploy the current `master` branch to Linux with:
+Deploy the current `server` branch to Linux with:
 
 ```powershell
 .\scripts\deploy-linux.ps1 -SshHost maverick-server
@@ -87,7 +90,7 @@ By default the deploy script:
 
 - runs local `npm test`
 - runs local `npm run build`
-- pushes `master`
+- pushes `server`
 - SSHes into Linux
 - updates the Linux clone
 - runs `npm ci --include=dev`
