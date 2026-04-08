@@ -41,9 +41,10 @@
       "id": "maverick",
       "name": "Maverick",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
+      "defaultWorktreeBaseBranch": "main",
       "maxConcurrentWorkstreams": 3,
       "metadata": {
-        "description": "Personal assistant and control-plane home project"
+        "description": "Personal assistant and control-plane home project with short-lived self-update workstreams routed through maverick-updates"
       }
     },
     {
@@ -237,7 +238,7 @@
     "routes": [
       {
         "projectId": "maverick",
-        "channelId": "1490188914861019197",
+        "channelId": "1491285608524681216",
         "purpose": "workstreams"
       },
       {

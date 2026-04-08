@@ -73,3 +73,24 @@ When working within an orchestrated workstream:
 - Log every significant action and decision with rationale.
 - When using subagents, include their individual summaries in the parent workstream log.
 - Include timestamps and file paths in all log entries.
+
+## Working On Maverick Itself
+
+- Maverick self-updates should run through the dedicated `maverick-updates` workstream channel, not the personal assistant channel.
+- Treat `main` as the default baseline branch for Maverick self-update worktrees unless a task explicitly says otherwise.
+- Do not make Maverick code changes directly on branches named for another project or epic.
+  If the current branch is not `main`, `server`, or a Maverick self-update branch, stop and fix the branch before editing Maverick.
+- Local Maverick edits do not automatically change the live Linux bot.
+  Until changes are deployed, Discord behavior still comes from whichever Maverick instance is currently running.
+- Keep Maverick changes explicit and inspectable:
+  update config, schema, docs, and tests together when behavior changes.
+- Preserve the split between orchestration metadata and repo-owned implementation detail.
+  Do not bury important workflow rules in one-off dispatch text when they belong in control-plane config, docs, or AGENTS context.
+- When changing Maverick's own orchestration behavior, verify the dogfooding path:
+  the new channel route, worktree behavior, and Discord/operator experience should still make sense for Maverick as a first-class project.
+- Default dogfooding workflow for Maverick self-updates:
+  1. Stop or disable the Linux Maverick bot first so Discord traffic does not hit the stale server copy during testing.
+  2. Run Maverick locally from Windows with the current branch and use the real Discord interface for integration testing.
+  3. Validate the exact routed behavior you changed, including channel routing, workstream creation, branch/worktree setup, approvals, and user-facing messages when relevant.
+  4. Stop the Windows Maverick process after validation so there is only one active Discord-connected Maverick instance again.
+  5. Only then push and deploy the validated changes to Linux, restart the Linux Maverick service, and reboot the host only if the change actually requires a full server reboot.

@@ -40,7 +40,7 @@ Before the first bootstrap:
 
 1. Create a private Git remote for Maverick.
 2. Add the remote to the local Maverick repo.
-3. Push the clean Maverick `master` baseline.
+3. Push the clean Maverick `main` baseline.
 4. Push a dedicated Maverick `server` branch for the Linux host.
 5. Push the Netwise epic branches Maverick depends on:
    - `codex/laptop-wifi-scanner-epic`
@@ -48,7 +48,7 @@ Before the first bootstrap:
    - `codex/router-admin-ingestion-epic`
 6. Push SyncSonic `pi-stable-baseline-2026-04-05`.
 
-`master` stays clean and is not used as the Linux deploy branch. The Linux host pulls Maverick from `server` by default.
+`main` stays clean and is not used as the Linux deploy branch. The Linux host pulls Maverick from `server` by default.
 
 ## First-Time Bootstrap From Windows
 
@@ -105,6 +105,23 @@ If your GitHub SSH key lives somewhere other than `C:\Users\<you>\.ssh\id_ed2551
 ```powershell
 .\scripts\deploy-linux.ps1 -SshHost maverick-server -ForwardedGitHubKeyPath C:\Users\<you>\.ssh\your-github-key
 ```
+
+## Dogfooding Maverick Self-Updates
+
+Changes made in the local Windows Maverick repo do not automatically reach the live Linux bot.
+Until you deploy, Discord is still talking to whichever Maverick instance is currently running.
+
+When testing Maverick changes that affect Discord routing, workstream creation, approvals, or other operator-facing behavior:
+
+1. Stop or disable the Linux Maverick service first so Discord traffic does not hit stale server code during the test.
+2. Run Maverick locally on Windows from the branch you are validating.
+3. Use the real Discord interface as the integration test surface.
+4. Validate the specific behavior you changed, not just local build/test output.
+5. Stop the Windows Maverick process after validation so there is only one active Discord-connected Maverick instance again.
+6. Then deploy the validated branch to Linux and restart the Linux Maverick service.
+
+Restarting the `systemd` service is the normal path.
+Reboot the Linux host only when the change actually requires a full machine restart.
 
 ## Re-Syncing State Later
 

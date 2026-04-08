@@ -78,6 +78,16 @@ function truncate(text: string, max = 1800): string {
   return `${text.slice(0, max - 3)}...`;
 }
 
+export function persistedEpicIdForResolvedEpic(
+  epic: { id: string; source: "route" | "explicit" | "default" } | null
+): string | undefined {
+  if (!epic || epic.source === "default") {
+    return undefined;
+  }
+
+  return epic.id;
+}
+
 function routeScore(route: DiscordRoute, purpose: "workstreams" | "notifications" | "approvals" | "logs") {
   if (route.purpose === purpose) {
     return 3;
@@ -920,7 +930,7 @@ export class DiscordBot {
       discordChannelId: interaction.channelId,
       baseBranch: epic?.branch,
       lane: epic?.lane,
-      epicId: epic?.id,
+      epicId: persistedEpicIdForResolvedEpic(epic),
     });
 
     await interaction.editReply(
@@ -928,8 +938,8 @@ export class DiscordBot {
         `Created workstream \`${workstream.name}\``,
         `ID: \`${workstream.id}\``,
         `Project: \`${projectId}\``,
-        epic ? `Epic: \`${epic.id}\` (${epic.source})` : null,
-        epic ? `Base branch: \`${epic.branch}\`` : null,
+        epic && epic.source !== "default" ? `Epic: \`${epic.id}\` (${epic.source})` : null,
+        epic ? `Base branch: \`${epic.branch}\`${epic.source === "default" ? " (default)" : ""}` : null,
         workstream.branch ? `Branch: \`${workstream.branch}\`` : "Branch: shared repository root",
         workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
         `Codex thread: \`${workstream.codex_thread_id}\``,
