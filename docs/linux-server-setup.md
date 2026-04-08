@@ -54,6 +54,8 @@ Before the first bootstrap:
 
 Use an SSH host alias such as `maverick-server` in `C:\Users\<you>\.ssh\config`.
 
+The bootstrap and deploy scripts use Git for Windows' user-space SSH tools when they are available. They forward your local GitHub SSH key from Windows into the Linux session for `git clone` and `git pull`, so Maverick can stay private without storing a separate GitHub deploy key on the Linux host. By default the forwarded GitHub key path is `C:\Users\<you>\.ssh\id_ed25519`.
+
 Then run:
 
 ```powershell
@@ -97,6 +99,12 @@ By default the deploy script:
 - rebuilds Maverick
 - restarts `systemd`
 - checks `http://127.0.0.1:3847/health`
+
+If your GitHub SSH key lives somewhere other than `C:\Users\<you>\.ssh\id_ed25519`, pass it explicitly:
+
+```powershell
+.\scripts\deploy-linux.ps1 -SshHost maverick-server -ForwardedGitHubKeyPath C:\Users\<you>\.ssh\your-github-key
+```
 
 ## Re-Syncing State Later
 

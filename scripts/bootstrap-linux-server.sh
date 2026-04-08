@@ -47,7 +47,7 @@ require_root() {
 }
 
 run_as_service_user() {
-  sudo -u "${SERVICE_USER}" -- "$@"
+  sudo --preserve-env=SSH_AUTH_SOCK -u "${SERVICE_USER}" -- "$@"
 }
 
 upsert_env_var() {
@@ -115,6 +115,25 @@ ensure_directories() {
   install -d -o root -g "${SERVICE_GROUP}" -m 0750 /etc/maverick
 }
 
+ensure_service_user_known_host() {
+  local host="$1"
+  local ssh_dir="/srv/maverick/.ssh"
+  local known_hosts="${ssh_dir}/known_hosts"
+
+  install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0700 "${ssh_dir}"
+  touch "${known_hosts}"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" "${known_hosts}"
+  chmod 0600 "${known_hosts}"
+
+  if run_as_service_user ssh-keygen -F "${host}" -f "${known_hosts}" >/dev/null 2>&1; then
+    return
+  fi
+
+  ssh-keyscan -H "${host}" >> "${known_hosts}"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" "${known_hosts}"
+  chmod 0600 "${known_hosts}"
+}
+
 clone_or_update_repo() {
   local repo_url="$1"
   local branch="$2"
@@ -122,14 +141,16 @@ clone_or_update_repo() {
 
   if [[ -d "${target_path}/.git" ]]; then
     log "Updating $(basename "${target_path}")"
-    run_as_service_user git -C "${target_path}" fetch --all --prune
-    run_as_service_user git -C "${target_path}" checkout "${branch}"
-    run_as_service_user git -C "${target_path}" pull --ff-only origin "${branch}"
+    git -C "${target_path}" -c safe.directory="${target_path}" fetch --all --prune
+    git -C "${target_path}" -c safe.directory="${target_path}" checkout "${branch}"
+    git -C "${target_path}" -c safe.directory="${target_path}" pull --ff-only origin "${branch}"
+    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${target_path}"
     return
   fi
 
   log "Cloning ${repo_url} into ${target_path}"
-  run_as_service_user git clone --branch "${branch}" "${repo_url}" "${target_path}"
+  git clone --branch "${branch}" "${repo_url}" "${target_path}"
+  chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${target_path}"
 }
 
 resolve_codex_js_path() {
@@ -257,6 +278,7 @@ ensure_node20
 ensure_codex
 ensure_service_account
 ensure_directories
+ensure_service_user_known_host "github.com"
 clone_or_update_repo "${MAVERICK_REPO_URL}" "${MAVERICK_BRANCH}" "${APP_DIR}"
 clone_or_update_repo "${NETWISE_REPO_URL}" "${NETWISE_BRANCH}" "${NETWISE_DIR}"
 clone_or_update_repo "${SYNCSONIC_REPO_URL}" "${SYNCSONIC_BRANCH}" "${SYNCSONIC_DIR}"

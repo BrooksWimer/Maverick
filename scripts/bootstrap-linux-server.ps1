@@ -23,6 +23,8 @@ param(
 
     [string]$ServiceName = "maverick",
 
+    [string]$ForwardedGitHubKeyPath,
+
     [switch]$SkipDatabaseSync
 )
 
@@ -32,6 +34,9 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $LocalEnvPath) {
     $LocalEnvPath = Join-Path $repoRoot ".env"
+}
+if (-not $ForwardedGitHubKeyPath) {
+    $ForwardedGitHubKeyPath = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
 }
 
 function Invoke-NativeCommand {
@@ -46,6 +51,74 @@ function Invoke-NativeCommand {
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed: $FilePath $($Arguments -join ' ')"
+    }
+}
+
+function Get-SshToolPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("ssh", "scp", "ssh-agent", "ssh-add")]
+        [string]$Tool
+    )
+
+    $gitTool = Join-Path $env:ProgramFiles "Git\usr\bin\$Tool.exe"
+    if (Test-Path $gitTool) {
+        return $gitTool
+    }
+
+    return $Tool
+}
+
+function Ensure-ForwardedGitHubKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$KeyPath
+    )
+
+    if (-not (Test-Path $KeyPath)) {
+        throw "GitHub SSH key not found: $KeyPath"
+    }
+
+    $sshAddPath = Get-SshToolPath -Tool "ssh-add"
+    $hasAgent = $false
+
+    if ($env:SSH_AUTH_SOCK) {
+        & $sshAddPath "-l" *> $null
+        $hasAgent = ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1)
+    }
+
+    if (-not $hasAgent) {
+        $sshAgentPath = Get-SshToolPath -Tool "ssh-agent"
+        $agentOutput = & $sshAgentPath "-s"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to start an SSH agent for GitHub auth forwarding."
+        }
+
+        foreach ($line in $agentOutput) {
+            if ($line -match '^SSH_AUTH_SOCK=([^;]+);') {
+                $env:SSH_AUTH_SOCK = $matches[1]
+            }
+            elseif ($line -match '^SSH_AGENT_PID=([0-9]+);') {
+                $env:SSH_AGENT_PID = $matches[1]
+                $script:StartedSshAgentPid = [int]$matches[1]
+            }
+        }
+    }
+
+    Invoke-NativeCommand -FilePath $sshAddPath -Arguments @($KeyPath)
+}
+
+function Stop-TransientSshAgent {
+    if ($script:StartedSshAgentPid) {
+        try {
+            Stop-Process -Id $script:StartedSshAgentPid -Force -ErrorAction Stop
+        }
+        catch {
+        }
+
+        Remove-Item Env:SSH_AUTH_SOCK -ErrorAction SilentlyContinue
+        Remove-Item Env:SSH_AGENT_PID -ErrorAction SilentlyContinue
+        $script:StartedSshAgentPid = $null
     }
 }
 
@@ -98,7 +171,7 @@ function Invoke-SshCommand {
         [string]$Command
     )
 
-    Invoke-NativeCommand -FilePath "ssh" -Arguments @($SshHost, "bash", "-lc", $Command)
+    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "ssh") -Arguments @("-A", $SshHost, "bash", "-lc", $Command)
 }
 
 function Copy-ToRemote {
@@ -110,7 +183,7 @@ function Copy-ToRemote {
         [string]$RemotePath
     )
 
-    Invoke-NativeCommand -FilePath "scp" -Arguments @($LocalPath, "${SshHost}:${RemotePath}")
+    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "scp") -Arguments @($LocalPath, "${SshHost}:${RemotePath}")
 }
 
 function Read-DotEnvFile {
@@ -214,6 +287,7 @@ $bootstrapRemotePath = "/tmp/maverick-bootstrap.sh"
 $envRemotePath = "/tmp/maverick.env"
 
 try {
+    Ensure-ForwardedGitHubKey -KeyPath $ForwardedGitHubKeyPath
     Write-DotEnvFile -Path $tempEnvPath -Values $envValues
     Write-LfTextFile -Path $tempBootstrapPath -Content (Get-Content -Path (Join-Path $repoRoot "scripts\bootstrap-linux-server.sh") -Raw)
 
@@ -223,7 +297,7 @@ try {
     $remoteBootstrap = @(
         "set -euo pipefail",
         "chmod +x $bootstrapRemotePath",
-        "sudo bash $bootstrapRemotePath --maverick-repo $(Quote-BashString $MaverickRepoUrl) --netwise-repo $(Quote-BashString $NetwiseRepoUrl) --syncsonic-repo $(Quote-BashString $SyncSonicRepoUrl) --maverick-branch $(Quote-BashString $MaverickBranch) --netwise-branch $(Quote-BashString $NetwiseBranch) --syncsonic-branch $(Quote-BashString $SyncSonicBranch) --app-dir $(Quote-BashString $RemoteAppDir) --state-dir $(Quote-BashString $RemoteStateDir) --env-file $(Quote-BashString $envRemotePath) --service-name $(Quote-BashString $ServiceName)",
+        "sudo --preserve-env=SSH_AUTH_SOCK bash $bootstrapRemotePath --maverick-repo $(Quote-BashString $MaverickRepoUrl) --netwise-repo $(Quote-BashString $NetwiseRepoUrl) --syncsonic-repo $(Quote-BashString $SyncSonicRepoUrl) --maverick-branch $(Quote-BashString $MaverickBranch) --netwise-branch $(Quote-BashString $NetwiseBranch) --syncsonic-branch $(Quote-BashString $SyncSonicBranch) --app-dir $(Quote-BashString $RemoteAppDir) --state-dir $(Quote-BashString $RemoteStateDir) --env-file $(Quote-BashString $envRemotePath) --service-name $(Quote-BashString $ServiceName)",
         "rm -f $bootstrapRemotePath $envRemotePath"
     ) -join " && "
 
@@ -239,6 +313,7 @@ try {
     Invoke-SshCommand -Command "set -euo pipefail && sudo systemctl restart $ServiceName && sleep 2 && curl --fail --silent http://127.0.0.1:3847/health"
 }
 finally {
+    Stop-TransientSshAgent
     Remove-Item -LiteralPath $tempEnvPath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tempBootstrapPath -ErrorAction SilentlyContinue
 }
