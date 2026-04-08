@@ -95,6 +95,113 @@
       "id": "syncsonic",
       "name": "SyncSonic",
       "repoPath": "C:\\Users\\wimer\\Desktop\\SyncSonicPi",
+      "epicBranches": [
+        {
+          "id": "pipewire-transport-stability",
+          "branch": "epic/01-pipewire-transport-stability",
+          "workstreamPrefix": "pipewire-stability",
+          "description": "PipeWire delay-node transport and latency-application stability work",
+          "charter": {
+            "summary": "Improve the stability and predictability of SyncSonic's PipeWire delay-node transport and manual latency application without mixing in microphone automation or Wi-Fi feature work.",
+            "bullets": [
+              "Start from foundation/neutral-minimal and keep the shared Bluetooth-only manual-delay baseline intact unless the task is explicitly about shared platform behavior.",
+              "Treat stripped PipeWire modules and historical branches as reference material only; do not merge broad experimental stacks wholesale into this lane.",
+              "Reintroduce advanced PipeWire behavior only when it serves a concrete validation purpose and has a Pi-backed evidence path.",
+              "Keep work focused on deterministic delay application, route creation/teardown, control-plane semantics, and transport stability."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/WORKSTREAM_MODEL.md",
+                "purpose": "Shared SyncSonic branch, routing, and historical-source model for Maverick workstreams."
+              },
+              {
+                "path": "docs/maverick/epics/01-pipewire-transport-stability.md",
+                "purpose": "Durable lane scope, out-of-scope rules, and validation expectations for PipeWire stability work."
+              },
+              {
+                "path": "backend/FOUNDATION_REORG_NOTES.md",
+                "purpose": "Reference queue of stripped PipeWire modules reserved for deliberate Epic 1 review."
+              }
+            ]
+          }
+        },
+        {
+          "id": "startup-mic-auto-alignment",
+          "branch": "epic/02-startup-mic-auto-alignment",
+          "workstreamPrefix": "startup-mic",
+          "description": "Startup-only audible microphone calibration for end-to-end latency measurement",
+          "charter": {
+            "summary": "Add a startup-only microphone calibration flow that uses human-audible probe sounds to measure end-to-end latency and publish clean targets into the stable actuation path.",
+            "bullets": [
+              "Start from foundation/neutral-minimal and reintroduce only the startup calibration pieces needed for this lane.",
+              "Keep startup audible calibration separate from runtime ultrasonic correction and from Wi-Fi speaker work.",
+              "Publish calibration targets through the shared control-plane and actuation boundary instead of bypassing the transport layer directly.",
+              "Do not claim success without Raspberry Pi validation evidence."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/WORKSTREAM_MODEL.md",
+                "purpose": "Shared SyncSonic branch, routing, and historical-source model for Maverick workstreams."
+              },
+              {
+                "path": "docs/maverick/epics/02-startup-mic-auto-alignment.md",
+                "purpose": "Durable lane scope, out-of-scope rules, and validation expectations for startup microphone calibration."
+              }
+            ]
+          }
+        },
+        {
+          "id": "runtime-ultrasonic-auto-alignment",
+          "branch": "epic/03-runtime-ultrasonic-auto-alignment",
+          "workstreamPrefix": "runtime-ultrasonic",
+          "description": "Runtime ultrasonic measurement and correction while playback is active",
+          "charter": {
+            "summary": "Support runtime microphone-based correction using ultrasonic bursts while music is playing without disrupting the listening experience or bypassing the shared actuation boundary.",
+            "bullets": [
+              "Start from foundation/neutral-minimal and keep runtime ultrasonic work isolated from startup calibration.",
+              "Reintroduce only the runtime measurement, correction, and UX pieces that belong to playback-time alignment.",
+              "Do not mix Wi-Fi speaker feature work into this lane unless it is a narrow dependency that is documented explicitly.",
+              "Do not claim success without Raspberry Pi validation evidence during live playback conditions."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/WORKSTREAM_MODEL.md",
+                "purpose": "Shared SyncSonic branch, routing, and historical-source model for Maverick workstreams."
+              },
+              {
+                "path": "docs/maverick/epics/03-runtime-ultrasonic-auto-alignment.md",
+                "purpose": "Durable lane scope, out-of-scope rules, and validation expectations for runtime ultrasonic auto-alignment."
+              }
+            ]
+          }
+        },
+        {
+          "id": "wifi-speakers-manual-alignment",
+          "branch": "epic/04-wifi-speakers-manual-alignment",
+          "workstreamPrefix": "wifi-manual",
+          "description": "Wi-Fi speaker discovery, playback, and manual alignment before automation",
+          "charter": {
+            "summary": "Make Wi-Fi speaker support operational as its own lane by proving discovery, connection, playback, and manual alignment behavior before coupling it to microphone-based automation.",
+            "bullets": [
+              "Start from foundation/neutral-minimal and reintroduce only Wi-Fi-specific code for discovery, connection, playback, and manual latency handling.",
+              "Treat the fact that Wi-Fi playback has worked historically as useful context, not as proof that Bluetooth synchronization is solved.",
+              "Do not blend Wi-Fi speaker work with startup or runtime microphone automation until manual alignment behavior is understood and validated.",
+              "Do not claim success without Raspberry Pi validation evidence."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/WORKSTREAM_MODEL.md",
+                "purpose": "Shared SyncSonic branch, routing, and historical-source model for Maverick workstreams."
+              },
+              {
+                "path": "docs/maverick/epics/04-wifi-speakers-manual-alignment.md",
+                "purpose": "Durable lane scope, out-of-scope rules, and validation expectations for Wi-Fi speaker work."
+              }
+            ]
+          }
+        }
+      ],
+      "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 3,
       "remoteHosts": [
         {
@@ -105,7 +212,9 @@
         }
       ],
       "metadata": {
-        "description": "Raspberry Pi BLE audio hub with Expo frontend and hardware validation via Pi SSH"
+        "description": "Raspberry Pi BLE audio hub with Expo frontend, epic-lane worktrees, and hardware validation via Pi SSH",
+        "foundation_branch": "foundation/neutral-minimal",
+        "workstream_model_doc": "docs/maverick/WORKSTREAM_MODEL.md"
       }
     },
     {
@@ -151,6 +260,30 @@
         "projectId": "syncsonic",
         "channelId": "1490171093615513742",
         "purpose": "workstreams"
+      },
+      {
+        "projectId": "syncsonic",
+        "channelId": "1491257893012635648",
+        "purpose": "workstreams",
+        "epicId": "pipewire-transport-stability"
+      },
+      {
+        "projectId": "syncsonic",
+        "channelId": "1491258451026907426",
+        "purpose": "workstreams",
+        "epicId": "startup-mic-auto-alignment"
+      },
+      {
+        "projectId": "syncsonic",
+        "channelId": "1491258814475800637",
+        "purpose": "workstreams",
+        "epicId": "runtime-ultrasonic-auto-alignment"
+      },
+      {
+        "projectId": "syncsonic",
+        "channelId": "1491259320686346260",
+        "purpose": "workstreams",
+        "epicId": "wifi-speakers-manual-alignment"
       },
       {
         "projectId": "work",
