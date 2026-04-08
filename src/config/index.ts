@@ -18,4 +18,5 @@ export {
   type AssistantSmsConfig,
   type AssistantCalendarConfig,
   type AssistantReminderConfig,
+  type BriefConfig,
 } from "./schema.js";

@@ -42,6 +42,16 @@
       "name": "Maverick",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": false,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": false,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "metadata": {
         "description": "Personal assistant and control-plane home project"
       }
@@ -51,6 +61,16 @@
       "name": "Netwise",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Sentry\\netwise",
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": false,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": false,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "metadata": {
         "description": "First onboarded project for orchestrator validation"
       }
@@ -60,6 +80,16 @@
       "name": "SyncSonic",
       "repoPath": "C:\\Users\\wimer\\Desktop\\SyncSonicPi",
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": false,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": false,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "remoteHosts": [
         {
           "host": "10.0.0.89",
@@ -103,6 +133,13 @@
     "enabled": true,
     "port": 3847,
     "host": "127.0.0.1"
+  },
+  "brief": {
+    "enabled": false,
+    "schedule": "0 8 * * *",
+    "discordChannelId": null,
+    "storagePath": "./data/briefs",
+    "model": "sonnet"
   },
   "assistant": {
     "enabled": true,

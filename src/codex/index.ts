@@ -12,12 +12,14 @@ export type {
 export { CodexCliAdapter } from "./cli-adapter.js";
 export { CodexAppServerAdapter } from "./app-server-adapter.js";
 export { MockAdapter } from "./mock-adapter.js";
+export { ClaudeCliAdapter } from "../claude/claude-adapter.js";
 
 import type { ExecutionBackend } from "../config/schema.js";
 import type { ExecutionBackendAdapter } from "./types.js";
 import { CodexAppServerAdapter } from "./app-server-adapter.js";
 import { CodexCliAdapter } from "./cli-adapter.js";
 import { MockAdapter } from "./mock-adapter.js";
+import { ClaudeCliAdapter } from "../claude/claude-adapter.js";
 
 /**
  * Factory: create the right adapter based on config.
@@ -40,6 +42,13 @@ export function createAdapter(config: ExecutionBackend): ExecutionBackendAdapter
       return new CodexCliAdapter({
         model: config.model,
         approvalMode: config.approvalMode,
+      });
+    case "claude-code":
+      return new ClaudeCliAdapter({
+        model: config.model,
+        claudePath: config.claudePath,
+        permissionMode: config.permissionMode,
+        maxTurns: config.maxTurns,
       });
     case "mock":
       return new MockAdapter({ responseDelay: config.responseDelay });

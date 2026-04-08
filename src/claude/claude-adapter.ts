@@ -1,0 +1,437 @@
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { createLogger } from "../logger.js";
+import type {
+  ApprovalRequest,
+  ExecutionBackendAdapter,
+  ExecutionThread,
+  ReviewRequest,
+  ReviewResult,
+  SteerRequest,
+  TurnRequest,
+  TurnResult,
+} from "../codex/types.js";
+import type { ClaudePermissionMode } from "./types.js";
+
+const log = createLogger("claude-cli");
+
+type ClaudeCliOptions = {
+  model?: string;
+  claudePath?: string;
+  permissionMode?: ClaudePermissionMode;
+  maxTurns?: number;
+};
+
+export interface ParsedClaudeStreamEvent {
+  kind: "delta" | "final" | "error" | "unknown";
+  text?: string;
+  message?: string;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function extractText(value: unknown): string[] {
+  if (typeof value === "string") {
+    return [value];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => extractText(entry));
+  }
+
+  if (!isObject(value)) {
+    return [];
+  }
+
+  const directText = typeof value.text === "string" ? [value.text] : [];
+  return [
+    ...directText,
+    ...extractText(value.delta),
+    ...extractText(value.message),
+    ...extractText(value.result),
+    ...extractText(value.content),
+  ];
+}
+
+export function parseClaudeStreamLine(line: string): ParsedClaudeStreamEvent {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return { kind: "unknown" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { kind: "delta", text: trimmed };
+  }
+
+  if (!isObject(parsed)) {
+    return { kind: "unknown" };
+  }
+
+  const type = typeof parsed.type === "string" ? parsed.type : "";
+  const text = extractText(parsed).join("");
+
+  if (type === "error") {
+    const message =
+      typeof parsed.message === "string"
+        ? parsed.message
+        : isObject(parsed.error) && typeof parsed.error.message === "string"
+          ? parsed.error.message
+          : "Claude CLI reported an error.";
+    return { kind: "error", message };
+  }
+
+  if (type.includes("delta")) {
+    return { kind: "delta", text };
+  }
+
+  if (type.includes("result") || type.includes("final") || type === "message" || type === "message_stop") {
+    return { kind: "final", text };
+  }
+
+  return text ? { kind: "delta", text } : { kind: "unknown" };
+}
+
+function summarizeOutput(output: string): string {
+  const normalized = output.trim();
+  if (normalized.length <= 500) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 497)}...`;
+}
+
+function normalizeSeverity(value: unknown): ReviewResult["severity"] {
+  return value === "clean" || value === "minor" || value === "major" || value === "critical"
+    ? value
+    : "minor";
+}
+
+export function parseStructuredReviewOutput(output: string): ReviewResult {
+  const trimmed = output.trim();
+  const codeFenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]+?)\s*```/i);
+  const candidate = codeFenceMatch ? codeFenceMatch[1] : trimmed;
+
+  try {
+    const parsed = JSON.parse(candidate) as Record<string, unknown>;
+    const suggestions = Array.isArray(parsed.suggestions)
+      ? parsed.suggestions.filter((value): value is string => typeof value === "string")
+      : [];
+    return {
+      severity: normalizeSeverity(parsed.severity),
+      findings: typeof parsed.findings === "string" ? parsed.findings : trimmed,
+      suggestions,
+    };
+  } catch {
+    return {
+      severity: "minor",
+      findings: trimmed,
+      suggestions: [],
+    };
+  }
+}
+
+async function withSystemPromptFile(systemPrompt: string | undefined, run: (path?: string) => Promise<TurnResult>) {
+  if (!systemPrompt) {
+    return run();
+  }
+
+  const tempDir = await mkdtemp(join(tmpdir(), "maverick-claude-"));
+  const promptPath = join(tempDir, "system-prompt.txt");
+  await writeFile(promptPath, systemPrompt, "utf8");
+
+  try {
+    return await run(promptPath);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+export class ClaudeCliAdapter implements ExecutionBackendAdapter {
+  readonly name = "claude-code";
+
+  private readonly options: Required<Pick<ClaudeCliOptions, "model" | "claudePath" | "permissionMode" | "maxTurns">>;
+  private readonly outputCallbacks: Array<(threadId: string, content: string, isPartial: boolean) => void> = [];
+  private readonly approvalCallbacks: Array<(threadId: string, request: ApprovalRequest) => void> = [];
+  private readonly threads = new Map<string, ExecutionThread>();
+  private readonly activeProcesses = new Map<string, ReturnType<typeof spawn>>();
+
+  constructor(options: ClaudeCliOptions = {}) {
+    this.options = {
+      model: options.model ?? "sonnet",
+      claudePath: options.claudePath ?? process.env.CLAUDE_PATH ?? "claude",
+      permissionMode: options.permissionMode ?? "plan",
+      maxTurns: options.maxTurns ?? 10,
+    };
+  }
+
+  async initialize(): Promise<void> {
+    await this.exec([this.options.claudePath, "--version"]);
+    log.info("Claude CLI adapter initialized");
+  }
+
+  async shutdown(): Promise<void> {
+    for (const process of this.activeProcesses.values()) {
+      process.kill("SIGTERM");
+    }
+    this.activeProcesses.clear();
+  }
+
+  async createThread(cwd: string): Promise<ExecutionThread> {
+    const thread: ExecutionThread = {
+      id: randomUUID(),
+      cwd,
+      status: "idle",
+    };
+    this.threads.set(thread.id, thread);
+    return thread;
+  }
+
+  async resumeThread(threadId: string): Promise<ExecutionThread | null> {
+    return this.threads.get(threadId) ?? null;
+  }
+
+  async startTurn(request: TurnRequest): Promise<TurnResult> {
+    const thread = this.threads.get(request.threadId);
+    if (!thread) {
+      throw new Error(`Unknown Claude thread: ${request.threadId}`);
+    }
+
+    thread.status = "active";
+
+    const permissionMode = request.permissionMode ?? this.options.permissionMode;
+    const maxTurns = request.maxTurns ?? this.options.maxTurns;
+    const model = request.model ?? this.options.model;
+
+    try {
+      const result = await withSystemPromptFile(request.systemPrompt, async (systemPromptPath) => {
+        return this.runClaudeTurn(request.threadId, request.cwd, request.instruction, {
+          addDirs: request.addDirs ?? [],
+          model,
+          maxTurns,
+          permissionMode,
+          systemPromptPath,
+        });
+      });
+
+      thread.status = "idle";
+      return result;
+    } catch (error) {
+      thread.status = "idle";
+      const message = error instanceof Error ? error.message : String(error);
+      log.error({ err: error, threadId: request.threadId }, "Claude turn failed");
+      return {
+        status: "failed",
+        output: message,
+        summary: message,
+      };
+    }
+  }
+
+  async steerTurn(_request: SteerRequest): Promise<void> {
+    log.warn("Claude CLI headless mode does not support mid-turn steering.");
+  }
+
+  async interruptTurn(threadId: string): Promise<void> {
+    const process = this.activeProcesses.get(threadId);
+    if (process) {
+      process.kill("SIGTERM");
+      this.activeProcesses.delete(threadId);
+    }
+  }
+
+  async resolveApproval(_threadId: string, _approvalId: string, _approved: boolean): Promise<void> {
+    log.warn("Claude CLI headless mode is configured for non-interactive tasks only.");
+  }
+
+  async startReview(request: ReviewRequest): Promise<ReviewResult> {
+    const reviewPrompt =
+      request.instruction ??
+      [
+        "Review the supplied implementation for correctness, risk, and missing tests.",
+        request.context ? request.context : null,
+        request.target ? `Target: ${request.target}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+    const result = await this.startTurn({
+      threadId: request.threadId,
+      cwd: request.cwd,
+      instruction: reviewPrompt,
+      model: request.model,
+      systemPrompt:
+        request.systemPrompt ??
+        "You are reviewing another agent's work. Be concrete about bugs, regressions, and missing validation.",
+      addDirs: request.addDirs,
+      maxTurns: request.maxTurns ?? 3,
+      permissionMode: request.permissionMode ?? "plan",
+    });
+
+    if (result.status !== "completed") {
+      return {
+        findings: result.output,
+        severity: "major",
+        suggestions: [],
+      };
+    }
+
+    return parseStructuredReviewOutput(result.output);
+  }
+
+  onOutput(callback: (threadId: string, content: string, isPartial: boolean) => void): void {
+    this.outputCallbacks.push(callback);
+  }
+
+  onApprovalRequest(callback: (threadId: string, request: ApprovalRequest) => void): void {
+    this.approvalCallbacks.push(callback);
+  }
+
+  private async runClaudeTurn(
+    threadId: string,
+    cwd: string,
+    instruction: string,
+    options: {
+      addDirs: string[];
+      model: string;
+      maxTurns: number;
+      permissionMode: string;
+      systemPromptPath?: string;
+    }
+  ): Promise<TurnResult> {
+    return new Promise((resolve, reject) => {
+      const args = [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--cwd",
+        cwd,
+        "--model",
+        options.model,
+        "--max-turns",
+        String(options.maxTurns),
+      ];
+
+      if (options.permissionMode !== "default") {
+        args.push("--permission-mode", options.permissionMode);
+      }
+
+      if (options.systemPromptPath) {
+        args.push("--system-prompt-file", options.systemPromptPath);
+      }
+
+      for (const addDir of options.addDirs) {
+        args.push("--add-dir", addDir);
+      }
+
+      args.push(instruction);
+
+      const child = spawn(this.options.claudePath, args, {
+        cwd,
+        env: { ...process.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      this.activeProcesses.set(threadId, child);
+
+      const stdout = createInterface({ input: child.stdout });
+      const stderr = createInterface({ input: child.stderr });
+      const partialOutput: string[] = [];
+      let finalOutput = "";
+      const stderrLines: string[] = [];
+
+      stdout.on("line", (line) => {
+        const event = parseClaudeStreamLine(line);
+        if (event.kind === "error") {
+          stderrLines.push(event.message ?? "Claude CLI reported an error.");
+          return;
+        }
+
+        if (event.kind === "delta" && event.text) {
+          partialOutput.push(event.text);
+          for (const callback of this.outputCallbacks) {
+            callback(threadId, event.text, true);
+          }
+          return;
+        }
+
+        if (event.kind === "final" && event.text) {
+          finalOutput = event.text;
+        }
+      });
+
+      stderr.on("line", (line) => {
+        stderrLines.push(line);
+      });
+
+      child.on("close", (code) => {
+        this.activeProcesses.delete(threadId);
+        stdout.close();
+        stderr.close();
+
+        const output = (finalOutput || partialOutput.join("")).trim();
+        if (code === 0) {
+          for (const callback of this.outputCallbacks) {
+            callback(threadId, output, false);
+          }
+
+          resolve({
+            backendTurnId: randomUUID(),
+            status: "completed",
+            output,
+            summary: summarizeOutput(output),
+          });
+          return;
+        }
+
+        reject(new Error(`Claude exited with code ${code}: ${(stderrLines.join("\n") || output).trim()}`));
+      });
+
+      child.on("error", (error) => {
+        this.activeProcesses.delete(threadId);
+        stdout.close();
+        stderr.close();
+        reject(error);
+      });
+    });
+  }
+
+  private async exec(args: string[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(args[0], args.slice(1), {
+        cwd: process.cwd(),
+        env: { ...process.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stdout = "";
+      let stderr = "";
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve(stdout.trim());
+          return;
+        }
+
+        reject(new Error(stderr.trim() || stdout.trim() || `Command exited with ${code}`));
+      });
+
+      child.on("error", reject);
+    });
+  }
+}

@@ -73,6 +73,13 @@ export const ExecutionBackendSchema = z.discriminatedUnion("type", [
     approvalMode: z.enum(["auto-edit", "full-auto", "suggest"]).default("auto-edit"),
   }),
   z.object({
+    type: z.literal("claude-code"),
+    model: z.string().default("sonnet"),
+    claudePath: z.string().optional(),
+    permissionMode: z.enum(["plan", "auto", "default"]).default("plan"),
+    maxTurns: z.number().int().min(1).max(50).default(10),
+  }),
+  z.object({
     type: z.literal("mock"),
     responseDelay: z.number().default(1000),
   }),
@@ -100,6 +107,16 @@ export const ProjectSchema = z.object({
   skillsPath: z.string().optional().describe("Custom skills directory; defaults to <repoPath>/.agents/skills"),
   remoteHosts: z.array(RemoteHostSchema).optional().describe("Trusted SSH targets for project-scoped remote validation"),
   maxConcurrentWorkstreams: z.number().min(1).max(20).default(3),
+  claudeReview: z.object({
+    enabled: z.boolean().default(false),
+    autoAfterTurn: z.boolean().default(false),
+    model: z.string().optional(),
+  }).optional(),
+  claudePlanning: z.object({
+    enabled: z.boolean().default(false),
+    autoOnPlanningState: z.boolean().default(false),
+    model: z.string().optional(),
+  }).optional(),
   metadata: z.record(z.string()).optional().describe("Arbitrary key-value pairs for project-specific config"),
 });
 
@@ -169,6 +186,14 @@ export const AssistantConfigSchema = z.object({
   }),
 });
 
+export const BriefConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  schedule: z.string().optional().describe("Five-field cron expression interpreted in the assistant time zone"),
+  discordChannelId: z.string().nullable().optional(),
+  storagePath: z.string().default("./data/briefs"),
+  model: z.string().optional(),
+});
+
 // --- Top-level config ---
 
 export const OrchestratorConfigSchema = z.object({
@@ -236,6 +261,12 @@ export const OrchestratorConfigSchema = z.object({
       requireTimeForReminders: false,
     },
   }),
+
+  brief: BriefConfigSchema.default({
+    enabled: false,
+    discordChannelId: null,
+    storagePath: "./data/briefs",
+  }),
 });
 
 // Type exports
@@ -253,3 +284,4 @@ export type AssistantDiscordConfig = z.infer<typeof AssistantDiscordConfigSchema
 export type AssistantSmsConfig = z.infer<typeof AssistantSmsConfigSchema>;
 export type AssistantCalendarConfig = z.infer<typeof AssistantCalendarConfigSchema>;
 export type AssistantReminderConfig = z.infer<typeof AssistantReminderConfigSchema>;
+export type BriefConfig = z.infer<typeof BriefConfigSchema>;

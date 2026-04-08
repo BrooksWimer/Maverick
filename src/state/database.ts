@@ -29,6 +29,15 @@ function resolveSchemaPath(): string {
   throw new Error(`Could not find database schema. Checked: ${candidates.join(", ")}`);
 }
 
+function ensureColumn(database: SqliteDatabase, tableName: string, columnName: string, definition: string): void {
+  const columns = database.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+
+  database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+}
+
 export function getDatabase(): SqliteDatabase {
   if (!db) {
     throw new Error("Database not initialized. Call initDatabase() first.");
@@ -53,6 +62,7 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
   const schemaPath = resolveSchemaPath();
   const schema = readFileSync(schemaPath, "utf-8");
   db.exec(schema);
+  ensureColumn(db, "workstreams", "plan", "TEXT");
 
   log.info({ schemaPath }, "Database schema applied");
   return db;

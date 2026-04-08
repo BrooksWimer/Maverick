@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS workstreams (
   waiting_on_approval INTEGER NOT NULL DEFAULT 0,
   pending_decision    TEXT,            -- JSON description of what decision is needed
   summary             TEXT,            -- latest summary of progress
+  plan                TEXT,            -- latest stored Claude implementation plan
 
   -- Timestamps
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),

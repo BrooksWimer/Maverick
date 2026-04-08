@@ -32,6 +32,7 @@ export interface WorkstreamRow {
   waiting_on_approval: number;
   pending_decision: string | null;
   summary: string | null;
+  plan: string | null;
   created_at: string;
   updated_at: string;
   last_activity_at: string;
@@ -215,7 +216,7 @@ export const workstreams = {
   update(id: string, fields: Partial<Pick<WorkstreamRow,
     "state" | "current_goal" | "cwd" | "branch" | "codex_thread_id" |
     "discord_channel_id" | "discord_thread_id" | "waiting_on_approval" |
-    "pending_decision" | "summary" | "completed_at"
+    "pending_decision" | "summary" | "plan" | "completed_at"
   >>): WorkstreamRow | undefined {
     const db = getDatabase();
     const sets: string[] = ["updated_at = datetime('now')", "last_activity_at = datetime('now')"];
