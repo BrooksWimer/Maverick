@@ -1,0 +1,223 @@
+{
+  "version": 1,
+  "defaults": {
+    "workflow": {
+      "name": "standard",
+      "states": ["intake", "planning", "implementation", "verification", "review", "done", "blocked"],
+      "initialState": "intake",
+      "terminalStates": ["done"],
+      "transitions": [
+        { "from": "intake", "to": "planning", "trigger": "scope-defined", "autoAdvance": true },
+        { "from": "intake", "to": "blocked", "trigger": "missing-info", "autoAdvance": false },
+        { "from": "blocked", "to": "intake", "trigger": "info-supplied", "autoAdvance": false },
+        { "from": "planning", "to": "implementation", "trigger": "plan-approved", "autoAdvance": false },
+        { "from": "implementation", "to": "verification", "trigger": "implementation-complete", "autoAdvance": true },
+        { "from": "verification", "to": "review", "trigger": "verification-passed", "autoAdvance": true },
+        { "from": "verification", "to": "implementation", "trigger": "verification-failed", "autoAdvance": true },
+        { "from": "review", "to": "done", "trigger": "review-approved", "autoAdvance": false },
+        { "from": "review", "to": "implementation", "trigger": "changes-requested", "autoAdvance": true }
+      ]
+    },
+    "executionBackend": {
+      "type": "codex-app-server",
+      "transport": "stdio",
+      "sandboxMode": "workspace-write",
+      "approvalPolicy": "on-request",
+      "persistExtendedHistory": true,
+      "experimentalRawEvents": false
+    },
+    "escalationRules": [
+      { "pattern": "rm -rf", "tier": "human-decision", "description": "Destructive filesystem operations" },
+      { "pattern": "git push --force", "tier": "human-decision", "description": "Force pushes" },
+      { "pattern": "DROP TABLE", "tier": "human-decision", "description": "Destructive database operations" },
+      { "pattern": "npm install", "tier": "approval-gated", "description": "Installing dependencies" },
+      { "pattern": "git checkout", "tier": "auto", "description": "Branch operations" },
+      { "pattern": "npm test", "tier": "auto", "description": "Running tests" }
+    ],
+    "maxConcurrentWorkstreams": 6
+  },
+  "projects": [
+    {
+      "id": "maverick",
+      "name": "Maverick",
+      "defaultWorktreeBaseBranch": "main",
+      "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
+      "metadata": {
+        "description": "Personal assistant and control-plane home project with short-lived self-update workstreams routed through maverick-updates"
+      }
+    },
+    {
+      "id": "netwise",
+      "name": "Netwise",
+      "epicBranches": [
+        {
+          "id": "laptop-wifi-scanner",
+          "branch": "codex/laptop-wifi-scanner-epic",
+          "workstreamPrefix": "laptop-wifi-scanner",
+          "description": "Go agent and scanner research work for laptop-based Wi-Fi discovery and labeling"
+        },
+        {
+          "id": "mobile-wifi-scanner",
+          "branch": "codex/mobile-wifi-scanner-epic",
+          "workstreamPrefix": "mobile-wifi-scanner",
+          "description": "Expo and iOS Wi-Fi scanning work for the Netwise mobile client"
+        },
+        {
+          "id": "router-admin-ingestion",
+          "branch": "codex/router-admin-ingestion-epic",
+          "workstreamPrefix": "router-admin-ingestion",
+          "description": "Authenticated router admin ingestion and router-only inventory extraction",
+          "charter": {
+            "summary": "Router admin ingestion is a real Netwise product capability for authenticated collection of router-native network and device data so users can access their own data and receive tailored insights.",
+            "bullets": [
+              "Let users enter router admin credentials in the app, authenticate against router admin UIs, extract router-native network and device data, and turn that into free user-visible value plus tailored insights.",
+              "Use Xfinity at http://10.0.0.1 as the first live target while keeping the design adaptable to other router and network-information UIs.",
+              "Do not treat this as a one-off experiment or hardcode the solution around one vendor's markup, navigation flow, or naming.",
+              "Keep durable implementation details, discovery notes, and router-specific findings in repo-owned product docs instead of Maverick dispatch text."
+            ],
+            "docs": [
+              {
+                "path": "agent/docs/WIFI_STRATEGY_CATALOG.md",
+                "purpose": "Related Netwise agent strategy notes and a durable repo-owned starting point for adjacent network inventory findings."
+              }
+            ]
+          }
+        }
+      ],
+      "requireEpicForWorktree": true,
+      "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
+      "metadata": {
+        "description": "First onboarded project for orchestrator validation"
+      }
+    },
+    {
+      "id": "syncsonic",
+      "name": "SyncSonic",
+      "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
+      "remoteHosts": [
+        {
+          "host": "10.0.0.89",
+          "user": "syncsonic",
+          "remotePath": "/home/syncsonic/SyncSonicPi",
+          "autoApproveReadOnlySsh": true
+        }
+      ],
+      "metadata": {
+        "description": "Raspberry Pi BLE audio hub with Expo frontend, epic-lane worktrees, and hardware validation via Pi SSH",
+        "foundation_branch": "foundation/neutral-minimal",
+        "workstream_model_doc": "docs/maverick/WORKSTREAM_MODEL.md"
+      }
+    }
+  ],
+  "discord": {
+    "enabled": true,
+    "routes": [
+      {
+        "projectId": "maverick",
+        "channelId": "1491285608524681216",
+        "purpose": "workstreams"
+      },
+      {
+        "projectId": "netwise",
+        "channelId": "1490049872089452584",
+        "purpose": "workstreams"
+      },
+      {
+        "projectId": "netwise",
+        "channelId": "1490049953211482455",
+        "purpose": "workstreams"
+      },
+      {
+        "projectId": "netwise",
+        "channelId": "1490449866642690220",
+        "purpose": "workstreams",
+        "epicId": "router-admin-ingestion"
+      },
+      {
+        "projectId": "syncsonic",
+        "channelId": "1490171093615513742",
+        "purpose": "workstreams"
+      }
+    ],
+    "defaultNotificationChannelId": null
+  },
+  "http": {
+    "enabled": true,
+    "port": 3847,
+    "host": "127.0.0.1"
+  },
+  "brief": {
+    "enabled": true,
+    "discordChannelId": null,
+    "model": "sonnet"
+  },
+  "assistant": {
+    "enabled": true,
+    "agentProjectId": "maverick",
+    "timeZone": "America/New_York",
+    "allowedPhoneNumbers": [],
+    "discord": {
+      "enabled": true,
+      "channelIds": ["1490188914861019197"],
+      "allowedUserIds": [],
+      "replyInThread": true
+    },
+    "sms": {
+      "provider": "disabled",
+      "replyToInbound": true,
+      "requireSignatureValidation": false
+    },
+    "calendar": {
+      "provider": "google",
+      "calendarId": "primary",
+      "defaultEventDurationMinutes": 30
+    },
+    "reminders": {
+      "enabled": true,
+      "pollIntervalMs": 60000,
+      "defaultChannel": "discord",
+      "requireTimeForReminders": false
+    }
+  },
+  "dailyBrief": {
+    "enabled": true,
+    "timeZone": "America/New_York",
+    "deliveryHour": 21,
+    "deliveryMinute": 0,
+    "pollIntervalMs": 300000,
+    "channelId": "1490188914861019197",
+    "maxProjectsInDigest": 10,
+    "maxNotesInDigest": 8,
+    "maxRemindersInDigest": 5
+  }
+}

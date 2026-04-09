@@ -40,21 +40,20 @@ Before the first bootstrap:
 
 1. Create a private Git remote for Maverick.
 2. Add the remote to the local Maverick repo.
-3. Push the clean Maverick `main` baseline.
-4. Push a dedicated Maverick `server` branch for the Linux host.
-5. Push the Netwise epic branches Maverick depends on:
+3. Push the clean Maverick `main` branch.
+4. Push the Netwise epic branches Maverick depends on:
    - `codex/laptop-wifi-scanner-epic`
    - `codex/mobile-wifi-scanner-epic`
    - `codex/router-admin-ingestion-epic`
-6. Push SyncSonic `pi-stable-baseline-2026-04-05`.
+5. Push SyncSonic `pi-stable-baseline-2026-04-05`.
 
-`main` stays clean and is not used as the Linux deploy branch. The Linux host pulls Maverick from `server` by default.
+The Linux host now deploys Maverick directly from `main`.
 
 ## First-Time Bootstrap From Windows
 
 Use an SSH host alias such as `maverick-server` in `C:\Users\<you>\.ssh\config`.
 
-The bootstrap and deploy scripts use Git for Windows' user-space SSH tools when they are available. They forward your local GitHub SSH key from Windows into the Linux session for `git clone` and `git pull`, so Maverick can stay private without storing a separate GitHub deploy key on the Linux host. By default the forwarded GitHub key path is `C:\Users\<you>\.ssh\id_ed25519`.
+The bootstrap script now installs a GitHub SSH key for the Linux `maverick` service user so the server can pull from GitHub directly on its own. By default it copies `C:\Users\<you>\.ssh\id_ed25519` and `C:\Users\<you>\.ssh\id_ed25519.pub`. If you prefer a dedicated deploy key, pass `-GitHubPrivateKeyPath` and `-GitHubPublicKeyPath` explicitly.
 
 Then run:
 
@@ -82,7 +81,7 @@ If you want to bootstrap without copying the SQLite state yet:
 
 ## Ongoing Deploys From Windows
 
-Deploy the current `server` branch to Linux with:
+Deploy the current `main` branch to Linux with:
 
 ```powershell
 .\scripts\deploy-linux.ps1 -SshHost maverick-server
@@ -92,19 +91,13 @@ By default the deploy script:
 
 - runs local `npm test`
 - runs local `npm run build`
-- pushes `server`
+- pushes `main`
 - SSHes into Linux
 - updates the Linux clone
 - runs `npm ci --include=dev`
 - rebuilds Maverick
 - restarts `systemd`
 - checks `http://127.0.0.1:3847/health`
-
-If your GitHub SSH key lives somewhere other than `C:\Users\<you>\.ssh\id_ed25519`, pass it explicitly:
-
-```powershell
-.\scripts\deploy-linux.ps1 -SshHost maverick-server -ForwardedGitHubKeyPath C:\Users\<you>\.ssh\your-github-key
-```
 
 ## Dogfooding Maverick Self-Updates
 

@@ -9,7 +9,7 @@ param(
 
     [string]$SyncSonicRepoUrl,
 
-    [string]$MaverickBranch = "server",
+    [string]$MaverickBranch = "main",
 
     [string]$NetwiseBranch = "master",
 
@@ -23,7 +23,9 @@ param(
 
     [string]$ServiceName = "maverick",
 
-    [string]$ForwardedGitHubKeyPath,
+    [string]$GitHubPrivateKeyPath,
+
+    [string]$GitHubPublicKeyPath,
 
     [switch]$SkipDatabaseSync
 )
@@ -35,8 +37,11 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $LocalEnvPath) {
     $LocalEnvPath = Join-Path $repoRoot ".env"
 }
-if (-not $ForwardedGitHubKeyPath) {
-    $ForwardedGitHubKeyPath = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
+if (-not $GitHubPrivateKeyPath) {
+    $GitHubPrivateKeyPath = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
+}
+if (-not $GitHubPublicKeyPath) {
+    $GitHubPublicKeyPath = "${GitHubPrivateKeyPath}.pub"
 }
 
 function Invoke-NativeCommand {
@@ -57,7 +62,7 @@ function Invoke-NativeCommand {
 function Get-SshToolPath {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("ssh", "scp", "ssh-agent", "ssh-add")]
+        [ValidateSet("ssh", "scp")]
         [string]$Tool
     )
 
@@ -67,59 +72,6 @@ function Get-SshToolPath {
     }
 
     return $Tool
-}
-
-function Ensure-ForwardedGitHubKey {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$KeyPath
-    )
-
-    if (-not (Test-Path $KeyPath)) {
-        throw "GitHub SSH key not found: $KeyPath"
-    }
-
-    $sshAddPath = Get-SshToolPath -Tool "ssh-add"
-    $hasAgent = $false
-
-    if ($env:SSH_AUTH_SOCK) {
-        & $sshAddPath "-l" *> $null
-        $hasAgent = ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1)
-    }
-
-    if (-not $hasAgent) {
-        $sshAgentPath = Get-SshToolPath -Tool "ssh-agent"
-        $agentOutput = & $sshAgentPath "-s"
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to start an SSH agent for GitHub auth forwarding."
-        }
-
-        foreach ($line in $agentOutput) {
-            if ($line -match '^SSH_AUTH_SOCK=([^;]+);') {
-                $env:SSH_AUTH_SOCK = $matches[1]
-            }
-            elseif ($line -match '^SSH_AGENT_PID=([0-9]+);') {
-                $env:SSH_AGENT_PID = $matches[1]
-                $script:StartedSshAgentPid = [int]$matches[1]
-            }
-        }
-    }
-
-    Invoke-NativeCommand -FilePath $sshAddPath -Arguments @($KeyPath)
-}
-
-function Stop-TransientSshAgent {
-    if ($script:StartedSshAgentPid) {
-        try {
-            Stop-Process -Id $script:StartedSshAgentPid -Force -ErrorAction Stop
-        }
-        catch {
-        }
-
-        Remove-Item Env:SSH_AUTH_SOCK -ErrorAction SilentlyContinue
-        Remove-Item Env:SSH_AGENT_PID -ErrorAction SilentlyContinue
-        $script:StartedSshAgentPid = $null
-    }
 }
 
 function Invoke-GitCapture {
@@ -171,7 +123,7 @@ function Invoke-SshCommand {
         [string]$Command
     )
 
-    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "ssh") -Arguments @("-A", $SshHost, "bash", "-lc", $Command)
+    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "ssh") -Arguments @($SshHost, "bash", "-lc", $Command)
 }
 
 function Copy-ToRemote {
@@ -283,22 +235,38 @@ $envValues.Remove("CODEX_JS_PATH")
 
 $tempEnvPath = [System.IO.Path]::GetTempFileName()
 $tempBootstrapPath = [System.IO.Path]::GetTempFileName()
+$tempGitHubPrivateKeyPath = [System.IO.Path]::GetTempFileName()
+$tempGitHubPublicKeyPath = [System.IO.Path]::GetTempFileName()
 $bootstrapRemotePath = "/tmp/maverick-bootstrap.sh"
 $envRemotePath = "/tmp/maverick.env"
+$githubPrivateKeyRemotePath = "/tmp/maverick-github-key"
+$githubPublicKeyRemotePath = "/tmp/maverick-github-key.pub"
 
 try {
-    Ensure-ForwardedGitHubKey -KeyPath $ForwardedGitHubKeyPath
+    if (-not (Test-Path $GitHubPrivateKeyPath)) {
+        throw "GitHub SSH private key not found: $GitHubPrivateKeyPath"
+    }
+    if (-not (Test-Path $GitHubPublicKeyPath)) {
+        throw "GitHub SSH public key not found: $GitHubPublicKeyPath"
+    }
+
     Write-DotEnvFile -Path $tempEnvPath -Values $envValues
     Write-LfTextFile -Path $tempBootstrapPath -Content (Get-Content -Path (Join-Path $repoRoot "scripts\bootstrap-linux-server.sh") -Raw)
+    Copy-Item -LiteralPath $GitHubPrivateKeyPath -Destination $tempGitHubPrivateKeyPath -Force
+    Copy-Item -LiteralPath $GitHubPublicKeyPath -Destination $tempGitHubPublicKeyPath -Force
 
     Copy-ToRemote -LocalPath $tempBootstrapPath -RemotePath $bootstrapRemotePath
     Copy-ToRemote -LocalPath $tempEnvPath -RemotePath $envRemotePath
+    Copy-ToRemote -LocalPath $tempGitHubPrivateKeyPath -RemotePath $githubPrivateKeyRemotePath
+    Copy-ToRemote -LocalPath $tempGitHubPublicKeyPath -RemotePath $githubPublicKeyRemotePath
 
     $remoteBootstrap = @(
         "set -euo pipefail",
         "chmod +x $bootstrapRemotePath",
-        "sudo --preserve-env=SSH_AUTH_SOCK bash $bootstrapRemotePath --maverick-repo $(Quote-BashString $MaverickRepoUrl) --netwise-repo $(Quote-BashString $NetwiseRepoUrl) --syncsonic-repo $(Quote-BashString $SyncSonicRepoUrl) --maverick-branch $(Quote-BashString $MaverickBranch) --netwise-branch $(Quote-BashString $NetwiseBranch) --syncsonic-branch $(Quote-BashString $SyncSonicBranch) --app-dir $(Quote-BashString $RemoteAppDir) --state-dir $(Quote-BashString $RemoteStateDir) --env-file $(Quote-BashString $envRemotePath) --service-name $(Quote-BashString $ServiceName)",
-        "rm -f $bootstrapRemotePath $envRemotePath"
+        "chmod 600 $githubPrivateKeyRemotePath",
+        "chmod 644 $githubPublicKeyRemotePath",
+        "sudo bash $bootstrapRemotePath --maverick-repo $(Quote-BashString $MaverickRepoUrl) --netwise-repo $(Quote-BashString $NetwiseRepoUrl) --syncsonic-repo $(Quote-BashString $SyncSonicRepoUrl) --maverick-branch $(Quote-BashString $MaverickBranch) --netwise-branch $(Quote-BashString $NetwiseBranch) --syncsonic-branch $(Quote-BashString $SyncSonicBranch) --app-dir $(Quote-BashString $RemoteAppDir) --state-dir $(Quote-BashString $RemoteStateDir) --env-file $(Quote-BashString $envRemotePath) --service-name $(Quote-BashString $ServiceName) --github-private-key $(Quote-BashString $githubPrivateKeyRemotePath) --github-public-key $(Quote-BashString $githubPublicKeyRemotePath)",
+        "rm -f $bootstrapRemotePath $envRemotePath $githubPrivateKeyRemotePath $githubPublicKeyRemotePath"
     ) -join " && "
 
     Invoke-SshCommand -Command $remoteBootstrap
@@ -313,7 +281,8 @@ try {
     Invoke-SshCommand -Command "set -euo pipefail && sudo systemctl restart $ServiceName && sleep 2 && curl --fail --silent http://127.0.0.1:3847/health"
 }
 finally {
-    Stop-TransientSshAgent
     Remove-Item -LiteralPath $tempEnvPath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tempBootstrapPath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tempGitHubPrivateKeyPath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tempGitHubPublicKeyPath -ErrorAction SilentlyContinue
 }

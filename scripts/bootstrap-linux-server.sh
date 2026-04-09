@@ -10,7 +10,9 @@ SYNCSONIC_DIR="/srv/maverick/repos/syncsonic"
 STATE_DIR="/var/lib/maverick"
 ENV_TARGET="/etc/maverick/maverick.env"
 ENV_SOURCE=""
-MAVERICK_BRANCH="server"
+GITHUB_PRIVATE_KEY_SOURCE=""
+GITHUB_PUBLIC_KEY_SOURCE=""
+MAVERICK_BRANCH="main"
 NETWISE_BRANCH="master"
 SYNCSONIC_BRANCH="pi-stable-baseline-2026-04-05"
 MAVERICK_REPO_URL=""
@@ -27,7 +29,7 @@ Usage:
   bootstrap-linux-server.sh --maverick-repo <url> --netwise-repo <url> --syncsonic-repo <url> [options]
 
 Options:
-  --maverick-branch <branch>    Default: server
+  --maverick-branch <branch>    Default: main
   --netwise-branch <branch>     Default: master
   --syncsonic-branch <branch>   Default: pi-stable-baseline-2026-04-05
   --app-dir <path>              Default: /srv/maverick/app
@@ -36,6 +38,8 @@ Options:
   --state-dir <path>            Default: /var/lib/maverick
   --env-file <path>             Optional pre-rendered env file to install
   --service-name <name>         Default: maverick
+  --github-private-key <path>   Optional SSH private key to install for GitHub access
+  --github-public-key <path>    Optional SSH public key to install for GitHub access
 EOF
 }
 
@@ -47,7 +51,7 @@ require_root() {
 }
 
 run_as_service_user() {
-  sudo --preserve-env=SSH_AUTH_SOCK -u "${SERVICE_USER}" -- "$@"
+  sudo -u "${SERVICE_USER}" -H -- "$@"
 }
 
 upsert_env_var() {
@@ -134,6 +138,35 @@ ensure_service_user_known_host() {
   chmod 0600 "${known_hosts}"
 }
 
+install_service_user_git_auth() {
+  local ssh_dir="/srv/maverick/.ssh"
+  local private_key_target="${ssh_dir}/id_ed25519"
+  local public_key_target="${ssh_dir}/id_ed25519.pub"
+  local ssh_config_target="${ssh_dir}/config"
+
+  install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0700 "${ssh_dir}"
+
+  if [[ -n "${GITHUB_PRIVATE_KEY_SOURCE}" ]]; then
+    install -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0600 "${GITHUB_PRIVATE_KEY_SOURCE}" "${private_key_target}"
+  fi
+
+  if [[ -n "${GITHUB_PUBLIC_KEY_SOURCE}" && -f "${GITHUB_PUBLIC_KEY_SOURCE}" ]]; then
+    install -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0644 "${GITHUB_PUBLIC_KEY_SOURCE}" "${public_key_target}"
+  fi
+
+  if [[ -f "${private_key_target}" ]]; then
+    cat > "${ssh_config_target}" <<EOF
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ${private_key_target}
+  IdentitiesOnly yes
+EOF
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${ssh_config_target}"
+    chmod 0600 "${ssh_config_target}"
+  fi
+}
+
 clone_or_update_repo() {
   local repo_url="$1"
   local branch="$2"
@@ -141,16 +174,14 @@ clone_or_update_repo() {
 
   if [[ -d "${target_path}/.git" ]]; then
     log "Updating $(basename "${target_path}")"
-    git -C "${target_path}" -c safe.directory="${target_path}" fetch --all --prune
-    git -C "${target_path}" -c safe.directory="${target_path}" checkout "${branch}"
-    git -C "${target_path}" -c safe.directory="${target_path}" pull --ff-only origin "${branch}"
-    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${target_path}"
+    run_as_service_user git -C "${target_path}" -c safe.directory="${target_path}" fetch --all --prune
+    run_as_service_user git -C "${target_path}" -c safe.directory="${target_path}" checkout "${branch}"
+    run_as_service_user git -C "${target_path}" -c safe.directory="${target_path}" pull --ff-only origin "${branch}"
     return
   fi
 
   log "Cloning ${repo_url} into ${target_path}"
-  git clone --branch "${branch}" "${repo_url}" "${target_path}"
-  chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${target_path}"
+  run_as_service_user git clone --branch "${branch}" "${repo_url}" "${target_path}"
 }
 
 resolve_codex_js_path() {
@@ -252,6 +283,14 @@ while [[ $# -gt 0 ]]; do
       SERVICE_NAME="$2"
       shift 2
       ;;
+    --github-private-key)
+      GITHUB_PRIVATE_KEY_SOURCE="$2"
+      shift 2
+      ;;
+    --github-public-key)
+      GITHUB_PUBLIC_KEY_SOURCE="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -278,6 +317,7 @@ ensure_node20
 ensure_codex
 ensure_service_account
 ensure_directories
+install_service_user_git_auth
 ensure_service_user_known_host "github.com"
 clone_or_update_repo "${MAVERICK_REPO_URL}" "${MAVERICK_BRANCH}" "${APP_DIR}"
 clone_or_update_repo "${NETWISE_REPO_URL}" "${NETWISE_BRANCH}" "${NETWISE_DIR}"
