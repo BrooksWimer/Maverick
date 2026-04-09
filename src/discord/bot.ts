@@ -79,6 +79,16 @@ function truncate(text: string, max = 1800): string {
   return `${text.slice(0, max - 3)}...`;
 }
 
+export function shouldAttachReplyPreview(
+  headerLines: string[],
+  previewBody: string,
+  previewLimit = 1500
+): boolean {
+  const inlinePreview = truncate(previewBody, previewLimit);
+  const inlineContent = [...headerLines, inlinePreview].filter(Boolean).join("\n");
+  return inlinePreview !== previewBody || inlineContent.length > 1900;
+}
+
 export function persistedEpicIdForResolvedEpic(
   epic: { id: string; source: "route" | "explicit" | "default" } | null
 ): string | undefined {
@@ -1155,7 +1165,8 @@ export class DiscordBot {
           `Reviewer: \`${useClaude ? "claude" : "primary"}\``,
           `Severity: \`${result.severity}\``,
         ],
-        inlineBody: truncate(result.findings, 1500),
+        previewBody: result.findings,
+        previewLimit: 1500,
         fullBody: [
           `Workstream: ${workstream.name}`,
           `Reviewer: ${useClaude ? "claude" : "primary"}`,
@@ -1180,7 +1191,8 @@ export class DiscordBot {
           `Stored Claude plan for \`${workstream.name}\`.`,
           `Instruction: ${truncate(instruction, 500)}`,
         ],
-        inlineBody: truncate(plan, 1200),
+        previewBody: plan,
+        previewLimit: 1200,
         fullBody: [
           `Workstream: ${workstream.name}`,
           "",
@@ -1672,13 +1684,16 @@ export class DiscordBot {
 
   private buildInlineOrAttachedReply(params: {
     headerLines: string[];
-    inlineBody: string;
+    previewBody: string;
+    previewLimit?: number;
     fullBody: string;
     attachmentName: string;
     attachmentNotice: string;
   }): InteractionEditReplyOptions {
-    const inlineContent = [...params.headerLines, params.inlineBody].filter(Boolean).join("\n");
-    if (inlineContent.length <= 1900) {
+    const previewLimit = params.previewLimit ?? 1500;
+    const inlinePreview = truncate(params.previewBody, previewLimit);
+    const inlineContent = [...params.headerLines, inlinePreview].filter(Boolean).join("\n");
+    if (!shouldAttachReplyPreview(params.headerLines, params.previewBody, previewLimit)) {
       return { content: inlineContent };
     }
 

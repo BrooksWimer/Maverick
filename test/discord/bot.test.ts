@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { persistedEpicIdForResolvedEpic } from "../../src/discord/bot.js";
+import { persistedEpicIdForResolvedEpic, shouldAttachReplyPreview } from "../../src/discord/bot.js";
 
 describe("persistedEpicIdForResolvedEpic", () => {
   it("omits the synthetic default lane from persisted epic ids", () => {
@@ -25,5 +25,15 @@ describe("persistedEpicIdForResolvedEpic", () => {
         source: "explicit",
       })
     ).toBe("startup-mic-auto-alignment");
+  });
+});
+
+describe("shouldAttachReplyPreview", () => {
+  it("attaches when the preview body had to be truncated even if the inline message still fits", () => {
+    expect(shouldAttachReplyPreview(["Stored Claude plan."], "a".repeat(1400), 1200)).toBe(true);
+  });
+
+  it("keeps short content inline when nothing was truncated", () => {
+    expect(shouldAttachReplyPreview(["Stored Claude plan."], "short plan", 1200)).toBe(false);
   });
 });
