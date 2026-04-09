@@ -76,6 +76,7 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
   const schema = readFileSync(schemaPath, "utf-8");
   db.exec(schema);
   ensureColumn(db, "workstreams", "epic_id", "ALTER TABLE workstreams ADD COLUMN epic_id TEXT");
+  ensureColumn(db, "workstreams", "plan", "ALTER TABLE workstreams ADD COLUMN plan TEXT");
   ensureColumn(
     db,
     "assistant_notes",

@@ -224,6 +224,26 @@ function subcommandBuilder(config: OrchestratorConfig) {
             .setDescription("Review target, e.g. uncommitted, branch-diff, or a commit SHA")
             .setRequired(false)
         )
+        .addBooleanOption((option) =>
+          option
+            .setName("claude")
+            .setDescription("Use Claude as the reviewer instead of the primary backend")
+            .setRequired(false)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("plan")
+        .setDescription("Generate and store a Claude implementation plan")
+        .addStringOption((option) =>
+          option
+            .setName("instruction")
+            .setDescription("High-level instruction for Claude to plan")
+            .setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+        )
     );
 
   const project = new SlashCommandBuilder()
@@ -344,7 +364,22 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .setDescription("Generate a preview of today's daily brief")
     );
 
-  return [workstream.toJSON(), project.toJSON(), work.toJSON(), brief.toJSON()] satisfies RESTPostAPIApplicationCommandsJSONBody[];
+  const maverick = new SlashCommandBuilder()
+    .setName("maverick")
+    .setDescription("Run Maverick control-plane operations")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("brief")
+        .setDescription("Generate and post the nightly Claude brief")
+    );
+
+  return [
+    workstream.toJSON(),
+    project.toJSON(),
+    work.toJSON(),
+    brief.toJSON(),
+    maverick.toJSON(),
+  ] satisfies RESTPostAPIApplicationCommandsJSONBody[];
 }
 
 export class DiscordBot {
@@ -549,6 +584,32 @@ export class DiscordBot {
       });
     });
 
+    eventBus.on("brief.generated", (event) => {
+      this.runBackgroundTask("brief.generated", async () => {
+        const channel = event.channelId
+          ? await this.fetchTextChannel(event.channelId)
+          : await this.resolveDefaultChannel();
+        if (!channel) {
+          log.warn({ channelId: event.channelId }, "No Discord channel available for Claude brief");
+          return;
+        }
+
+        await this.safeSend(channel, this.buildBriefGeneratedMessage(event.generatedAt, event.summary, event.markdown));
+      });
+    });
+
+    eventBus.on("review.completed", (event) => {
+      this.runBackgroundTask("review.completed", async () => {
+        const channel = await this.resolveNotificationChannelFromWorkstreamId(event.workstreamId, "notifications");
+        if (!channel) {
+          log.warn({ workstreamId: event.workstreamId }, "No Discord channel available for Claude review");
+          return;
+        }
+
+        await this.safeSend(channel, this.buildReviewCompletedMessage(event.workstreamId, event.severity, event.findings));
+      });
+    });
+
     eventBus.on("error", (event) => {
       this.runBackgroundTask("error", async () => {
         const channel = event.workstreamId
@@ -673,6 +734,11 @@ export class DiscordBot {
 
     if (interaction.commandName === "brief") {
       await this.handleBriefCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "maverick") {
+      await this.handleMaverickCommand(interaction);
     }
   }
 
@@ -707,6 +773,10 @@ export class DiscordBot {
       case "review":
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await this.handleReview(interaction);
+        return;
+      case "plan":
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await this.handlePlan(interaction);
         return;
       default:
         await interaction.reply({
@@ -834,6 +904,35 @@ export class DiscordBot {
         }),
       ],
     });
+  }
+
+  private async handleMaverickCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand !== "brief") {
+      await interaction.reply({
+        content: `Unsupported maverick subcommand: ${subcommand}`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const result = await this.orchestrator.generateBrief({
+      trigger: "manual",
+      requestedBy: interaction.user.id,
+      channelId: this.config.brief.discordChannelId ?? interaction.channelId,
+    });
+
+    await interaction.editReply(
+      [
+        "Claude brief generated.",
+        result.channelId ? `Posted to channel: \`${result.channelId}\`` : "Posted channel: unavailable",
+        result.storagePath ? `Saved to: \`${result.storagePath}\`` : null,
+        `Summary: ${truncate(result.summary, 1200)}`,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    );
   }
 
   private async captureStructuredWorkNote(
@@ -1035,13 +1134,32 @@ export class DiscordBot {
   private async handleReview(interaction: ChatInputCommandInteraction): Promise<void> {
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
     const target = interaction.options.getString("target") ?? undefined;
+    const useClaude = interaction.options.getBoolean("claude") ?? false;
 
-    const result = await this.orchestrator.review(workstream.id, target);
+    const result = await this.orchestrator.review(workstream.id, target, {
+      reviewer: useClaude ? "claude" : "primary",
+      trigger: "manual",
+    });
     await interaction.editReply(
       [
         `Review for \`${workstream.name}\` completed.`,
+        `Reviewer: \`${useClaude ? "claude" : "primary"}\``,
         `Severity: \`${result.severity}\``,
         truncate(result.findings, 1500),
+      ].join("\n")
+    );
+  }
+
+  private async handlePlan(interaction: ChatInputCommandInteraction): Promise<void> {
+    const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
+    const instruction = interaction.options.getString("instruction", true);
+    const plan = await this.orchestrator.generatePlan(workstream.id, instruction, "manual");
+
+    await interaction.editReply(
+      [
+        `Stored Claude plan for \`${workstream.name}\`.`,
+        `Instruction: ${truncate(instruction, 600)}`,
+        truncate(plan, 1500),
       ].join("\n")
     );
   }
@@ -1131,6 +1249,7 @@ export class DiscordBot {
       latestTurn?.result_summary && latestTurn.status !== "completed"
         ? `Latest turn summary: ${truncate(latestTurn.result_summary, 1200)}`
         : null,
+      workstream.plan ? `Stored plan: ${truncate(workstream.plan, 1200)}` : null,
       workstream.summary ? `Summary: ${truncate(workstream.summary, 1200)}` : null,
       workstream.codex_thread_id ? `Codex thread: \`${workstream.codex_thread_id}\`` : null,
       `Waiting on approval: ${workstream.waiting_on_approval ? "yes" : "no"}`,
@@ -1453,6 +1572,69 @@ export class DiscordBot {
       ]
         .filter(Boolean)
         .join("\n"),
+    };
+  }
+
+  private buildBriefGeneratedMessage(
+    generatedAt: string,
+    summary: string,
+    markdown: string
+  ): MessageCreateOptions {
+    const trimmed = markdown.trim();
+    if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
+      const attachment = new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+        name: `maverick-brief-${generatedAt.replace(/[:]/g, "-")}.md`,
+      });
+
+      return {
+        content: [
+          "Claude generated a Maverick brief.",
+          `Generated: ${generatedAt}`,
+          `Summary: ${truncate(summary, 1200)}`,
+          "Full brief attached as a Markdown file.",
+        ].join("\n"),
+        files: [attachment],
+      };
+    }
+
+    return {
+      content: [
+        "Claude generated a Maverick brief.",
+        `Generated: ${generatedAt}`,
+        trimmed,
+      ].join("\n"),
+    };
+  }
+
+  private buildReviewCompletedMessage(
+    workstreamId: string,
+    severity: string,
+    findings: string
+  ): MessageCreateOptions {
+    const trimmed = findings.trim();
+    if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
+      const attachment = new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+        name: `claude-review-${workstreamId}.md`,
+      });
+
+      return {
+        content: [
+          "Claude completed a post-turn review.",
+          `Workstream: \`${workstreamId}\``,
+          `Severity: \`${severity}\``,
+          "Full review attached as a Markdown file.",
+        ].join("\n"),
+        files: [attachment],
+      };
+    }
+
+    return {
+      content: [
+        "Claude completed a post-turn review.",
+        `Workstream: \`${workstreamId}\``,
+        `Severity: \`${severity}\``,
+        trimmed,
+      ].join("\n"),
     };
   }
 

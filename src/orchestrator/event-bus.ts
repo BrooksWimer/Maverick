@@ -5,6 +5,7 @@
  * This is what makes it possible to build core logic first and wire Discord later.
  */
 import EventEmitter from "eventemitter3";
+import type { BriefTrigger } from "../claude/types.js";
 
 // --- Event types ---
 
@@ -69,6 +70,25 @@ export interface ErrorEvent {
   context?: string;
 }
 
+export interface BriefGeneratedEvent {
+  trigger: BriefTrigger;
+  generatedAt: string;
+  content: string;
+  markdown: string;
+  summary: string;
+  storagePath: string | null;
+  channelId: string | null;
+}
+
+export interface ReviewCompletedEvent {
+  workstreamId: string;
+  reviewer: "claude";
+  severity: "clean" | "minor" | "major" | "critical";
+  findings: string;
+  suggestions: string[];
+  target: string;
+}
+
 // --- Event map ---
 
 export interface OrchestratorEvents {
@@ -80,6 +100,8 @@ export interface OrchestratorEvents {
   "approval.requested": (event: ApprovalRequestedEvent) => void;
   "approval.resolved": (event: ApprovalResolvedEvent) => void;
   "decision.needed": (event: DecisionNeededEvent) => void;
+  "brief.generated": (event: BriefGeneratedEvent) => void;
+  "review.completed": (event: ReviewCompletedEvent) => void;
   "error": (event: ErrorEvent) => void;
 }
 

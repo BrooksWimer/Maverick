@@ -8,15 +8,33 @@
  * about Discord or HTTP — it only knows about workstreams, turns, and events.
  * The Discord and HTTP modules are event consumers that subscribe to the event bus.
  */
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import {
+  BriefCollector,
+  briefFilename,
+  buildBriefInstruction,
+  buildBriefSystemPrompt,
+  buildPlanningInstruction,
+  buildPlanningSystemPrompt,
+  buildReviewInstruction,
+  buildReviewSystemPrompt,
+  cronMatchesDate,
+  renderBriefMarkdown,
+  scheduledMinuteKey,
+  summarizeBrief,
+  type BriefTrigger,
+  type GeneratedBrief,
+} from "../claude/index.js";
 import { createLogger } from "../logger.js";
 import { eventBus } from "./event-bus.js";
 import { WorkstreamStateMachine } from "./state-machine.js";
 import { projects, workstreams, turns, approvals, events as eventLog } from "../state/index.js";
 import type { WorkstreamRow } from "../state/index.js";
 import { createAdapter, type ExecutionBackendAdapter } from "../codex/index.js";
-import type { ApprovalRequest, ExecutionThread } from "../codex/types.js";
+import type { ApprovalRequest, ExecutionThread, ReviewResult } from "../codex/types.js";
 import type { EscalationTier, OrchestratorConfig, ProjectConfig, RemoteHostConfig } from "../config/schema.js";
 import { ensureProjectBootstrap, ensureWorktreeBootstrap, type BootstrapStatus } from "../projects/bootstrap.js";
 import { buildEpicCharterContext, requireEpicById, workstreamLaneForEpic } from "../projects/epics.js";
@@ -154,6 +172,10 @@ export class Orchestrator {
   private stateMachines: Map<string, WorkstreamStateMachine> = new Map();
   private activeTurnByWorkstream = new Map<string, string>();
   private projectBootstrap = new Map<string, BootstrapStatus>();
+  private utilityClaudeAdapter: ExecutionBackendAdapter | null = null;
+  private briefTimer: NodeJS.Timeout | null = null;
+  private lastBriefScheduleKey: string | null = null;
+  private briefInFlight: Promise<GeneratedBrief> | null = null;
   private initialized = false;
 
   constructor(config: OrchestratorConfig) {
@@ -218,14 +240,23 @@ export class Orchestrator {
     await this.recoverActiveWorkstreams();
 
     this.initialized = true;
+    this.startBriefScheduler();
     log.info({ projects: this.config.projects.length }, "Orchestrator initialized");
   }
 
   async shutdown(): Promise<void> {
     log.info("Shutting down orchestrator");
+    if (this.briefTimer) {
+      clearInterval(this.briefTimer);
+      this.briefTimer = null;
+    }
     for (const [id, adapter] of this.adapters) {
       log.info({ projectId: id }, "Shutting down adapter");
       await adapter.shutdown();
+    }
+    if (this.utilityClaudeAdapter) {
+      await this.utilityClaudeAdapter.shutdown();
+      this.utilityClaudeAdapter = null;
     }
     this.initialized = false;
   }
@@ -341,6 +372,11 @@ export class Orchestrator {
     const dispatchWorkstream = await this.prepareWorkstreamForDispatch(ws);
     const adapter = this.getAdapter(dispatchWorkstream.project_id);
     const preparedInstruction = this.prepareTurnInstruction(dispatchWorkstream, instruction);
+    const executionInstruction = this.buildExecutionInstruction(
+      dispatchWorkstream,
+      instruction,
+      preparedInstruction.instruction
+    );
 
     // Create turn record
     const turn = turns.create({
@@ -379,7 +415,7 @@ export class Orchestrator {
     try {
       const result = await adapter.startTurn({
         threadId: dispatchWorkstream.codex_thread_id!,
-        instruction: preparedInstruction.instruction,
+        instruction: executionInstruction,
         cwd: dispatchWorkstream.cwd ?? this.getProject(dispatchWorkstream.project_id).repoPath,
       });
 
@@ -408,10 +444,16 @@ export class Orchestrator {
         workstream_id: workstreamId,
         project_id: dispatchWorkstream.project_id,
         event_type: "turn.completed",
-        payload: { turnId: turn.id, status: result.status },
+        payload: {
+          turnId: turn.id,
+          status: result.status,
+          summary: result.summary ?? null,
+          output: result.output,
+        },
         source: "orchestrator",
       });
 
+      this.maybeStartAutoClaudeReview(dispatchWorkstream, turn.id, result.status);
       this.activeTurnByWorkstream.delete(workstreamId);
       log.info({ workstreamId, turnId: turn.id, status: result.status }, "Turn completed");
       return result;
@@ -561,30 +603,145 @@ export class Orchestrator {
       source: "orchestrator",
     });
 
+    this.maybeStartAutoClaudePlan(workstreams.getById(workstreamId) ?? { ...ws, state: newState });
     log.info({ workstreamId, from: ws.state, to: newState, trigger }, "State transitioned");
     return newState;
   }
 
-  async review(workstreamId: string, target?: string) {
+  async review(
+    workstreamId: string,
+    target?: string,
+    options?: { reviewer?: "primary" | "claude"; trigger?: "manual" | "auto" }
+  ) {
     const ws = workstreams.getById(workstreamId);
     if (!ws?.codex_thread_id) throw new Error(`Workstream not found or no thread: ${workstreamId}`);
 
-    const adapter = this.getAdapter(ws.project_id);
-    const result = await adapter.startReview({
-      threadId: ws.codex_thread_id,
-      cwd: ws.cwd ?? this.getProject(ws.project_id).repoPath,
-      target: target ?? "uncommitted",
-    });
+    const reviewer = options?.reviewer ?? "primary";
+    const effectiveTarget = target ?? "uncommitted";
+    const result =
+      reviewer === "claude"
+        ? await this.runClaudeReview(ws, effectiveTarget)
+        : await this.getAdapter(ws.project_id).startReview({
+            threadId: ws.codex_thread_id,
+            cwd: ws.cwd ?? this.getProject(ws.project_id).repoPath,
+            target: effectiveTarget,
+          });
 
     eventLog.emit({
       workstream_id: workstreamId,
       project_id: ws.project_id,
       event_type: "review.completed",
-      payload: { severity: result.severity, findingsLength: result.findings.length },
+      payload: {
+        severity: result.severity,
+        findingsLength: result.findings.length,
+        reviewer,
+        trigger: options?.trigger ?? "manual",
+      },
       source: "orchestrator",
     });
 
+    if (reviewer === "claude") {
+      eventBus.emit("review.completed", {
+        workstreamId,
+        reviewer: "claude",
+        severity: result.severity,
+        findings: result.findings,
+        suggestions: result.suggestions ?? [],
+        target: effectiveTarget,
+      });
+    }
+
     return result;
+  }
+
+  async generateBrief(options?: {
+    trigger?: BriefTrigger;
+    requestedBy?: string;
+    channelId?: string | null;
+  }): Promise<GeneratedBrief> {
+    if (!this.config.brief.enabled) {
+      throw new Error("Claude brief generation is disabled in config.brief.enabled.");
+    }
+
+    if (this.briefInFlight) {
+      throw new Error("A Claude brief is already running.");
+    }
+
+    const promise = this.generateBriefInternal({
+      trigger: options?.trigger ?? "manual",
+      requestedBy: options?.requestedBy ?? "system",
+      channelId: options?.channelId ?? this.config.brief.discordChannelId ?? this.config.discord.defaultNotificationChannelId ?? null,
+    });
+
+    this.briefInFlight = promise;
+    try {
+      return await promise;
+    } finally {
+      this.briefInFlight = null;
+    }
+  }
+
+  async generatePlan(workstreamId: string, instruction: string, trigger: "manual" | "auto" = "manual") {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    const project = this.getProject(workstream.project_id);
+    const planningConfig = project.claudePlanning;
+    if (!planningConfig?.enabled) {
+      throw new Error(`Claude planning is disabled for project ${project.id}.`);
+    }
+
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const thread = await adapter.createThread(cwd);
+    const plan = await adapter.startTurn({
+      threadId: thread.id,
+      cwd,
+      model: planningConfig.model,
+      systemPrompt: buildPlanningSystemPrompt(),
+      instruction: buildPlanningInstruction({
+        projectId: project.id,
+        workstreamName: workstream.name,
+        instruction,
+        agentsMd: this.readAgentsMd(project),
+        directoryTree: this.buildDirectoryTree(cwd),
+        recentTurnHistory: turns.listByWorkstream(workstreamId).slice(-5).map((turn) => ({
+          instruction: turn.instruction,
+          status: turn.status,
+          summary: turn.result_summary,
+        })),
+        epicCharter: this.getEpicCharterContext(workstream),
+      }),
+      addDirs: [cwd],
+      maxTurns: 3,
+      permissionMode: "plan",
+    });
+
+    if (plan.status !== "completed") {
+      throw new Error(plan.output || "Claude plan generation failed.");
+    }
+
+    workstreams.update(workstreamId, {
+      current_goal: instruction,
+      plan: plan.output.trim(),
+      summary: trigger === "manual" ? "Claude plan stored for the next dispatch." : "Claude auto-plan stored for the planning state.",
+    });
+
+    eventLog.emit({
+      workstream_id: workstreamId,
+      project_id: workstream.project_id,
+      event_type: "plan.generated",
+      payload: {
+        trigger,
+        instruction,
+        length: plan.output.length,
+      },
+      source: "orchestrator",
+    });
+
+    return plan.output.trim();
   }
 
   // --- Query methods ---
@@ -728,6 +885,338 @@ export class Orchestrator {
   }
 
   // --- Internal ---
+
+  private maybeStartAutoClaudeReview(workstream: WorkstreamRow, turnId: string, turnStatus: string): void {
+    const project = this.getProject(workstream.project_id);
+    const reviewConfig = project.claudeReview;
+    const primaryAdapter = this.getAdapter(workstream.project_id);
+
+    if (
+      !reviewConfig?.enabled ||
+      !reviewConfig.autoAfterTurn ||
+      turnStatus !== "completed" ||
+      !primaryAdapter.name.startsWith("codex")
+    ) {
+      return;
+    }
+
+    void this.review(workstream.id, "uncommitted", {
+      reviewer: "claude",
+      trigger: "auto",
+    }).catch((error) => {
+      eventBus.emit("error", {
+        workstreamId: workstream.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+        context: `Claude auto-review failed for turn ${turnId}`,
+      });
+    });
+  }
+
+  private maybeStartAutoClaudePlan(workstream: WorkstreamRow): void {
+    const project = this.getProject(workstream.project_id);
+    const planningConfig = project.claudePlanning;
+    if (
+      workstream.state !== "planning" ||
+      !planningConfig?.enabled ||
+      !planningConfig.autoOnPlanningState
+    ) {
+      return;
+    }
+
+    const instruction = workstream.current_goal ?? workstream.description ?? workstream.name;
+    void this.generatePlan(workstream.id, instruction, "auto").catch((error) => {
+      eventBus.emit("error", {
+        workstreamId: workstream.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+        context: "Claude auto-plan failed while entering planning state",
+      });
+    });
+  }
+
+  private buildExecutionInstruction(
+    workstream: WorkstreamRow,
+    userInstruction: string,
+    baseInstruction = userInstruction
+  ): string {
+    if (!workstream.plan || workstream.current_goal !== userInstruction) {
+      return baseInstruction;
+    }
+
+    return [
+      "Approved implementation plan:",
+      workstream.plan,
+      "",
+      "Execute the following instruction using the stored plan above as the primary guide:",
+      baseInstruction,
+    ].join("\n");
+  }
+
+  private async runClaudeReview(workstream: WorkstreamRow, target: string): Promise<ReviewResult> {
+    const project = this.getProject(workstream.project_id);
+    const reviewConfig = project.claudeReview;
+    if (!reviewConfig?.enabled) {
+      throw new Error(`Claude review is disabled for project ${project.id}.`);
+    }
+
+    const cwd = workstream.cwd ?? project.repoPath;
+    const latestTurn = turns.listByWorkstream(workstream.id).slice(-1)[0] ?? null;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const reviewThread = await adapter.createThread(cwd);
+
+    return adapter.startReview({
+      threadId: reviewThread.id,
+      cwd,
+      target,
+      model: reviewConfig.model,
+      systemPrompt: buildReviewSystemPrompt(),
+      instruction: buildReviewInstruction({
+        projectId: project.id,
+        workstreamName: workstream.name,
+        instruction: latestTurn?.instruction ?? workstream.current_goal ?? "No recorded instruction.",
+        turnSummary: latestTurn?.result_summary ?? workstream.summary,
+        turnOutput: this.getLatestTurnOutput(workstream.id, latestTurn?.result_summary ?? workstream.summary ?? ""),
+        gitDiff: this.readGitReviewDiff(cwd, target),
+        gitStatus: this.readGitOutput(["status", "--short", "--branch"], cwd),
+        epicCharter: this.getEpicCharterContext(workstream),
+        testResults: null,
+      }),
+      addDirs: [cwd],
+      maxTurns: 3,
+      permissionMode: "plan",
+    });
+  }
+
+  private async generateBriefInternal(params: {
+    trigger: BriefTrigger;
+    requestedBy: string;
+    channelId: string | null;
+  }): Promise<GeneratedBrief> {
+    const collector = new BriefCollector(this.config);
+    const context = await collector.collect();
+    const adapter = await this.getUtilityClaudeAdapter();
+    const repoPaths = [...new Set(this.config.projects.map((project) => project.repoPath))];
+    const cwd = repoPaths[0] ?? process.cwd();
+    const thread = await adapter.createThread(cwd);
+    const turnResult = await adapter.startTurn({
+      threadId: thread.id,
+      instruction: buildBriefInstruction(context),
+      cwd,
+      model: this.config.brief.model,
+      systemPrompt: buildBriefSystemPrompt(),
+      addDirs: repoPaths,
+      maxTurns: 10,
+      permissionMode: "auto",
+    });
+
+    if (turnResult.status !== "completed") {
+      throw new Error(turnResult.output || "Claude brief generation failed.");
+    }
+
+    const content = turnResult.output.trim();
+    if (!content) {
+      throw new Error("Claude returned an empty brief.");
+    }
+
+    const markdown = renderBriefMarkdown({
+      trigger: params.trigger,
+      generatedAt: context.generatedAt,
+      content,
+      context,
+    });
+    const storagePath = this.persistBrief(markdown, context.generatedAt);
+    const summary = summarizeBrief(content);
+
+    eventLog.emit({
+      event_type: "brief.generated",
+      payload: {
+        trigger: params.trigger,
+        requestedBy: params.requestedBy,
+        storagePath,
+        summary,
+      },
+      source: "orchestrator",
+    });
+
+    eventBus.emit("brief.generated", {
+      trigger: params.trigger,
+      generatedAt: context.generatedAt,
+      content,
+      markdown,
+      summary,
+      storagePath,
+      channelId: params.channelId,
+    });
+
+    return {
+      generatedAt: context.generatedAt,
+      trigger: params.trigger,
+      content,
+      markdown,
+      storagePath,
+      channelId: params.channelId,
+      summary,
+    };
+  }
+
+  private startBriefScheduler(): void {
+    if (!this.config.brief.enabled || !this.config.brief.schedule || this.briefTimer) {
+      return;
+    }
+
+    const timeZone = this.config.assistant.timeZone;
+    this.briefTimer = setInterval(() => {
+      if (!this.initialized) {
+        return;
+      }
+
+      const now = new Date();
+      try {
+        if (!cronMatchesDate(this.config.brief.schedule!, now, timeZone)) {
+          return;
+        }
+      } catch (error) {
+        log.warn({ err: error, schedule: this.config.brief.schedule }, "Invalid brief schedule");
+        return;
+      }
+
+      const minuteKey = scheduledMinuteKey(now, timeZone);
+      if (minuteKey === this.lastBriefScheduleKey) {
+        return;
+      }
+
+      this.lastBriefScheduleKey = minuteKey;
+      void this.generateBrief({
+        trigger: "schedule",
+        requestedBy: "scheduler",
+        channelId: this.config.brief.discordChannelId ?? this.config.discord.defaultNotificationChannelId ?? null,
+      }).catch((error) => {
+        log.warn({ err: error }, "Scheduled brief generation failed");
+      });
+    }, 60_000);
+
+    this.briefTimer.unref?.();
+    log.info(
+      { schedule: this.config.brief.schedule, timeZone },
+      "Claude brief scheduler started"
+    );
+  }
+
+  private persistBrief(markdown: string, generatedAt: string): string {
+    const storageRoot = resolve(this.config.brief.storagePath);
+    mkdirSync(storageRoot, { recursive: true });
+    const outputPath = join(storageRoot, briefFilename(generatedAt));
+    writeFileSync(outputPath, markdown, "utf8");
+    return outputPath;
+  }
+
+  private async getUtilityClaudeAdapter(): Promise<ExecutionBackendAdapter> {
+    if (this.utilityClaudeAdapter) {
+      return this.utilityClaudeAdapter;
+    }
+
+    const configured =
+      this.config.projects
+        .map((project) => project.executionBackend)
+        .find((backend): backend is NonNullable<ProjectConfig["executionBackend"]> => backend?.type === "claude-code") ??
+      (this.config.defaults.executionBackend.type === "claude-code" ? this.config.defaults.executionBackend : null) ??
+      {
+        type: "claude-code" as const,
+        model: "sonnet",
+        claudePath: process.env.CLAUDE_PATH,
+        permissionMode: "plan" as const,
+        maxTurns: 10,
+      };
+
+    this.utilityClaudeAdapter = createAdapter(configured);
+    await this.utilityClaudeAdapter.initialize();
+    return this.utilityClaudeAdapter;
+  }
+
+  private getLatestTurnOutput(workstreamId: string, fallback: string): string {
+    const completionEvent = eventLog
+      .listByWorkstream(workstreamId, 20)
+      .find((event) => event.event_type === "turn.completed");
+    if (!completionEvent) {
+      return fallback;
+    }
+
+    try {
+      const payload = JSON.parse(completionEvent.payload_json) as Record<string, unknown>;
+      return typeof payload.output === "string" && payload.output.length > 0 ? payload.output : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private readGitReviewDiff(cwd: string, target: string): string {
+    if (target === "branch-diff") {
+      return this.readGitOutput(["diff", "--no-color", "main...HEAD"], cwd);
+    }
+
+    if (/^[a-f0-9]{7,40}$/i.test(target)) {
+      return this.readGitOutput(["show", "--no-color", target], cwd);
+    }
+
+    return this.readGitOutput(["diff", "--no-color"], cwd);
+  }
+
+  private readGitOutput(args: string[], cwd: string): string {
+    try {
+      return execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        windowsHide: true,
+      }).trim();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Git command failed (${args.join(" ")}): ${message}`;
+    }
+  }
+
+  private readAgentsMd(project: ProjectConfig): string {
+    const agentsMdPath = project.agentsMdPath ?? join(project.repoPath, "AGENTS.md");
+    try {
+      return readFileSync(agentsMdPath, "utf8");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Unable to read AGENTS.md at ${agentsMdPath}: ${message}`;
+    }
+  }
+
+  private buildDirectoryTree(rootPath: string, maxEntries = 120): string {
+    const lines: string[] = [];
+
+    const visit = (currentPath: string, depth: number) => {
+      if (lines.length >= maxEntries || depth > 2) {
+        return;
+      }
+
+      const entries = readdirSync(currentPath, { withFileTypes: true })
+        .filter((entry) => ![".git", "node_modules", "dist", ".generated"].includes(entry.name))
+        .sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name));
+
+      for (const entry of entries) {
+        if (lines.length >= maxEntries) {
+          return;
+        }
+
+        const entryPath = join(currentPath, entry.name);
+        const label = `${"  ".repeat(depth)}- ${entry.name}${entry.isDirectory() ? "/" : ""}`;
+        lines.push(label);
+        if (entry.isDirectory()) {
+          visit(entryPath, depth + 1);
+        }
+      }
+    };
+
+    try {
+      visit(rootPath, 0);
+      return lines.join("\n");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Unable to read directory tree for ${rootPath}: ${message}`;
+    }
+  }
 
   private async handleApprovalRequest(workstreamId: string, request: ApprovalRequest) {
     const ws = workstreams.getById(workstreamId);
@@ -1190,27 +1679,7 @@ export class Orchestrator {
     workstream: WorkstreamRow,
     userInstruction: string
   ): { instruction: string; epicContextInjected: boolean } {
-    if (!workstream.epic_id) {
-      return {
-        instruction: userInstruction,
-        epicContextInjected: false,
-      };
-    }
-
-    const project = this.getProject(workstream.project_id);
-    const epic = project.epicBranches.find((candidate) => candidate.id === workstream.epic_id);
-    if (!epic) {
-      log.warn(
-        { projectId: project.id, workstreamId: workstream.id, epicId: workstream.epic_id },
-        "Workstream references an epic that no longer exists in config"
-      );
-      return {
-        instruction: userInstruction,
-        epicContextInjected: false,
-      };
-    }
-
-    const epicContext = buildEpicCharterContext(project, epic);
+    const epicContext = this.getEpicCharterContext(workstream);
     if (!epicContext) {
       return {
         instruction: userInstruction,
@@ -1222,5 +1691,23 @@ export class Orchestrator {
       instruction: `${epicContext}\n\nUser request:\n${userInstruction}`,
       epicContextInjected: true,
     };
+  }
+
+  private getEpicCharterContext(workstream: WorkstreamRow): string | null {
+    if (!workstream.epic_id) {
+      return null;
+    }
+
+    const project = this.getProject(workstream.project_id);
+    const epic = project.epicBranches.find((candidate) => candidate.id === workstream.epic_id);
+    if (!epic) {
+      log.warn(
+        { projectId: project.id, workstreamId: workstream.id, epicId: workstream.epic_id },
+        "Workstream references an epic that no longer exists in config"
+      );
+      return null;
+    }
+
+    return buildEpicCharterContext(project, epic) ?? null;
   }
 }

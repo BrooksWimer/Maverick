@@ -23,4 +23,6 @@ export {
   type AssistantReminderConfig,
   type DailyBriefConfig,
   DailyBriefConfigSchema,
+  type BriefConfig,
+  BriefConfigSchema,
 } from "./schema.js";

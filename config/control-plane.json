@@ -43,6 +43,16 @@
       "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
       "defaultWorktreeBaseBranch": "main",
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "metadata": {
         "description": "Personal assistant and control-plane home project with short-lived self-update workstreams routed through maverick-updates"
       }
@@ -88,6 +98,16 @@
       ],
       "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "metadata": {
         "description": "First onboarded project for orchestrator validation"
       }
@@ -204,6 +224,16 @@
       ],
       "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "remoteHosts": [
         {
           "host": "10.0.0.89",
@@ -298,6 +328,12 @@
     "enabled": true,
     "port": 3847,
     "host": "127.0.0.1"
+  },
+  "brief": {
+    "enabled": true,
+    "discordChannelId": null,
+    "storagePath": "./data/briefs",
+    "model": "sonnet"
   },
   "assistant": {
     "enabled": true,

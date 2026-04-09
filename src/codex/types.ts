@@ -36,6 +36,10 @@ export interface TurnRequest {
   model?: string;
   approvalMode?: string;
   inputItems?: ExecutionInputItem[];
+  systemPrompt?: string;
+  addDirs?: string[];
+  maxTurns?: number;
+  permissionMode?: string;
 }
 
 export interface TurnResult {
@@ -63,6 +67,13 @@ export interface ReviewRequest {
   threadId: string;
   cwd: string;
   target?: "uncommitted" | "branch-diff" | string;  // commit SHA or branch name
+  instruction?: string;
+  context?: string;
+  model?: string;
+  systemPrompt?: string;
+  addDirs?: string[];
+  maxTurns?: number;
+  permissionMode?: string;
 }
 
 export interface ReviewResult {

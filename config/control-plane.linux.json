@@ -43,6 +43,16 @@
       "repoPath": "/srv/maverick/app",
       "defaultWorktreeBaseBranch": "main",
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "metadata": {
         "description": "Personal assistant and control-plane home project with short-lived self-update workstreams routed through maverick-updates"
       }
@@ -88,6 +98,16 @@
       ],
       "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
       "metadata": {
         "description": "First onboarded project for orchestrator validation"
       }
@@ -107,6 +127,16 @@
       ],
       "metadata": {
         "description": "Raspberry Pi BLE audio hub with Expo frontend and hardware validation via Pi SSH"
+      },
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
       }
     }
   ],
@@ -151,6 +181,12 @@
     "enabled": true,
     "port": 3847,
     "host": "127.0.0.1"
+  },
+  "brief": {
+    "enabled": true,
+    "discordChannelId": null,
+    "storagePath": "/var/lib/maverick/briefs",
+    "model": "sonnet"
   },
   "assistant": {
     "enabled": true,
