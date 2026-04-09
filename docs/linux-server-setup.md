@@ -68,7 +68,7 @@ The wrapper will:
 - render a Linux env file from the local `.env`
 - upload and run the Linux bootstrap script
 - clone Maverick, Netwise, and SyncSonic
-- install Node 20, build tools, SQLite tools, and Codex
+- install Node 20, build tools, SQLite tools, Go, `libpcap` headers for Netwise, and Codex
 - install and enable the `maverick` `systemd` service
 - sync the local SQLite state to `/var/lib/maverick`
 - start Maverick and run a localhost health check

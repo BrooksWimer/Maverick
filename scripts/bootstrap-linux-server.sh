@@ -68,7 +68,7 @@ upsert_env_var() {
 ensure_apt_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y ca-certificates curl git build-essential python3 make g++ sqlite3 rsync openssh-client
+  apt-get install -y ca-certificates curl git build-essential python3 make g++ sqlite3 rsync openssh-client golang-go libpcap-dev
 }
 
 ensure_node20() {
