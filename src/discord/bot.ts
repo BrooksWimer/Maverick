@@ -9,6 +9,7 @@ import {
   Client,
   GatewayIntentBits,
   Interaction,
+  InteractionEditReplyOptions,
   Message,
   MessageCreateOptions,
   MessageFlags,
@@ -649,16 +650,23 @@ export class DiscordBot {
       log.error({ err: error }, "Discord interaction failed");
 
       if (interaction.isRepliable()) {
-        if (interaction.deferred || interaction.replied) {
-          await interaction.followUp({
-            content: `Maverick failed: ${truncate(message, 1500)}`,
-            flags: MessageFlags.Ephemeral,
-          });
-        } else {
-          await interaction.reply({
-            content: `Maverick failed: ${truncate(message, 1500)}`,
-            flags: MessageFlags.Ephemeral,
-          });
+        try {
+          if (interaction.deferred || interaction.replied) {
+            await interaction.followUp({
+              content: `Maverick failed: ${truncate(message, 1500)}`,
+              flags: MessageFlags.Ephemeral,
+            });
+          } else {
+            await interaction.reply({
+              content: `Maverick failed: ${truncate(message, 1500)}`,
+              flags: MessageFlags.Ephemeral,
+            });
+          }
+        } catch (responseError) {
+          log.warn(
+            { err: responseError, originalError: message },
+            "Failed to send Discord interaction error response"
+          );
         }
       }
     }
@@ -1141,12 +1149,23 @@ export class DiscordBot {
       trigger: "manual",
     });
     await interaction.editReply(
-      [
-        `Review for \`${workstream.name}\` completed.`,
-        `Reviewer: \`${useClaude ? "claude" : "primary"}\``,
-        `Severity: \`${result.severity}\``,
-        truncate(result.findings, 1500),
-      ].join("\n")
+      this.buildInlineOrAttachedReply({
+        headerLines: [
+          `Review for \`${workstream.name}\` completed.`,
+          `Reviewer: \`${useClaude ? "claude" : "primary"}\``,
+          `Severity: \`${result.severity}\``,
+        ],
+        inlineBody: truncate(result.findings, 1500),
+        fullBody: [
+          `Workstream: ${workstream.name}`,
+          `Reviewer: ${useClaude ? "claude" : "primary"}`,
+          `Severity: ${result.severity}`,
+          "",
+          result.findings,
+        ].join("\n"),
+        attachmentName: `review-${workstream.id}.md`,
+        attachmentNotice: "Full review attached as a Markdown file.",
+      })
     );
   }
 
@@ -1156,11 +1175,24 @@ export class DiscordBot {
     const plan = await this.orchestrator.generatePlan(workstream.id, instruction, "manual");
 
     await interaction.editReply(
-      [
-        `Stored Claude plan for \`${workstream.name}\`.`,
-        `Instruction: ${truncate(instruction, 600)}`,
-        truncate(plan, 1500),
-      ].join("\n")
+      this.buildInlineOrAttachedReply({
+        headerLines: [
+          `Stored Claude plan for \`${workstream.name}\`.`,
+          `Instruction: ${truncate(instruction, 500)}`,
+        ],
+        inlineBody: truncate(plan, 1200),
+        fullBody: [
+          `Workstream: ${workstream.name}`,
+          "",
+          "Instruction:",
+          instruction,
+          "",
+          "Plan:",
+          plan,
+        ].join("\n"),
+        attachmentName: `claude-plan-${workstream.id}.md`,
+        attachmentNotice: "Full plan attached as a Markdown file.",
+      })
     );
   }
 
@@ -1635,6 +1667,28 @@ export class DiscordBot {
         `Severity: \`${severity}\``,
         trimmed,
       ].join("\n"),
+    };
+  }
+
+  private buildInlineOrAttachedReply(params: {
+    headerLines: string[];
+    inlineBody: string;
+    fullBody: string;
+    attachmentName: string;
+    attachmentNotice: string;
+  }): InteractionEditReplyOptions {
+    const inlineContent = [...params.headerLines, params.inlineBody].filter(Boolean).join("\n");
+    if (inlineContent.length <= 1900) {
+      return { content: inlineContent };
+    }
+
+    return {
+      content: [...params.headerLines, params.attachmentNotice].filter(Boolean).join("\n"),
+      files: [
+        new AttachmentBuilder(Buffer.from(params.fullBody, "utf8"), {
+          name: params.attachmentName,
+        }),
+      ],
     };
   }
 

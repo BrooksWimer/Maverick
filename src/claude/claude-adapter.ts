@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { createLogger } from "../logger.js";
@@ -115,6 +114,56 @@ function normalizeSeverity(value: unknown): ReviewResult["severity"] {
     : "minor";
 }
 
+function resolveDefaultClaudePath(explicitPath?: string): string {
+  if (explicitPath?.trim()) {
+    return explicitPath.trim();
+  }
+
+  if (process.env.CLAUDE_PATH?.trim()) {
+    return process.env.CLAUDE_PATH.trim();
+  }
+
+  if (process.platform === "win32") {
+    const candidates = [
+      process.env.USERPROFILE ? join(process.env.USERPROFILE, ".local", "bin", "claude.exe") : null,
+      process.env.APPDATA ? join(process.env.APPDATA, "npm", "claude.cmd") : null,
+      "claude.cmd",
+      "claude",
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+
+      if (!candidate.includes("\\") && !candidate.includes("/")) {
+        return candidate;
+      }
+
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return "claude";
+}
+
+function needsShell(command: string): boolean {
+  return process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+}
+
+function formatProcessError(error: unknown, attemptedPath: string): string {
+  if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+    return [
+      `Claude CLI executable was not found at "${attemptedPath}".`,
+      "Install Claude Code or set CLAUDE_PATH to the full executable path.",
+    ].join(" ");
+  }
+
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function parseStructuredReviewOutput(output: string): ReviewResult {
   const trimmed = output.trim();
   const codeFenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]+?)\s*```/i);
@@ -139,22 +188,6 @@ export function parseStructuredReviewOutput(output: string): ReviewResult {
   }
 }
 
-async function withSystemPromptFile(systemPrompt: string | undefined, run: (path?: string) => Promise<TurnResult>) {
-  if (!systemPrompt) {
-    return run();
-  }
-
-  const tempDir = await mkdtemp(join(tmpdir(), "maverick-claude-"));
-  const promptPath = join(tempDir, "system-prompt.txt");
-  await writeFile(promptPath, systemPrompt, "utf8");
-
-  try {
-    return await run(promptPath);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-}
-
 export class ClaudeCliAdapter implements ExecutionBackendAdapter {
   readonly name = "claude-code";
 
@@ -167,7 +200,7 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
   constructor(options: ClaudeCliOptions = {}) {
     this.options = {
       model: options.model ?? "sonnet",
-      claudePath: options.claudePath ?? process.env.CLAUDE_PATH ?? "claude",
+      claudePath: resolveDefaultClaudePath(options.claudePath),
       permissionMode: options.permissionMode ?? "plan",
       maxTurns: options.maxTurns ?? 10,
     };
@@ -208,25 +241,21 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
     thread.status = "active";
 
     const permissionMode = request.permissionMode ?? this.options.permissionMode;
-    const maxTurns = request.maxTurns ?? this.options.maxTurns;
     const model = request.model ?? this.options.model;
 
     try {
-      const result = await withSystemPromptFile(request.systemPrompt, async (systemPromptPath) => {
-        return this.runClaudeTurn(request.threadId, request.cwd, request.instruction, {
-          addDirs: request.addDirs ?? [],
-          model,
-          maxTurns,
-          permissionMode,
-          systemPromptPath,
-        });
+      const result = await this.runClaudeTurn(request.threadId, request.cwd, request.instruction, {
+        addDirs: request.addDirs ?? [],
+        model,
+        permissionMode,
+        systemPrompt: request.systemPrompt,
       });
 
       thread.status = "idle";
       return result;
     } catch (error) {
       thread.status = "idle";
-      const message = error instanceof Error ? error.message : String(error);
+      const message = formatProcessError(error, this.options.claudePath);
       log.error({ err: error, threadId: request.threadId }, "Claude turn failed");
       return {
         status: "failed",
@@ -302,42 +331,39 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
     options: {
       addDirs: string[];
       model: string;
-      maxTurns: number;
       permissionMode: string;
-      systemPromptPath?: string;
+      systemPrompt?: string;
     }
   ): Promise<TurnResult> {
     return new Promise((resolve, reject) => {
       const args = [
         "-p",
+        "--verbose",
+        "--input-format",
+        "text",
         "--output-format",
         "stream-json",
-        "--cwd",
-        cwd,
         "--model",
         options.model,
-        "--max-turns",
-        String(options.maxTurns),
       ];
 
       if (options.permissionMode !== "default") {
         args.push("--permission-mode", options.permissionMode);
       }
 
-      if (options.systemPromptPath) {
-        args.push("--system-prompt-file", options.systemPromptPath);
+      if (options.systemPrompt) {
+        args.push("--system-prompt", options.systemPrompt);
       }
 
       for (const addDir of options.addDirs) {
         args.push("--add-dir", addDir);
       }
 
-      args.push(instruction);
-
       const child = spawn(this.options.claudePath, args, {
         cwd,
         env: { ...process.env },
-        stdio: ["ignore", "pipe", "pipe"],
+        shell: needsShell(this.options.claudePath),
+        stdio: ["pipe", "pipe", "pipe"],
       });
 
       this.activeProcesses.set(threadId, child);
@@ -372,6 +398,8 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
         stderrLines.push(line);
       });
 
+      child.stdin.end(instruction);
+
       child.on("close", (code) => {
         this.activeProcesses.delete(threadId);
         stdout.close();
@@ -399,7 +427,7 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
         this.activeProcesses.delete(threadId);
         stdout.close();
         stderr.close();
-        reject(error);
+        reject(new Error(formatProcessError(error, this.options.claudePath)));
       });
     });
   }
@@ -409,6 +437,7 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
       const child = spawn(args[0], args.slice(1), {
         cwd: process.cwd(),
         env: { ...process.env },
+        shell: needsShell(args[0]),
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -431,7 +460,9 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
         reject(new Error(stderr.trim() || stdout.trim() || `Command exited with ${code}`));
       });
 
-      child.on("error", reject);
+      child.on("error", (error) => {
+        reject(new Error(formatProcessError(error, args[0])));
+      });
     });
   }
 }
