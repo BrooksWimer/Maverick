@@ -132,14 +132,14 @@ if (-not $SkipPush) {
 
 $remoteCommand = @(
     "set -euo pipefail",
-    "sudo --preserve-env=SSH_AUTH_SOCK git -C $RemoteAppDir -c safe.directory=$RemoteAppDir fetch --all --prune",
-    "sudo --preserve-env=SSH_AUTH_SOCK git -C $RemoteAppDir -c safe.directory=$RemoteAppDir checkout $Branch",
-    "sudo --preserve-env=SSH_AUTH_SOCK git -C $RemoteAppDir -c safe.directory=$RemoteAppDir pull --ff-only origin $Branch",
-    "sudo chown -R maverick:maverick $RemoteAppDir",
-    "sudo -u maverick npm --prefix $RemoteAppDir ci --include=dev",
-    "sudo -u maverick npm --prefix $RemoteAppDir run build",
-    "sudo systemctl restart $ServiceName",
-    "sleep 2",
+    "sudo --preserve-env=SSH_AUTH_SOCK -- git -C $RemoteAppDir -c safe.directory=$RemoteAppDir fetch --all --prune",
+    "sudo --preserve-env=SSH_AUTH_SOCK -- git -C $RemoteAppDir -c safe.directory=$RemoteAppDir checkout $Branch",
+    "sudo --preserve-env=SSH_AUTH_SOCK -- git -C $RemoteAppDir -c safe.directory=$RemoteAppDir pull --ff-only origin $Branch",
+    "sudo -- chown -R maverick:maverick $RemoteAppDir",
+    "sudo -u maverick -H -- npm --prefix $RemoteAppDir ci --include=dev",
+    "sudo -u maverick -H -- npm --prefix $RemoteAppDir run build",
+    "sudo -- systemctl restart $ServiceName",
+    "sleep 3",
     "curl --fail --silent http://127.0.0.1:3847/health"
 ) -join " && "
 
