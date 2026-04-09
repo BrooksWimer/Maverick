@@ -33,13 +33,22 @@ function Invoke-NativeCommand {
     }
 }
 
+function Quote-BashString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return "'" + ($Value -replace "'", "'""'""'") + "'"
+}
+
 function Invoke-SshCommand {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Command
     )
 
-    Invoke-NativeCommand -FilePath "ssh" -Arguments @($SshHost, "bash", "-lc", $Command)
+    Invoke-NativeCommand -FilePath "ssh" -Arguments @($SshHost, "bash", "-lc", (Quote-BashString -Value $Command))
 }
 
 function Copy-ToRemote {

@@ -51,13 +51,22 @@ function Get-SshToolPath {
     return $Tool
 }
 
+function Quote-BashString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return "'" + ($Value -replace "'", "'""'""'") + "'"
+}
+
 function Invoke-SshCommand {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Command
     )
 
-    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "ssh") -Arguments @($SshHost, "bash", "-lc", $Command)
+    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "ssh") -Arguments @($SshHost, "bash", "-lc", (Quote-BashString -Value $Command))
 }
 
 Invoke-NativeCommand -FilePath "git" -Arguments @("-C", $repoRoot, "rev-parse", "--verify", $Branch)

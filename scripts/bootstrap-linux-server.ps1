@@ -123,7 +123,7 @@ function Invoke-SshCommand {
         [string]$Command
     )
 
-    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "ssh") -Arguments @($SshHost, "bash", "-lc", $Command)
+    Invoke-NativeCommand -FilePath (Get-SshToolPath -Tool "ssh") -Arguments @($SshHost, "bash", "-lc", (Quote-BashString -Value $Command))
 }
 
 function Copy-ToRemote {
