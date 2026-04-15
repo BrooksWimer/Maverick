@@ -114,6 +114,13 @@ export async function createHttpServer(
     return result;
   });
 
+  app.post("/api/workstreams/:id/verify", async (req) => {
+    const { id } = req.params as { id: string };
+    return orchestrator.verify(id, {
+      trigger: "manual",
+    });
+  });
+
   // --- Turns ---
 
   app.get("/api/workstreams/:id/turns", async (req) => {

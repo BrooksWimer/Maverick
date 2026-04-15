@@ -79,6 +79,18 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
   ensureColumn(db, "workstreams", "plan", "ALTER TABLE workstreams ADD COLUMN plan TEXT");
   ensureColumn(
     db,
+    "workstreams",
+    "planning_context_json",
+    "ALTER TABLE workstreams ADD COLUMN planning_context_json TEXT"
+  );
+  ensureColumn(
+    db,
+    "workstreams",
+    "verification_context_json",
+    "ALTER TABLE workstreams ADD COLUMN verification_context_json TEXT"
+  );
+  ensureColumn(
+    db,
     "assistant_notes",
     "note_context",
     "ALTER TABLE assistant_notes ADD COLUMN note_context TEXT NOT NULL DEFAULT 'general'"

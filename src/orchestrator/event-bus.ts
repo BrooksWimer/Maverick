@@ -6,6 +6,7 @@
  */
 import EventEmitter from "eventemitter3";
 import type { BriefTrigger } from "../claude/types.js";
+import type { PendingPlanningDecision } from "../agents/types.js";
 
 // --- Event types ---
 
@@ -60,8 +61,21 @@ export interface ApprovalResolvedEvent {
 
 export interface DecisionNeededEvent {
   workstreamId: string;
-  question: string;
-  options: string[];
+  trigger: "manual" | "auto" | "resume";
+  instruction: string;
+  questions: PendingPlanningDecision[];
+  renderedPlan: string;
+  formattedMarkdown: string;
+}
+
+export interface PlanGeneratedEvent {
+  workstreamId: string;
+  trigger: "manual" | "auto" | "resume";
+  instruction: string;
+  renderedPlan: string;
+  formattedMarkdown: string;
+  finalExecutionPrompt: string | null;
+  needsAnswers: boolean;
 }
 
 export interface ErrorEvent {
@@ -89,6 +103,14 @@ export interface ReviewCompletedEvent {
   target: string;
 }
 
+export interface VerificationCompletedEvent {
+  workstreamId: string;
+  trigger: "manual" | "auto";
+  status: "pass" | "fail";
+  recommendation: "ready-for-review" | "needs-fixes";
+  renderedVerification: string;
+}
+
 // --- Event map ---
 
 export interface OrchestratorEvents {
@@ -100,7 +122,9 @@ export interface OrchestratorEvents {
   "approval.requested": (event: ApprovalRequestedEvent) => void;
   "approval.resolved": (event: ApprovalResolvedEvent) => void;
   "decision.needed": (event: DecisionNeededEvent) => void;
+  "plan.generated": (event: PlanGeneratedEvent) => void;
   "brief.generated": (event: BriefGeneratedEvent) => void;
+  "verification.completed": (event: VerificationCompletedEvent) => void;
   "review.completed": (event: ReviewCompletedEvent) => void;
   "error": (event: ErrorEvent) => void;
 }

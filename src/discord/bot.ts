@@ -28,6 +28,8 @@ import type { ApprovalRow, WorkstreamRow } from "../state/index.js";
 import type { DiscordRoute, EpicBranchConfig, OrchestratorConfig, ProjectConfig } from "../config/schema.js";
 import { workstreamLaneForEpic } from "../projects/epics.js";
 import type { AssistantAttachment } from "../assistant/types.js";
+import { parsePlanningContextRecord } from "../agents/planning-support.js";
+import { parseVerificationContextRecord } from "../agents/verification-support.js";
 
 const log = createLogger("discord");
 
@@ -87,6 +89,38 @@ export function shouldAttachReplyPreview(
   const inlinePreview = truncate(previewBody, previewLimit);
   const inlineContent = [...headerLines, inlinePreview].filter(Boolean).join("\n");
   return inlinePreview !== previewBody || inlineContent.length > 1900;
+}
+
+export function parsePlanningAnswerInput(text: string): {
+  answers: Record<string, string>;
+  invalidLines: string[];
+} {
+  const answers: Record<string, string> = {};
+  const invalidLines: string[] = [];
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+
+    const separatorIndex = line.search(/[:=]/);
+    if (separatorIndex <= 0) {
+      invalidLines.push(line);
+      continue;
+    }
+
+    const questionId = line.slice(0, separatorIndex).trim();
+    const answer = line.slice(separatorIndex + 1).trim();
+    if (!questionId || !answer) {
+      invalidLines.push(line);
+      continue;
+    }
+
+    answers[questionId] = answer;
+  }
+
+  return { answers, invalidLines };
 }
 
 export function persistedEpicIdForResolvedEpic(
@@ -194,6 +228,12 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .addStringOption((option) =>
           option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
         )
+        .addBooleanOption((option) =>
+          option
+            .setName("resume")
+            .setDescription("Resume the existing planning flow instead of starting a fresh one")
+            .setRequired(false)
+        )
     )
     .addSubcommand((subcommand) =>
       subcommand
@@ -244,12 +284,34 @@ function subcommandBuilder(config: OrchestratorConfig) {
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("verify")
+        .setDescription("Run Claude verification for the current workstream")
+        .addStringOption((option) =>
+          option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("plan")
         .setDescription("Generate and store a Claude implementation plan")
         .addStringOption((option) =>
           option
             .setName("instruction")
             .setDescription("High-level instruction for Claude to plan")
+            .setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("answer-plan")
+        .setDescription("Provide structured answers for a pending planning flow")
+        .addStringOption((option) =>
+          option
+            .setName("answers")
+            .setDescription("One answer per line using question-id: answer")
             .setRequired(true)
         )
         .addStringOption((option) =>
@@ -621,6 +683,80 @@ export class DiscordBot {
       });
     });
 
+    eventBus.on("verification.completed", (event) => {
+      this.runBackgroundTask("verification.completed", async () => {
+        const channel = await this.resolveNotificationChannelFromWorkstreamId(event.workstreamId, "notifications");
+        if (!channel) {
+          log.warn({ workstreamId: event.workstreamId }, "No Discord channel available for Claude verification");
+          return;
+        }
+
+        await this.safeSend(
+          channel,
+          this.buildVerificationCompletedMessage(
+            event.workstreamId,
+            event.status,
+            event.recommendation,
+            event.renderedVerification,
+          ),
+        );
+      });
+    });
+
+    eventBus.on("decision.needed", (event) => {
+      if (event.trigger !== "auto") {
+        return;
+      }
+
+      this.runBackgroundTask("decision.needed", async () => {
+        const workstream = this.orchestrator.getWorkstream(event.workstreamId);
+        if (!workstream) {
+          return;
+        }
+
+        const channel = await this.resolveNotificationChannel(workstream, "notifications");
+        if (!channel) {
+          log.warn({ workstreamId: event.workstreamId }, "No Discord channel available for planning questions");
+          return;
+        }
+
+        await this.safeSend(
+          channel,
+          this.buildPlanningQuestionsMessage(workstream.name, event.instruction, event.formattedMarkdown, event.renderedPlan)
+        );
+      });
+    });
+
+    eventBus.on("plan.generated", (event) => {
+      if (event.trigger !== "auto" || event.needsAnswers) {
+        return;
+      }
+
+      this.runBackgroundTask("plan.generated", async () => {
+        const workstream = this.orchestrator.getWorkstream(event.workstreamId);
+        if (!workstream) {
+          return;
+        }
+
+        const channel = await this.resolveNotificationChannel(workstream, "notifications");
+        if (!channel) {
+          log.warn({ workstreamId: event.workstreamId }, "No Discord channel available for auto-generated plan");
+          return;
+        }
+
+        await this.safeSend(
+          channel,
+          this.buildPlanGeneratedMessage(
+            workstream.name,
+            event.instruction,
+            event.formattedMarkdown,
+            event.renderedPlan,
+            event.finalExecutionPrompt,
+          )
+        );
+      });
+    });
+
     eventBus.on("error", (event) => {
       this.runBackgroundTask("error", async () => {
         const channel = event.workstreamId
@@ -792,9 +928,17 @@ export class DiscordBot {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await this.handleReview(interaction);
         return;
+      case "verify":
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await this.handleVerify(interaction);
+        return;
       case "plan":
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await this.handlePlan(interaction);
+        return;
+      case "answer-plan":
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await this.handleAnswerPlan(interaction);
         return;
       default:
         await interaction.reply({
@@ -1180,18 +1324,58 @@ export class DiscordBot {
     );
   }
 
-  private async handlePlan(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async handleVerify(interaction: ChatInputCommandInteraction): Promise<void> {
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
-    const instruction = interaction.options.getString("instruction", true);
-    const plan = await this.orchestrator.generatePlan(workstream.id, instruction, "manual");
+    const result = await this.orchestrator.verify(workstream.id, {
+      trigger: "manual",
+    });
 
     await interaction.editReply(
       this.buildInlineOrAttachedReply({
         headerLines: [
-          `Stored Claude plan for \`${workstream.name}\`.`,
-          `Instruction: ${truncate(instruction, 500)}`,
+          `Verification for \`${workstream.name}\` completed.`,
+          `Status: \`${result.verificationContext.result.status}\``,
+          `Recommendation: \`${result.verificationContext.result.recommendation}\``,
         ],
-        previewBody: plan,
+        previewBody: result.renderedVerification,
+        previewLimit: 1500,
+        fullBody: [
+          `Workstream: ${workstream.name}`,
+          "",
+          result.renderedVerification,
+        ].join("\n"),
+        attachmentName: `verification-${workstream.id}.md`,
+        attachmentNotice: "Full verification report attached as a Markdown file.",
+      })
+    );
+  }
+
+  private async handlePlan(interaction: ChatInputCommandInteraction): Promise<void> {
+    const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
+    const instruction = interaction.options.getString("instruction", true);
+    const resume = interaction.options.getBoolean("resume") ?? false;
+    const plan = await this.orchestrator.generatePlan(workstream.id, instruction, "manual", {
+      resumeExisting: resume,
+    });
+    const dispatchReady = Boolean(plan.finalExecutionPrompt);
+    const previewMarkdown = plan.planningContext.explanation?.markdown ?? plan.renderedPlan;
+
+    await interaction.editReply(
+      this.buildInlineOrAttachedReply({
+        headerLines: [
+          plan.needsAnswers
+            ? `Stored decision-gated plan for \`${workstream.name}\`; operator answers are still required.`
+            : dispatchReady
+              ? `Stored decision-gated plan for \`${workstream.name}\`; the final execution prompt is ready.`
+              : `Stored decision-gated plan for \`${workstream.name}\`; review the draft because no final execution prompt is ready yet.`,
+          `Instruction: ${truncate(instruction, 500)}`,
+          plan.needsAnswers
+            ? "Use `/workstream answer-plan` with `question-id: answer` lines."
+            : dispatchReady
+              ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
+              : "Run `/workstream plan --resume true` or start a fresh plan once you want to finalize the execution prompt.",
+        ],
+        previewBody: previewMarkdown,
         previewLimit: 1200,
         fullBody: [
           `Workstream: ${workstream.name}`,
@@ -1200,10 +1384,53 @@ export class DiscordBot {
           instruction,
           "",
           "Plan:",
-          plan,
+          plan.renderedPlan,
         ].join("\n"),
         attachmentName: `claude-plan-${workstream.id}.md`,
         attachmentNotice: "Full plan attached as a Markdown file.",
+      })
+    );
+  }
+
+  private async handleAnswerPlan(interaction: ChatInputCommandInteraction): Promise<void> {
+    const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
+    const answersText = interaction.options.getString("answers", true);
+    const parsed = parsePlanningAnswerInput(answersText);
+
+    if (parsed.invalidLines.length > 0) {
+      throw new Error(
+        `Answer lines must use "question-id: answer". Invalid lines: ${parsed.invalidLines.join(" | ")}`
+      );
+    }
+
+    const result = await this.orchestrator.provideDecisionAnswers(workstream.id, parsed.answers, interaction.user.id);
+    const dispatchReady = Boolean(result.finalExecutionPrompt);
+    const previewMarkdown = result.planningContext.explanation?.markdown ?? result.renderedPlan;
+
+    await interaction.editReply(
+      this.buildInlineOrAttachedReply({
+        headerLines: [
+          result.needsAnswers
+            ? `Updated planning for \`${workstream.name}\`; more operator answers are still required.`
+            : dispatchReady
+              ? `Updated planning for \`${workstream.name}\`; the final execution prompt is ready.`
+              : `Updated planning for \`${workstream.name}\`; planning is resolved, but no final execution prompt is ready yet.`,
+          result.needsAnswers
+            ? "Use `/workstream answer-plan` again if you want to resolve the remaining questions."
+            : dispatchReady
+              ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
+              : "Run `/workstream plan --resume true` or start a fresh plan to finalize the execution prompt.",
+        ],
+        previewBody: previewMarkdown,
+        previewLimit: 1200,
+        fullBody: [
+          `Workstream: ${workstream.name}`,
+          "",
+          "Updated planning context:",
+          result.renderedPlan,
+        ].join("\n"),
+        attachmentName: `claude-plan-${workstream.id}.md`,
+        attachmentNotice: "Full planning context attached as a Markdown file.",
       })
     );
   }
@@ -1279,6 +1506,8 @@ export class DiscordBot {
 
   private formatWorkstream(workstream: WorkstreamRow): string {
     const latestTurn = this.orchestrator.getWorkstreamTurns(workstream.id).slice(-1)[0] ?? null;
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    const verificationContext = parseVerificationContextRecord(workstream.verification_context_json);
 
     return [
       `Workstream: \`${workstream.name}\``,
@@ -1292,6 +1521,18 @@ export class DiscordBot {
       workstream.current_goal ? `Current goal: ${truncate(workstream.current_goal, 1200)}` : null,
       latestTurn?.result_summary && latestTurn.status !== "completed"
         ? `Latest turn summary: ${truncate(latestTurn.result_summary, 1200)}`
+        : null,
+      planningContext
+        ? planningContext.pendingQuestions.length > 0
+          ? `Planning: awaiting ${planningContext.pendingQuestions.length} answer(s)`
+          : planningContext.finalExecutionPrompt
+            ? "Planning: final execution prompt ready"
+            : "Planning: structured context stored, final prompt not ready"
+        : null,
+      verificationContext
+        ? verificationContext.result.status === "pass"
+          ? "Verification: passed"
+          : `Verification: failed with ${verificationContext.result.introducedFailures.length} introduced issue${verificationContext.result.introducedFailures.length === 1 ? "" : "s"}`
         : null,
       workstream.plan ? `Stored plan: ${truncate(workstream.plan, 1200)}` : null,
       workstream.summary ? `Summary: ${truncate(workstream.summary, 1200)}` : null,
@@ -1679,6 +1920,100 @@ export class DiscordBot {
         `Severity: \`${severity}\``,
         trimmed,
       ].join("\n"),
+    };
+  }
+
+  private buildVerificationCompletedMessage(
+    workstreamId: string,
+    status: string,
+    recommendation: string,
+    renderedVerification: string
+  ): MessageCreateOptions {
+    const trimmed = renderedVerification.trim();
+    if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
+      const attachment = new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+        name: `verification-${workstreamId}.md`,
+      });
+
+      return {
+        content: [
+          "Claude completed verification.",
+          `Workstream: \`${workstreamId}\``,
+          `Status: \`${status}\``,
+          `Recommendation: \`${recommendation}\``,
+          "Full verification report attached as a Markdown file.",
+        ].join("\n"),
+        files: [attachment],
+      };
+    }
+
+    return {
+      content: [
+        "Claude completed verification.",
+        `Workstream: \`${workstreamId}\``,
+        `Status: \`${status}\``,
+        `Recommendation: \`${recommendation}\``,
+        trimmed,
+      ].join("\n"),
+    };
+  }
+
+  private buildPlanningQuestionsMessage(
+    workstreamName: string,
+    instruction: string,
+    formattedMarkdown: string,
+    renderedPlan: string,
+  ): MessageCreateOptions {
+    const headerLines = [
+      `Planning for \`${workstreamName}\` is waiting on operator input.`,
+      `Instruction: ${truncate(instruction, 500)}`,
+      "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
+    ];
+
+    if (!shouldAttachReplyPreview(headerLines, formattedMarkdown, 1400)) {
+      return {
+        content: [...headerLines, formattedMarkdown].join("\n"),
+      };
+    }
+
+    return {
+      content: [...headerLines, "Full planning context attached as a Markdown file."].join("\n"),
+      files: [
+        new AttachmentBuilder(Buffer.from(renderedPlan, "utf8"), {
+          name: "planning-questions.md",
+        }),
+      ],
+    };
+  }
+
+  private buildPlanGeneratedMessage(
+    workstreamName: string,
+    instruction: string,
+    formattedMarkdown: string,
+    renderedPlan: string,
+    finalExecutionPrompt: string | null,
+  ): MessageCreateOptions {
+    const headerLines = [
+      `Planning for \`${workstreamName}\` is ready.`,
+      `Instruction: ${truncate(instruction, 500)}`,
+      finalExecutionPrompt
+        ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
+        : "A structured plan was stored, but no final execution prompt is ready yet.",
+    ];
+
+    if (!shouldAttachReplyPreview(headerLines, formattedMarkdown, 1400)) {
+      return {
+        content: [...headerLines, formattedMarkdown].join("\n"),
+      };
+    }
+
+    return {
+      content: [...headerLines, "Full planning context attached as a Markdown file."].join("\n"),
+      files: [
+        new AttachmentBuilder(Buffer.from(renderedPlan, "utf8"), {
+          name: "planning-ready.md",
+        }),
+      ],
     };
   }
 

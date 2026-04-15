@@ -47,7 +47,7 @@ describe("workstream plan persistence", () => {
 
   afterEach(() => {
     closeDatabase();
-    rmSync(tempDir, { recursive: true, force: true });
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("stores plans directly on workstream records", () => {
@@ -59,9 +59,14 @@ describe("workstream plan persistence", () => {
     const updated = workstreams.update(workstream.id, {
       current_goal: "Ship planning",
       plan: "1. Inspect files\n2. Add schema\n3. Test it",
+      planning_context_json: JSON.stringify({
+        schemaVersion: 1,
+        originalInstruction: "Ship planning",
+      }),
     });
 
     expect(updated?.plan).toContain("Inspect files");
     expect(updated?.current_goal).toBe("Ship planning");
+    expect(updated?.planning_context_json).toContain("originalInstruction");
   });
 });

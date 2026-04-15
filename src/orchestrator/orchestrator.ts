@@ -15,12 +15,6 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   BriefCollector,
   briefFilename,
-  buildBriefInstruction,
-  buildBriefSystemPrompt,
-  buildPlanningInstruction,
-  buildPlanningSystemPrompt,
-  buildReviewInstruction,
-  buildReviewSystemPrompt,
   cronMatchesDate,
   renderBriefMarkdown,
   scheduledMinuteKey,
@@ -28,6 +22,38 @@ import {
   type BriefTrigger,
   type GeneratedBrief,
 } from "../claude/index.js";
+import { runAgent } from "../agents/agent-runner.js";
+import { coerceBriefAgentResult, renderBriefContent } from "../agents/brief-support.js";
+import { renderEpicContextAnalysis } from "../agents/epic-context-support.js";
+import {
+  parseGoalFrameResult,
+  parseIntakeResult,
+  renderGoalFrameMarkdown,
+  renderIntakeMarkdown,
+} from "../agents/goal-framing-support.js";
+import {
+  buildIncidentContinuationInstruction,
+  coerceIncidentTriageResult,
+} from "../agents/incident-triage-support.js";
+import { parseModelingResult, renderModelingMarkdown } from "../agents/modeling-support.js";
+import { coerceOperatorFeedbackResult, renderOperatorFeedbackMarkdown } from "../agents/operator-feedback-support.js";
+import {
+  buildPlanningContextRecord,
+  mergePlanningAnswers,
+  parsePlanningContextRecord,
+  parsePlanningResult,
+  renderPlanningSummary,
+  serializePlanningAnswers,
+} from "../agents/planning-support.js";
+import { coerceExplanationResult } from "../agents/response-formatting-support.js";
+import { coerceReviewAgentResult } from "../agents/review-support.js";
+import { parseTestDesignResult, renderTestDesignMarkdown } from "../agents/test-design-support.js";
+import {
+  buildVerificationContextRecord,
+  coerceVerificationResult,
+  parseVerificationContextRecord,
+  renderVerificationSummary,
+} from "../agents/verification-support.js";
 import { createLogger } from "../logger.js";
 import { eventBus } from "./event-bus.js";
 import { WorkstreamStateMachine } from "./state-machine.js";
@@ -39,8 +65,34 @@ import type { EscalationTier, OrchestratorConfig, ProjectConfig, RemoteHostConfi
 import { ensureProjectBootstrap, ensureWorktreeBootstrap, type BootstrapStatus } from "../projects/bootstrap.js";
 import { buildEpicCharterContext, requireEpicById, workstreamLaneForEpic } from "../projects/epics.js";
 import { provisionWorktree } from "../git/worktree.js";
+import type {
+  ExplanationResult,
+  GoalFrameResult,
+  IntakeResult,
+  ModelingResult,
+  OperatorFeedbackResult,
+  PlanningAnswer,
+  PlanningContextRecord,
+  TestDesignResult,
+  VerificationContextRecord,
+} from "../agents/types.js";
 
 const log = createLogger("orchestrator");
+
+type PlanningRunTrigger = "manual" | "auto" | "resume";
+
+type GeneratedPlanResult = {
+  renderedPlan: string;
+  planningContext: PlanningContextRecord;
+  finalExecutionPrompt: string | null;
+  needsAnswers: boolean;
+};
+
+type GeneratePlanOptions = {
+  resumeExisting?: boolean;
+};
+
+type VerificationRunTrigger = "manual" | "auto";
 
 const SAFE_COMMAND_PATTERNS = [
   /\bgo\s+test\b/i,
@@ -366,8 +418,23 @@ export class Orchestrator {
   }
 
   async dispatch(workstreamId: string, instruction: string) {
-    const ws = workstreams.getById(workstreamId);
+    let ws = workstreams.getById(workstreamId);
     if (!ws) throw new Error(`Workstream not found: ${workstreamId}`);
+    const planningContext = parsePlanningContextRecord(ws.planning_context_json);
+    if (planningContext?.status === "needs-answers") {
+      throw new Error(
+        `Dispatch is blocked for "${ws.name}" because planning still has unresolved questions. Answer them with /workstream answer-plan or start a fresh /workstream plan.`
+      );
+    }
+    if (planningContext?.status === "needs-final-prompt") {
+      throw new Error(
+        `Dispatch is blocked for "${ws.name}" because planning has no final execution prompt yet. Start a fresh /workstream plan or resume the current flow explicitly.`
+      );
+    }
+
+    if (ws.state === "planning") {
+      ws = this.tryTransitionState(ws, "plan-approved", { allowAutoPlan: false });
+    }
 
     const dispatchWorkstream = await this.prepareWorkstreamForDispatch(ws);
     const adapter = this.getAdapter(dispatchWorkstream.project_id);
@@ -453,7 +520,10 @@ export class Orchestrator {
         source: "orchestrator",
       });
 
-      this.maybeStartAutoClaudeReview(dispatchWorkstream, turn.id, result.status);
+      const startedAutoVerification = this.maybeStartAutoVerification(dispatchWorkstream, turn.id, result.status);
+      if (!startedAutoVerification) {
+        this.maybeStartAutoClaudeReview(dispatchWorkstream, turn.id, result.status);
+      }
       this.activeTurnByWorkstream.delete(workstreamId);
       log.info({ workstreamId, turnId: turn.id, status: result.status }, "Turn completed");
       return result;
@@ -580,30 +650,8 @@ export class Orchestrator {
     const ws = workstreams.getById(workstreamId);
     if (!ws) throw new Error(`Workstream not found: ${workstreamId}`);
 
-    const sm = this.getStateMachine(ws.project_id);
-    const newState = sm.transition(ws.state, trigger);
-
-    workstreams.update(workstreamId, {
-      state: newState,
-      completed_at: sm.isTerminal(newState) ? new Date().toISOString() : undefined,
-    });
-
-    eventBus.emit("workstream.stateChanged", {
-      workstreamId,
-      from: ws.state,
-      to: newState,
-      trigger,
-    });
-
-    eventLog.emit({
-      workstream_id: workstreamId,
-      project_id: ws.project_id,
-      event_type: "workstream.stateChanged",
-      payload: { from: ws.state, to: newState, trigger },
-      source: "orchestrator",
-    });
-
-    this.maybeStartAutoClaudePlan(workstreams.getById(workstreamId) ?? { ...ws, state: newState });
+    const updated = this.forceTransitionState(ws, trigger);
+    const newState = updated.state;
     log.info({ workstreamId, from: ws.state, to: newState, trigger }, "State transitioned");
     return newState;
   }
@@ -613,16 +661,22 @@ export class Orchestrator {
     target?: string,
     options?: { reviewer?: "primary" | "claude"; trigger?: "manual" | "auto" }
   ) {
-    const ws = workstreams.getById(workstreamId);
-    if (!ws?.codex_thread_id) throw new Error(`Workstream not found or no thread: ${workstreamId}`);
-
     const reviewer = options?.reviewer ?? "primary";
+    const ws = workstreams.getById(workstreamId);
+    if (!ws) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    if (reviewer === "primary" && !ws.codex_thread_id) {
+      throw new Error(`Workstream not found or no thread: ${workstreamId}`);
+    }
+
     const effectiveTarget = target ?? "uncommitted";
     const result =
       reviewer === "claude"
         ? await this.runClaudeReview(ws, effectiveTarget)
         : await this.getAdapter(ws.project_id).startReview({
-            threadId: ws.codex_thread_id,
+            threadId: ws.codex_thread_id!,
             cwd: ws.cwd ?? this.getProject(ws.project_id).repoPath,
             target: effectiveTarget,
           });
@@ -654,6 +708,128 @@ export class Orchestrator {
     return result;
   }
 
+  async verify(
+    workstreamId: string,
+    options?: {
+      trigger?: VerificationRunTrigger;
+      sourceTurnId?: string | null;
+    }
+  ): Promise<{
+    verificationContext: VerificationContextRecord;
+    renderedVerification: string;
+  }> {
+    let workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    const project = this.getProject(workstream.project_id);
+    const verificationConfig = project.claudeVerification;
+    if (!verificationConfig?.enabled) {
+      throw new Error(`Claude verification is disabled for project ${project.id}.`);
+    }
+
+    if (workstream.state === "implementation") {
+      workstream = this.tryTransitionState(workstream, "implementation-complete", { allowAutoPlan: false });
+    }
+
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const previousContext = parseVerificationContextRecord(workstream.verification_context_json);
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    const latestTurn =
+      (options?.sourceTurnId ? turns.getById(options.sourceTurnId) : undefined) ??
+      turns.listByWorkstream(workstream.id).slice(-1)[0] ??
+      null;
+    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, verificationConfig.model);
+    const agentResult = await runAgent(
+      adapter,
+      "verification",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Verify the current workstream changes and determine whether they are ready for review.",
+          latestTurn?.instruction ? `Latest implementation instruction: ${latestTurn.instruction}` : null,
+        ]
+          .filter((line): line is string => Boolean(line))
+          .join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Latest Turn Summary": latestTurn?.result_summary ?? workstream.summary ?? "No turn summary recorded.",
+          "Latest Turn Output": this.getLatestTurnOutput(
+            workstream.id,
+            latestTurn?.result_summary ?? workstream.summary ?? "",
+          ),
+          "Git Status": this.readGitOutput(["status", "--short", "--branch"], cwd),
+          "Git Diff": this.readGitReviewDiff(cwd, "uncommitted"),
+          "Structured Intake": planningContext?.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
+          "Goal Frame": planningContext?.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
+          "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
+          "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        threadId: previousContext?.verificationThreadId ?? undefined,
+        model: verificationConfig.model,
+        maxTurns: 8,
+        permissionMode: "auto",
+      },
+    );
+
+    if (agentResult.status !== "completed") {
+      throw new Error(agentResult.output || "Claude verification failed.");
+    }
+
+    const verificationResult = coerceVerificationResult(agentResult.structured, agentResult.output);
+    let verificationContext = buildVerificationContextRecord({
+      result: verificationResult,
+      rawAgentOutput: agentResult.output,
+      verificationThreadId: agentResult.threadId,
+      sourceTurnId: latestTurn?.id ?? options?.sourceTurnId ?? null,
+      trigger: options?.trigger ?? "manual",
+      previous: previousContext,
+    });
+    if (verificationResult.status === "fail" && verificationResult.introducedFailures.length > 0) {
+      verificationContext = {
+        ...verificationContext,
+        incidentTriage: await this.runVerificationIncidentTriage(
+          workstream,
+          latestTurn?.instruction ?? workstream.current_goal ?? "No recorded implementation instruction.",
+          verificationContext,
+          planningContext,
+          verificationConfig.model,
+          epicContextAnalysis,
+        ),
+      };
+    }
+    const renderedVerification = this.persistVerificationContext(
+      workstream,
+      verificationContext,
+      options?.trigger ?? "manual",
+    );
+    const updatedWorkstream = workstreams.getById(workstream.id) ?? workstream;
+
+    if (
+      verificationResult.status === "pass" &&
+      (options?.trigger ?? "manual") === "auto"
+    ) {
+      this.maybeStartAutoClaudeReviewAfterVerification(updatedWorkstream, latestTurn?.id ?? null);
+    }
+
+    return {
+      verificationContext,
+      renderedVerification,
+    };
+  }
+
   async generateBrief(options?: {
     trigger?: BriefTrigger;
     requestedBy?: string;
@@ -681,7 +857,12 @@ export class Orchestrator {
     }
   }
 
-  async generatePlan(workstreamId: string, instruction: string, trigger: "manual" | "auto" = "manual") {
+  async generatePlan(
+    workstreamId: string,
+    instruction: string,
+    trigger: Exclude<PlanningRunTrigger, "resume"> = "manual",
+    options: GeneratePlanOptions = {},
+  ): Promise<GeneratedPlanResult> {
     const workstream = workstreams.getById(workstreamId);
     if (!workstream) {
       throw new Error(`Workstream not found: ${workstreamId}`);
@@ -695,53 +876,288 @@ export class Orchestrator {
 
     const cwd = workstream.cwd ?? project.repoPath;
     const adapter = await this.getUtilityClaudeAdapter();
-    const thread = await adapter.createThread(cwd);
-    const plan = await adapter.startTurn({
-      threadId: thread.id,
-      cwd,
-      model: planningConfig.model,
-      systemPrompt: buildPlanningSystemPrompt(),
-      instruction: buildPlanningInstruction({
-        projectId: project.id,
-        workstreamName: workstream.name,
-        instruction,
-        agentsMd: this.readAgentsMd(project),
-        directoryTree: this.buildDirectoryTree(cwd),
-        recentTurnHistory: turns.listByWorkstream(workstreamId).slice(-5).map((turn) => ({
-          instruction: turn.instruction,
-          status: turn.status,
-          summary: turn.result_summary,
-        })),
-        epicCharter: this.getEpicCharterContext(workstream),
-      }),
-      addDirs: [cwd],
-      maxTurns: 3,
-      permissionMode: "plan",
-    });
+    const storedContext = parsePlanningContextRecord(workstream.planning_context_json);
+    if (options.resumeExisting && !storedContext) {
+      throw new Error(`Workstream ${workstreamId} has no stored planning context to resume.`);
+    }
+    if (
+      options.resumeExisting &&
+      storedContext &&
+      instruction.trim() !== storedContext.originalInstruction.trim()
+    ) {
+      throw new Error(
+        `Resume uses the existing planning instruction "${storedContext.originalInstruction}". Start a fresh /workstream plan to change it.`
+      );
+    }
+    const previousContext = options.resumeExisting ? storedContext : null;
+    const effectiveInstruction = previousContext?.originalInstruction ?? instruction;
+    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, planningConfig.model);
+    const intake =
+      previousContext?.intake ??
+      await this.runPlanningIntake(workstream, effectiveInstruction, planningConfig.model, epicContextAnalysis);
+    const goalFrame =
+      previousContext?.goalFrame ??
+      await this.runPlanningGoalFrame(workstream, effectiveInstruction, intake, planningConfig.model, epicContextAnalysis);
+    const modeling =
+      previousContext?.modeling ??
+      await this.runPlanningModeling(workstream, effectiveInstruction, intake, goalFrame, planningConfig.model, epicContextAnalysis);
+    const testDesign =
+      previousContext?.testDesign ??
+      await this.runPlanningTestDesign(
+        workstream,
+        effectiveInstruction,
+        intake,
+        goalFrame,
+        modeling,
+        planningConfig.model,
+        epicContextAnalysis,
+      );
+    const agentResult = await runAgent(
+      adapter,
+      "planning",
+      this.buildPlanningAgentContext(
+        workstream,
+        effectiveInstruction,
+        intake,
+        goalFrame,
+        modeling,
+        testDesign,
+        previousContext,
+        undefined,
+        epicContextAnalysis,
+      ),
+      {
+        threadId: previousContext?.planningThreadId ?? undefined,
+        model: planningConfig.model,
+        maxTurns: 6,
+        permissionMode: "plan",
+      },
+    );
 
-    if (plan.status !== "completed") {
-      throw new Error(plan.output || "Claude plan generation failed.");
+    if (agentResult.status !== "completed") {
+      throw new Error(agentResult.output || "Claude plan generation failed.");
     }
 
-    workstreams.update(workstreamId, {
-      current_goal: instruction,
-      plan: plan.output.trim(),
-      summary: trigger === "manual" ? "Claude plan stored for the next dispatch." : "Claude auto-plan stored for the planning state.",
+    const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
+    const basePlanningContext = buildPlanningContextRecord({
+      originalInstruction: effectiveInstruction,
+      result: planningResult,
+      rawAgentOutput: agentResult.output,
+      intake,
+      goalFrame,
+      modeling,
+      testDesign,
+      planningThreadId: agentResult.threadId,
+      previous: previousContext,
+    });
+    const feedbackRequest = await this.runPlanningFeedbackRequest(
+      workstream,
+      effectiveInstruction,
+      basePlanningContext,
+      planningConfig.model,
+      epicContextAnalysis,
+    );
+    const explanation = await this.runPlanningExplanation(
+      workstream,
+      effectiveInstruction,
+      basePlanningContext,
+      feedbackRequest,
+      planningConfig.model,
+      epicContextAnalysis,
+    );
+    const planningContext = buildPlanningContextRecord({
+      originalInstruction: effectiveInstruction,
+      result: planningResult,
+      rawAgentOutput: agentResult.output,
+      intake,
+      goalFrame,
+      modeling,
+      testDesign,
+      feedbackRequest,
+      explanation,
+      planningThreadId: agentResult.threadId,
+      previous: previousContext,
     });
 
+    const renderedPlan = this.persistPlanningContext(workstream, effectiveInstruction, planningContext, trigger);
+    return {
+      renderedPlan,
+      planningContext,
+      finalExecutionPrompt: planningContext.finalExecutionPrompt,
+      needsAnswers: planningContext.pendingQuestions.length > 0,
+    };
+  }
+
+  getPlanningContext(workstreamId: string): PlanningContextRecord | null {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      return null;
+    }
+
+    return parsePlanningContextRecord(workstream.planning_context_json);
+  }
+
+  async provideDecisionAnswers(
+    workstreamId: string,
+    answers: Record<string, string>,
+    answeredBy?: string,
+  ): Promise<GeneratedPlanResult> {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    const existingContext = parsePlanningContextRecord(workstream.planning_context_json);
+    if (!existingContext) {
+      throw new Error(`Workstream ${workstreamId} has no stored planning context to resume.`);
+    }
+
+    const { mergedAnswers, appliedIds, unknownIds } = mergePlanningAnswers(existingContext, answers, {
+      answeredBy: answeredBy ?? null,
+    });
+
+    if (appliedIds.length === 0) {
+      const suffix =
+        unknownIds.length > 0
+          ? ` Unknown question ids: ${unknownIds.join(", ")}.`
+          : "";
+      throw new Error(`No planning answers matched the current pending questions.${suffix}`);
+    }
+
     eventLog.emit({
-      workstream_id: workstreamId,
+      workstream_id: workstream.id,
       project_id: workstream.project_id,
-      event_type: "plan.generated",
+      event_type: "plan.answersProvided",
       payload: {
-        trigger,
-        instruction,
-        length: plan.output.length,
+        answerIds: appliedIds,
+        answeredBy: answeredBy ?? null,
       },
       source: "orchestrator",
     });
 
-    return plan.output.trim();
+    const project = this.getProject(workstream.project_id);
+    const planningConfig = project.claudePlanning;
+    if (!planningConfig?.enabled) {
+      throw new Error(`Claude planning is disabled for project ${project.id}.`);
+    }
+
+    const adapter = await this.getUtilityClaudeAdapter();
+    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, planningConfig.model);
+    const intake =
+      existingContext.intake ??
+      await this.runPlanningIntake(workstream, existingContext.originalInstruction, planningConfig.model, epicContextAnalysis);
+    const goalFrame =
+      existingContext.goalFrame ??
+      await this.runPlanningGoalFrame(
+        workstream,
+        existingContext.originalInstruction,
+        intake,
+        planningConfig.model,
+        epicContextAnalysis,
+      );
+    const modeling =
+      existingContext.modeling ??
+      await this.runPlanningModeling(
+        workstream,
+        existingContext.originalInstruction,
+        intake,
+        goalFrame,
+        planningConfig.model,
+        epicContextAnalysis,
+      );
+    const testDesign =
+      existingContext.testDesign ??
+      await this.runPlanningTestDesign(
+        workstream,
+        existingContext.originalInstruction,
+        intake,
+        goalFrame,
+        modeling,
+        planningConfig.model,
+        epicContextAnalysis,
+      );
+    const agentResult = await runAgent(
+      adapter,
+      "planning",
+      this.buildPlanningAgentContext(
+        workstream,
+        existingContext.originalInstruction,
+        intake,
+        goalFrame,
+        modeling,
+        testDesign,
+        existingContext,
+        mergedAnswers,
+        epicContextAnalysis,
+      ),
+      {
+        threadId: existingContext.planningThreadId ?? undefined,
+        model: planningConfig.model,
+        maxTurns: 6,
+        permissionMode: "plan",
+      },
+    );
+
+    if (agentResult.status !== "completed") {
+      throw new Error(agentResult.output || "Claude planning resume failed.");
+    }
+
+    const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
+    const basePlanningContext = buildPlanningContextRecord({
+      originalInstruction: existingContext.originalInstruction,
+      result: planningResult,
+      rawAgentOutput: agentResult.output,
+      intake,
+      goalFrame,
+      modeling,
+      testDesign,
+      planningThreadId: agentResult.threadId,
+      answers: mergedAnswers,
+      previous: existingContext,
+    });
+    const feedbackRequest = await this.runPlanningFeedbackRequest(
+      workstream,
+      existingContext.originalInstruction,
+      basePlanningContext,
+      planningConfig.model,
+      epicContextAnalysis,
+    );
+    const explanation = await this.runPlanningExplanation(
+      workstream,
+      existingContext.originalInstruction,
+      basePlanningContext,
+      feedbackRequest,
+      planningConfig.model,
+      epicContextAnalysis,
+    );
+    const planningContext = buildPlanningContextRecord({
+      originalInstruction: existingContext.originalInstruction,
+      result: planningResult,
+      rawAgentOutput: agentResult.output,
+      intake,
+      goalFrame,
+      modeling,
+      testDesign,
+      feedbackRequest,
+      explanation,
+      planningThreadId: agentResult.threadId,
+      answers: mergedAnswers,
+      previous: existingContext,
+    });
+
+    const renderedPlan = this.persistPlanningContext(
+      workstream,
+      existingContext.originalInstruction,
+      planningContext,
+      "resume",
+    );
+
+    return {
+      renderedPlan,
+      planningContext,
+      finalExecutionPrompt: planningContext.finalExecutionPrompt,
+      needsAnswers: planningContext.pendingQuestions.length > 0,
+    };
   }
 
   // --- Query methods ---
@@ -820,7 +1236,7 @@ export class Orchestrator {
     if (stillPending.length === 0) {
       workstreams.update(ws.id, {
         waiting_on_approval: 0,
-        pending_decision: null,
+        pending_decision: this.planningPendingDecisionForWorkstream(workstreams.getById(ws.id)),
       });
     }
 
@@ -889,12 +1305,14 @@ export class Orchestrator {
   private maybeStartAutoClaudeReview(workstream: WorkstreamRow, turnId: string, turnStatus: string): void {
     const project = this.getProject(workstream.project_id);
     const reviewConfig = project.claudeReview;
+    const verificationConfig = project.claudeVerification;
     const primaryAdapter = this.getAdapter(workstream.project_id);
 
     if (
       !reviewConfig?.enabled ||
       !reviewConfig.autoAfterTurn ||
       turnStatus !== "completed" ||
+      (verificationConfig?.enabled && verificationConfig.autoAfterTurn) ||
       !primaryAdapter.name.startsWith("codex")
     ) {
       return;
@@ -910,6 +1328,34 @@ export class Orchestrator {
         context: `Claude auto-review failed for turn ${turnId}`,
       });
     });
+  }
+
+  private maybeStartAutoVerification(workstream: WorkstreamRow, turnId: string, turnStatus: string): boolean {
+    const project = this.getProject(workstream.project_id);
+    const verificationConfig = project.claudeVerification;
+    const primaryAdapter = this.getAdapter(workstream.project_id);
+
+    if (
+      !verificationConfig?.enabled ||
+      !verificationConfig.autoAfterTurn ||
+      turnStatus !== "completed" ||
+      !primaryAdapter.name.startsWith("codex")
+    ) {
+      return false;
+    }
+
+    void this.verify(workstream.id, {
+      trigger: "auto",
+      sourceTurnId: turnId,
+    }).catch((error) => {
+      eventBus.emit("error", {
+        workstreamId: workstream.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+        context: `Claude auto-verification failed for turn ${turnId}`,
+      });
+    });
+
+    return true;
   }
 
   private maybeStartAutoClaudePlan(workstream: WorkstreamRow): void {
@@ -938,6 +1384,15 @@ export class Orchestrator {
     userInstruction: string,
     baseInstruction = userInstruction
   ): string {
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    if (
+      planningContext?.finalExecutionPrompt &&
+      workstream.current_goal === planningContext.originalInstruction &&
+      workstream.current_goal === userInstruction
+    ) {
+      return planningContext.finalExecutionPrompt;
+    }
+
     if (!workstream.plan || workstream.current_goal !== userInstruction) {
       return baseInstruction;
     }
@@ -960,30 +1415,53 @@ export class Orchestrator {
 
     const cwd = workstream.cwd ?? project.repoPath;
     const latestTurn = turns.listByWorkstream(workstream.id).slice(-1)[0] ?? null;
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    const verificationContext = parseVerificationContextRecord(workstream.verification_context_json);
     const adapter = await this.getUtilityClaudeAdapter();
-    const reviewThread = await adapter.createThread(cwd);
-
-    return adapter.startReview({
-      threadId: reviewThread.id,
-      cwd,
-      target,
-      model: reviewConfig.model,
-      systemPrompt: buildReviewSystemPrompt(),
-      instruction: buildReviewInstruction({
+    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, reviewConfig.model);
+    const agentResult = await runAgent(
+      adapter,
+      "review",
+      {
         projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
         workstreamName: workstream.name,
+        workstreamState: workstream.state,
         instruction: latestTurn?.instruction ?? workstream.current_goal ?? "No recorded instruction.",
-        turnSummary: latestTurn?.result_summary ?? workstream.summary,
-        turnOutput: this.getLatestTurnOutput(workstream.id, latestTurn?.result_summary ?? workstream.summary ?? ""),
-        gitDiff: this.readGitReviewDiff(cwd, target),
-        gitStatus: this.readGitOutput(["status", "--short", "--branch"], cwd),
+        cwd,
+        addDirs: [cwd],
         epicCharter: this.getEpicCharterContext(workstream),
-        testResults: null,
-      }),
-      addDirs: [cwd],
-      maxTurns: 3,
-      permissionMode: "plan",
-    });
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Review Target": target,
+          "Turn Summary": latestTurn?.result_summary ?? workstream.summary ?? "No turn summary recorded.",
+          "Turn Output": this.getLatestTurnOutput(
+            workstream.id,
+            latestTurn?.result_summary ?? workstream.summary ?? "",
+          ),
+          "Git Status": this.readGitOutput(["status", "--short", "--branch"], cwd),
+          "Git Diff": this.readGitReviewDiff(cwd, target),
+          "Relevant Test Results": verificationContext
+            ? renderVerificationSummary(verificationContext)
+            : "No structured test results captured yet.",
+          "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "No stored system model.",
+          "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "No stored test design.",
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model: reviewConfig.model,
+        maxTurns: 4,
+        permissionMode: "plan",
+      },
+    );
+
+    if (agentResult.status !== "completed") {
+      throw new Error(agentResult.output || "Claude review failed.");
+    }
+
+    return coerceReviewAgentResult(agentResult.structured, agentResult.output);
   }
 
   private async generateBriefInternal(params: {
@@ -996,23 +1474,31 @@ export class Orchestrator {
     const adapter = await this.getUtilityClaudeAdapter();
     const repoPaths = [...new Set(this.config.projects.map((project) => project.repoPath))];
     const cwd = repoPaths[0] ?? process.cwd();
-    const thread = await adapter.createThread(cwd);
-    const turnResult = await adapter.startTurn({
-      threadId: thread.id,
-      instruction: buildBriefInstruction(context),
-      cwd,
-      model: this.config.brief.model,
-      systemPrompt: buildBriefSystemPrompt(),
-      addDirs: repoPaths,
-      maxTurns: 10,
-      permissionMode: "auto",
-    });
+    const agentResult = await runAgent(
+      adapter,
+      "brief",
+      {
+        projectId: "maverick-brief",
+        repoPath: cwd,
+        instruction: "Generate the daily operational brief from the provided control-plane context.",
+        cwd,
+        addDirs: repoPaths,
+        extra: {
+          "Brief Context JSON": JSON.stringify(context, null, 2),
+        },
+      },
+      {
+        model: this.config.brief.model,
+        maxTurns: 10,
+        permissionMode: "auto",
+      },
+    );
 
-    if (turnResult.status !== "completed") {
-      throw new Error(turnResult.output || "Claude brief generation failed.");
+    if (agentResult.status !== "completed") {
+      throw new Error(agentResult.output || "Claude brief generation failed.");
     }
 
-    const content = turnResult.output.trim();
+    const content = renderBriefContent(coerceBriefAgentResult(agentResult.structured, agentResult.output), agentResult.output).trim();
     if (!content) {
       throw new Error("Claude returned an empty brief.");
     }
@@ -1132,6 +1618,761 @@ export class Orchestrator {
     return this.utilityClaudeAdapter;
   }
 
+  private async getAgentEpicContextAnalysis(
+    workstream: WorkstreamRow,
+    model?: string,
+  ): Promise<string | null> {
+    if (!workstream.epic_id) {
+      return null;
+    }
+
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const siblingWorkstreams = workstreams
+      .listByProject(project.id)
+      .filter((candidate) => candidate.epic_id === workstream.epic_id)
+      .map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name,
+        state: candidate.state,
+        summary: candidate.summary,
+        lastActivityAt: candidate.last_activity_at,
+      }));
+    const siblingIds = new Set(siblingWorkstreams.map((candidate) => candidate.id));
+    const recentEpicEvents = eventLog
+      .listRecent(50)
+      .filter((event) => event.workstream_id && siblingIds.has(event.workstream_id))
+      .map((event) => ({
+        workstreamId: event.workstream_id,
+        eventType: event.event_type,
+        createdAt: event.created_at,
+      }));
+    const adapter = await this.getUtilityClaudeAdapter();
+    const agentResult = await runAgent(
+      adapter,
+      "epic-context",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: `Summarize the current durable and operational context for epic ${workstream.epic_id}.`,
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Epic Workstreams": JSON.stringify(siblingWorkstreams, null, 2),
+          "Recent Epic Events": JSON.stringify(recentEpicEvents, null, 2),
+        },
+      },
+      {
+        model,
+        maxTurns: 4,
+        permissionMode: "plan",
+      },
+    );
+
+    if (agentResult.status !== "completed") {
+      return null;
+    }
+
+    return renderEpicContextAnalysis(agentResult.structured, agentResult.output);
+  }
+
+  private async runPlanningIntake(
+    workstream: WorkstreamRow,
+    instruction: string,
+    model?: string,
+    epicContextAnalysis?: string | null,
+  ): Promise<IntakeResult> {
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const recentTurns = turns.listByWorkstream(workstream.id).slice(-5).map((turn) => ({
+      instruction: turn.instruction,
+      status: turn.status,
+      summary: turn.result_summary,
+    }));
+    const agentResult = await runAgent(
+      adapter,
+      "intake",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Scope this workstream request against the current repo state.",
+          `Operator instruction: ${instruction}`,
+        ].join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Directory Tree": this.buildDirectoryTree(cwd),
+          "Recent Turn History": JSON.stringify(recentTurns, null, 2),
+          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
+          "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model,
+        maxTurns: 6,
+        permissionMode: "plan",
+      },
+    );
+
+    if (agentResult.status !== "completed") {
+      throw new Error(agentResult.output || "Claude intake generation failed.");
+    }
+
+    return parseIntakeResult(agentResult.structured, instruction);
+  }
+
+  private async runPlanningGoalFrame(
+    workstream: WorkstreamRow,
+    instruction: string,
+    intake: IntakeResult,
+    model?: string,
+    epicContextAnalysis?: string | null,
+  ): Promise<GoalFrameResult> {
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const agentResult = await runAgent(
+      adapter,
+      "goal-framing",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Turn the scoped intake result into a durable execution frame for this workstream.",
+          `Operator instruction: ${instruction}`,
+        ].join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Structured Intake": renderIntakeMarkdown(intake),
+          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
+          "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model,
+        maxTurns: 4,
+        permissionMode: "plan",
+      },
+    );
+
+    if (agentResult.status !== "completed") {
+      throw new Error(agentResult.output || "Claude goal framing failed.");
+    }
+
+    return parseGoalFrameResult(agentResult.structured, intake);
+  }
+
+  private async runPlanningModeling(
+    workstream: WorkstreamRow,
+    instruction: string,
+    intake: IntakeResult,
+    goalFrame: GoalFrameResult,
+    model?: string,
+    epicContextAnalysis?: string | null,
+  ): Promise<ModelingResult> {
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const agentResult = await runAgent(
+      adapter,
+      "modeling",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Model the part of the system that matters for this workstream.",
+          `Operator instruction: ${instruction}`,
+        ].join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Structured Intake": renderIntakeMarkdown(intake),
+          "Goal Frame": renderGoalFrameMarkdown(goalFrame),
+          "Directory Tree": this.buildDirectoryTree(cwd),
+          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model,
+        maxTurns: 4,
+        permissionMode: "plan",
+      },
+    );
+
+    return parseModelingResult(
+      agentResult.status === "completed" ? agentResult.structured : null,
+      goalFrame.problemStatement || intake.scope || instruction,
+    );
+  }
+
+  private async runPlanningTestDesign(
+    workstream: WorkstreamRow,
+    instruction: string,
+    intake: IntakeResult,
+    goalFrame: GoalFrameResult,
+    modeling: ModelingResult,
+    model?: string,
+    epicContextAnalysis?: string | null,
+  ): Promise<TestDesignResult> {
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const agentResult = await runAgent(
+      adapter,
+      "test-design",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Create test-first execution prep for this workstream.",
+          `Operator instruction: ${instruction}`,
+        ].join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Structured Intake": renderIntakeMarkdown(intake),
+          "Goal Frame": renderGoalFrameMarkdown(goalFrame),
+          "System Model": renderModelingMarkdown(modeling),
+          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model,
+        maxTurns: 4,
+        permissionMode: "plan",
+      },
+    );
+
+    return parseTestDesignResult(
+      agentResult.status === "completed" ? agentResult.structured : null,
+      goalFrame.successCriteria[0] ?? intake.acceptanceCriteria[0] ?? instruction,
+    );
+  }
+
+  private async runPlanningFeedbackRequest(
+    workstream: WorkstreamRow,
+    instruction: string,
+    planningContext: PlanningContextRecord,
+    model?: string,
+    epicContextAnalysis?: string | null,
+  ): Promise<OperatorFeedbackResult | null> {
+    if (planningContext.pendingQuestions.length === 0) {
+      return null;
+    }
+
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const agentResult = await runAgent(
+      adapter,
+      "operator-feedback",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Turn the pending planning questions into a stronger operator questionnaire.",
+          `Operator instruction: ${instruction}`,
+        ].join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Structured Intake": planningContext.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
+          "Goal Frame": planningContext.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
+          "System Model": planningContext.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
+          "Test Design": planningContext.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
+          "Pending Planning Questions": JSON.stringify(planningContext.pendingQuestions, null, 2),
+          "Recommended Next Slice": planningContext.result.recommendedNextSlice,
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model,
+        maxTurns: 4,
+        permissionMode: "plan",
+      },
+    );
+
+    return coerceOperatorFeedbackResult(
+      agentResult.status === "completed" ? agentResult.structured : null,
+      planningContext.pendingQuestions,
+    );
+  }
+
+  private async runPlanningExplanation(
+    workstream: WorkstreamRow,
+    instruction: string,
+    planningContext: PlanningContextRecord,
+    feedbackRequest: OperatorFeedbackResult | null,
+    model?: string,
+    epicContextAnalysis?: string | null,
+  ): Promise<ExplanationResult> {
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const agentResult = await runAgent(
+      adapter,
+      "response-formatting",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Format the current planning state into concise Discord-friendly Markdown.",
+          `Operator instruction: ${instruction}`,
+        ].join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Structured Intake": planningContext.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
+          "Goal Frame": planningContext.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
+          "System Model": planningContext.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
+          "Test Design": planningContext.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
+          "Planning Summary": renderPlanningSummary(planningContext),
+          "Operator Feedback Request": renderOperatorFeedbackMarkdown(feedbackRequest),
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model,
+        maxTurns: 4,
+        permissionMode: "plan",
+      },
+    );
+
+    return coerceExplanationResult(
+      agentResult.status === "completed" ? agentResult.structured : null,
+      planningContext,
+      feedbackRequest,
+    );
+  }
+
+  private buildPlanningAgentContext(
+    workstream: WorkstreamRow,
+    instruction: string,
+    intake: IntakeResult | null,
+    goalFrame: GoalFrameResult | null,
+    modeling: ModelingResult | null,
+    testDesign: TestDesignResult | null,
+    previousContext?: PlanningContextRecord | null,
+    answers?: Record<string, PlanningAnswer>,
+    epicContextAnalysis?: string | null,
+  ) {
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const recentTurns = turns.listByWorkstream(workstream.id).slice(-5).map((turn) => ({
+      instruction: turn.instruction,
+      status: turn.status,
+      summary: turn.result_summary,
+    }));
+
+    return {
+      projectId: project.id,
+      repoPath: project.repoPath,
+      workstreamId: workstream.id,
+      workstreamName: workstream.name,
+      workstreamState: workstream.state,
+      instruction: previousContext
+        ? [
+            "Resume the stored planning flow for this workstream.",
+            "Incorporate any recorded operator answers from the context sections below.",
+            "Only keep questions in requiredAnswers or importantDecisions if they are still unresolved after considering those answers.",
+            "",
+            `Original operator instruction: ${instruction}`,
+          ].join("\n")
+        : [
+            "Analyze this workstream and produce a structured, decision-gated plan for Codex.",
+            `Operator instruction: ${instruction}`,
+          ].join("\n"),
+      cwd,
+      addDirs: [cwd],
+      epicCharter: this.getEpicCharterContext(workstream),
+      agentsMd: this.readAgentsMd(project),
+      extra: {
+        "Directory Tree": this.buildDirectoryTree(cwd),
+        "Recent Turn History": JSON.stringify(recentTurns, null, 2),
+        "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
+        "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
+        "Structured Intake": intake ? renderIntakeMarkdown(intake) : "None.",
+        "Goal Frame": goalFrame ? renderGoalFrameMarkdown(goalFrame) : "None.",
+        "System Model": modeling ? renderModelingMarkdown(modeling) : "None.",
+        "Test Design": testDesign ? renderTestDesignMarkdown(testDesign) : "None.",
+        "Previous Planning Context": previousContext ? JSON.stringify(previousContext, null, 2) : "None.",
+        "Operator Answers": serializePlanningAnswers(answers ?? previousContext?.answers ?? {}),
+        "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+      },
+    };
+  }
+
+  private persistPlanningContext(
+    workstream: WorkstreamRow,
+    instruction: string,
+    planningContext: PlanningContextRecord,
+    trigger: PlanningRunTrigger,
+  ): string {
+    const renderedPlan = renderPlanningSummary(planningContext);
+    const formattedMarkdown = planningContext.explanation?.markdown ?? renderedPlan;
+    const needsAnswers = planningContext.pendingQuestions.length > 0;
+    const summary =
+      planningContext.status === "needs-answers"
+        ? `Planning is waiting on ${planningContext.pendingQuestions.length} operator answer${planningContext.pendingQuestions.length === 1 ? "" : "s"}.`
+        : planningContext.finalExecutionPrompt
+          ? "Planning produced a final Codex execution prompt."
+          : "Planning stored structured analysis, but no final execution prompt is ready yet.";
+    const pendingDecision =
+      planningContext.status === "needs-answers"
+        ? JSON.stringify({
+            source: "planning",
+            status: "needs-answers",
+            questions: planningContext.pendingQuestions,
+          })
+        : planningContext.status === "needs-final-prompt"
+          ? JSON.stringify({
+              source: "planning",
+              status: "needs-final-prompt",
+              description: "Planning has no final execution prompt yet.",
+            })
+          : null;
+
+    workstreams.update(workstream.id, {
+      current_goal: instruction,
+      pending_decision: pendingDecision,
+      planning_context_json: JSON.stringify(planningContext),
+      plan: renderedPlan,
+      summary,
+    });
+    this.syncPlanningWorkflowState(workstreams.getById(workstream.id) ?? workstream, planningContext);
+
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "plan.generated",
+      payload: {
+        trigger,
+        instruction,
+        needsAnswers,
+        pendingQuestionCount: planningContext.pendingQuestions.length,
+        finalPromptReady: Boolean(planningContext.finalExecutionPrompt),
+      },
+      source: "orchestrator",
+    });
+
+    eventBus.emit("plan.generated", {
+      workstreamId: workstream.id,
+      trigger,
+      instruction,
+      renderedPlan,
+      formattedMarkdown,
+      finalExecutionPrompt: planningContext.finalExecutionPrompt,
+      needsAnswers,
+    });
+
+    if (needsAnswers) {
+      eventBus.emit("decision.needed", {
+        workstreamId: workstream.id,
+        trigger,
+        instruction,
+        questions: planningContext.pendingQuestions,
+        renderedPlan,
+        formattedMarkdown,
+      });
+    }
+
+    return renderedPlan;
+  }
+
+  private syncPlanningWorkflowState(
+    workstream: WorkstreamRow,
+    planningContext: PlanningContextRecord,
+  ): WorkstreamRow {
+    let current = workstream;
+
+    if (current.state === "intake") {
+      current = this.tryTransitionState(current, "scope-defined", { allowAutoPlan: false });
+    }
+
+    if (planningContext.pendingQuestions.length > 0 && current.state === "planning") {
+      return this.tryTransitionState(current, "operator-input-required", { allowAutoPlan: false });
+    }
+
+    if (planningContext.pendingQuestions.length === 0 && current.state === "awaiting-decisions") {
+      return this.tryTransitionState(current, "operator-input-received", { allowAutoPlan: false });
+    }
+
+    return workstreams.getById(workstream.id) ?? current;
+  }
+
+  private persistVerificationContext(
+    workstream: WorkstreamRow,
+    verificationContext: VerificationContextRecord,
+    trigger: VerificationRunTrigger,
+  ): string {
+    const renderedVerification = renderVerificationSummary(verificationContext);
+    const statusSummary =
+      verificationContext.result.status === "pass"
+        ? "Verification passed and the workstream is ready for review."
+        : verificationContext.incidentTriage
+          ? [
+              `Verification found ${verificationContext.result.introducedFailures.length} introduced failure${verificationContext.result.introducedFailures.length === 1 ? "" : "s"}.`,
+              `Incident triage: ${verificationContext.incidentTriage.suggestedFix}`,
+            ].join(" ")
+          : `Verification found ${verificationContext.result.introducedFailures.length} introduced failure${verificationContext.result.introducedFailures.length === 1 ? "" : "s"}.`;
+    const continuationInstruction =
+      verificationContext.result.status === "fail" &&
+      verificationContext.incidentTriage &&
+      !verificationContext.incidentTriage.escalationNeeded
+        ? buildIncidentContinuationInstruction(verificationContext.incidentTriage)
+        : undefined;
+
+    workstreams.update(workstream.id, {
+      verification_context_json: JSON.stringify(verificationContext),
+      current_goal: continuationInstruction,
+      summary: statusSummary,
+    });
+
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "verification.completed",
+      payload: {
+        trigger,
+        status: verificationContext.result.status,
+        recommendation: verificationContext.result.recommendation,
+        introducedFailureCount: verificationContext.result.introducedFailures.length,
+        triaged: Boolean(verificationContext.incidentTriage),
+      },
+      source: "orchestrator",
+    });
+
+    eventBus.emit("verification.completed", {
+      workstreamId: workstream.id,
+      trigger,
+      status: verificationContext.result.status,
+      recommendation: verificationContext.result.recommendation,
+      renderedVerification,
+    });
+
+    let updated = workstreams.getById(workstream.id) ?? workstream;
+    if (updated.state === "verification") {
+      updated = this.tryTransitionState(
+        updated,
+        verificationContext.result.status === "pass" ? "verification-passed" : "verification-failed",
+        { allowAutoPlan: false },
+      );
+    }
+
+    return renderedVerification;
+  }
+
+  private async runVerificationIncidentTriage(
+    workstream: WorkstreamRow,
+    instruction: string,
+    verificationContext: VerificationContextRecord,
+    planningContext: PlanningContextRecord | null,
+    model?: string,
+    epicContextAnalysis?: string | null,
+  ) {
+    const project = this.getProject(workstream.project_id);
+    const cwd = workstream.cwd ?? project.repoPath;
+    const adapter = await this.getUtilityClaudeAdapter();
+    const agentResult = await runAgent(
+      adapter,
+      "incident-triage",
+      {
+        projectId: project.id,
+        repoPath: project.repoPath,
+        workstreamId: workstream.id,
+        workstreamName: workstream.name,
+        workstreamState: workstream.state,
+        instruction: [
+          "Diagnose the introduced verification failures and decide the best next continuation move.",
+          `Latest implementation instruction: ${instruction}`,
+        ].join("\n"),
+        cwd,
+        addDirs: [cwd],
+        epicCharter: this.getEpicCharterContext(workstream),
+        agentsMd: this.readAgentsMd(project),
+        extra: {
+          "Verification Report": renderVerificationSummary(verificationContext),
+          "Incident Trigger": verificationContext.result.introducedFailures.join("\n"),
+          "Git Status": this.readGitOutput(["status", "--short", "--branch"], cwd),
+          "Git Diff": this.readGitReviewDiff(cwd, "uncommitted"),
+          "Structured Intake": planningContext?.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
+          "Goal Frame": planningContext?.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
+          "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
+          "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
+          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        },
+      },
+      {
+        model,
+        maxTurns: 6,
+        permissionMode: "plan",
+      },
+    );
+
+    return coerceIncidentTriageResult(
+      agentResult.status === "completed" ? agentResult.structured : null,
+      agentResult.output,
+    );
+  }
+
+  private maybeStartAutoClaudeReviewAfterVerification(
+    workstream: WorkstreamRow,
+    sourceTurnId: string | null,
+  ): void {
+    const project = this.getProject(workstream.project_id);
+    const reviewConfig = project.claudeReview;
+    const primaryAdapter = this.getAdapter(workstream.project_id);
+
+    if (!reviewConfig?.enabled || !reviewConfig.autoAfterTurn || !primaryAdapter.name.startsWith("codex")) {
+      return;
+    }
+
+    void this.review(workstream.id, "uncommitted", {
+      reviewer: "claude",
+      trigger: "auto",
+    }).catch((error) => {
+      eventBus.emit("error", {
+        workstreamId: workstream.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+        context: `Claude auto-review failed after verification${sourceTurnId ? ` for turn ${sourceTurnId}` : ""}`,
+      });
+    });
+  }
+
+  private forceTransitionState(
+    workstream: WorkstreamRow,
+    trigger: string,
+    options: { allowAutoPlan?: boolean } = {},
+  ): WorkstreamRow {
+    const sm = this.getStateMachine(workstream.project_id);
+    const newState = sm.transition(workstream.state, trigger);
+    return this.commitStateTransition(workstream, newState, trigger, options);
+  }
+
+  private tryTransitionState(
+    workstream: WorkstreamRow,
+    trigger: string,
+    options: { allowAutoPlan?: boolean } = {},
+  ): WorkstreamRow {
+    const sm = this.getStateMachine(workstream.project_id);
+    const transition = sm.canTransition(workstream.state, trigger);
+    if (!transition.allowed) {
+      return workstreams.getById(workstream.id) ?? workstream;
+    }
+
+    return this.commitStateTransition(workstream, transition.to, trigger, options);
+  }
+
+  private commitStateTransition(
+    workstream: WorkstreamRow,
+    newState: string,
+    trigger: string,
+    options: { allowAutoPlan?: boolean } = {},
+  ): WorkstreamRow {
+    if (newState === workstream.state) {
+      return workstreams.getById(workstream.id) ?? workstream;
+    }
+
+    const sm = this.getStateMachine(workstream.project_id);
+    workstreams.update(workstream.id, {
+      state: newState,
+      completed_at: sm.isTerminal(newState) ? new Date().toISOString() : undefined,
+    });
+
+    eventBus.emit("workstream.stateChanged", {
+      workstreamId: workstream.id,
+      from: workstream.state,
+      to: newState,
+      trigger,
+    });
+
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "workstream.stateChanged",
+      payload: { from: workstream.state, to: newState, trigger },
+      source: "orchestrator",
+    });
+
+    const updated = workstreams.getById(workstream.id) ?? { ...workstream, state: newState };
+    if (options.allowAutoPlan !== false) {
+      this.maybeStartAutoClaudePlan(updated);
+    }
+
+    return updated;
+  }
+
+  private planningPendingDecisionForWorkstream(workstream: WorkstreamRow | undefined): string | null {
+    if (!workstream) {
+      return null;
+    }
+
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    if (!planningContext) {
+      return null;
+    }
+
+    if (planningContext.status === "needs-answers") {
+      return JSON.stringify({
+        source: "planning",
+        status: "needs-answers",
+        questions: planningContext.pendingQuestions,
+      });
+    }
+
+    if (planningContext.status === "needs-final-prompt") {
+      return JSON.stringify({
+        source: "planning",
+        status: "needs-final-prompt",
+        description: "Planning has no final execution prompt yet.",
+      });
+    }
+
+    return null;
+  }
+
   private getLatestTurnOutput(workstreamId: string, fallback: string): string {
     const completionEvent = eventLog
       .listByWorkstream(workstreamId, 20)
@@ -1249,7 +2490,10 @@ export class Orchestrator {
     if (tier === "auto") {
       // Auto-approve
       approvals.resolve(approval.id, "approved", "auto");
-      workstreams.update(workstreamId, { waiting_on_approval: 0, pending_decision: null });
+      workstreams.update(workstreamId, {
+        waiting_on_approval: 0,
+        pending_decision: this.planningPendingDecisionForWorkstream(workstreams.getById(workstreamId)),
+      });
 
       const adapter = this.getAdapter(ws.project_id);
       await adapter.resolveApproval(ws.codex_thread_id!, request.id, true);
@@ -1606,7 +2850,7 @@ export class Orchestrator {
     if (pendingApprovals.length === 0 && (workstream.waiting_on_approval || workstream.pending_decision)) {
       workstreams.update(workstream.id, {
         waiting_on_approval: 0,
-        pending_decision: null,
+        pending_decision: this.planningPendingDecisionForWorkstream(workstreams.getById(workstream.id)),
       });
     }
 

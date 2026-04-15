@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { persistedEpicIdForResolvedEpic, shouldAttachReplyPreview } from "../../src/discord/bot.js";
+import {
+  parsePlanningAnswerInput,
+  persistedEpicIdForResolvedEpic,
+  shouldAttachReplyPreview,
+} from "../../src/discord/bot.js";
 
 describe("persistedEpicIdForResolvedEpic", () => {
   it("omits the synthetic default lane from persisted epic ids", () => {
@@ -35,5 +39,23 @@ describe("shouldAttachReplyPreview", () => {
 
   it("keeps short content inline when nothing was truncated", () => {
     expect(shouldAttachReplyPreview(["Stored Claude plan."], "short plan", 1200)).toBe(false);
+  });
+});
+
+describe("parsePlanningAnswerInput", () => {
+  it("parses multiline slash-command answers", () => {
+    expect(
+      parsePlanningAnswerInput("discord-ux: Use /workstream answer-plan.\nstate-model = Keep planning state on the workstream.")
+    ).toEqual({
+      answers: {
+        "discord-ux": "Use /workstream answer-plan.",
+        "state-model": "Keep planning state on the workstream.",
+      },
+      invalidLines: [],
+    });
+  });
+
+  it("reports malformed lines", () => {
+    expect(parsePlanningAnswerInput("missing separator\nok: value").invalidLines).toEqual(["missing separator"]);
   });
 });

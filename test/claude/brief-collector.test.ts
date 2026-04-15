@@ -101,7 +101,7 @@ describe("BriefCollector", () => {
 
   afterEach(() => {
     closeDatabase();
-    rmSync(tempDir, { recursive: true, force: true });
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("collects project and assistant context for the brief prompt", async () => {

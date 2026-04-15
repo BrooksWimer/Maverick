@@ -26,13 +26,15 @@ export const WorkflowSchema = z.object({
 // Default workflow matching the research report's state machine
 export const DEFAULT_WORKFLOW: z.infer<typeof WorkflowSchema> = {
   name: "standard",
-  states: ["intake", "planning", "implementation", "verification", "review", "done", "blocked"],
+  states: ["intake", "planning", "awaiting-decisions", "implementation", "verification", "review", "done", "blocked"],
   initialState: "intake",
   terminalStates: ["done"],
   transitions: [
     { from: "intake", to: "planning", trigger: "scope-defined", autoAdvance: true },
     { from: "intake", to: "blocked", trigger: "missing-info", autoAdvance: false },
     { from: "blocked", to: "intake", trigger: "info-supplied", autoAdvance: false },
+    { from: "planning", to: "awaiting-decisions", trigger: "operator-input-required", autoAdvance: true },
+    { from: "awaiting-decisions", to: "planning", trigger: "operator-input-received", autoAdvance: true },
     { from: "planning", to: "implementation", trigger: "plan-approved", autoAdvance: false },
     { from: "implementation", to: "verification", trigger: "implementation-complete", autoAdvance: true },
     { from: "verification", to: "review", trigger: "verification-passed", autoAdvance: true },
@@ -144,6 +146,11 @@ export const ProjectSchema = z.object({
   ),
   maxConcurrentWorkstreams: z.number().min(1).max(20).default(3),
   claudeReview: z.object({
+    enabled: z.boolean().default(false),
+    autoAfterTurn: z.boolean().default(false),
+    model: z.string().optional(),
+  }).optional(),
+  claudeVerification: z.object({
     enabled: z.boolean().default(false),
     autoAfterTurn: z.boolean().default(false),
     model: z.string().optional(),
