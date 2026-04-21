@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAttachedTextReply,
   parsePlanningAnswerInput,
   persistedEpicIdForResolvedEpic,
   shouldAttachReplyPreview,
@@ -39,6 +40,34 @@ describe("shouldAttachReplyPreview", () => {
 
   it("keeps short content inline when nothing was truncated", () => {
     expect(shouldAttachReplyPreview(["Stored Claude plan."], "short plan", 1200)).toBe(false);
+  });
+});
+
+describe("buildAttachedTextReply", () => {
+  it("keeps short status replies inline", () => {
+    const reply = buildAttachedTextReply({
+      headerLines: ["Workstream status:"],
+      body: "State: planning",
+      attachmentName: "workstream-status.md",
+      attachmentNotice: "Full status attached.",
+    });
+
+    expect(reply.content).toBe("Workstream status:\nState: planning");
+    expect(reply.files).toBeUndefined();
+  });
+
+  it("attaches long status replies instead of exceeding Discord content limits", () => {
+    const reply = buildAttachedTextReply({
+      headerLines: ["Workstream status:"],
+      body: "x".repeat(5000),
+      previewLimit: 1500,
+      attachmentName: "workstream-status.md",
+      attachmentNotice: "Full status attached.",
+    });
+
+    expect(String(reply.content).length).toBeLessThanOrEqual(2000);
+    expect(reply.content).toContain("Full status attached.");
+    expect(reply.files).toHaveLength(1);
   });
 });
 

@@ -46,6 +46,7 @@ type SendableChannel = TextBasedChannel & {
 };
 
 const DISCORD_INLINE_RESULT_LIMIT = 1500;
+const DISCORD_STATUS_PREVIEW_LIMIT = 1500;
 
 type ParsedEpicChoice = {
   projectId: string;
@@ -89,6 +90,31 @@ export function shouldAttachReplyPreview(
   const inlinePreview = truncate(previewBody, previewLimit);
   const inlineContent = [...headerLines, inlinePreview].filter(Boolean).join("\n");
   return inlinePreview !== previewBody || inlineContent.length > 1900;
+}
+
+export function buildAttachedTextReply(params: {
+  headerLines: string[];
+  body: string;
+  previewLimit?: number;
+  attachmentName: string;
+  attachmentNotice: string;
+}): InteractionEditReplyOptions {
+  const previewLimit = params.previewLimit ?? DISCORD_STATUS_PREVIEW_LIMIT;
+  const inlinePreview = truncate(params.body, previewLimit);
+  const inlineContent = [...params.headerLines, inlinePreview].filter(Boolean).join("\n");
+
+  if (!shouldAttachReplyPreview(params.headerLines, params.body, previewLimit)) {
+    return { content: inlineContent };
+  }
+
+  return {
+    content: [...params.headerLines, params.attachmentNotice].filter(Boolean).join("\n"),
+    files: [
+      new AttachmentBuilder(Buffer.from(params.body, "utf8"), {
+        name: params.attachmentName,
+      }),
+    ],
+  };
 }
 
 export function parsePlanningAnswerInput(text: string): {
@@ -1220,13 +1246,13 @@ export class DiscordBot {
         return;
       }
 
-      await interaction.editReply(this.formatWorkstream(workstream));
+      await interaction.editReply(this.buildWorkstreamStatusReply(this.formatWorkstream(workstream)));
       return;
     }
 
     const current = this.orchestrator.getChannelWorkstream(interaction.channelId);
     if (current) {
-      await interaction.editReply(this.formatWorkstream(current));
+      await interaction.editReply(this.buildWorkstreamStatusReply(this.formatWorkstream(current)));
       return;
     }
 
@@ -1243,7 +1269,7 @@ export class DiscordBot {
       lines.push(`- \`${workstream.id}\` ${workstream.name} [${workstream.state}]`);
     }
 
-    await interaction.editReply(lines.join("\n"));
+    await interaction.editReply(this.buildWorkstreamStatusReply(lines.join("\n")));
   }
 
   private async handleDispatch(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1541,6 +1567,16 @@ export class DiscordBot {
     ]
       .filter(Boolean)
       .join("\n");
+  }
+
+  private buildWorkstreamStatusReply(statusText: string): InteractionEditReplyOptions {
+    return buildAttachedTextReply({
+      headerLines: ["Workstream status:"],
+      body: statusText,
+      previewLimit: DISCORD_STATUS_PREVIEW_LIMIT,
+      attachmentName: "workstream-status.md",
+      attachmentNotice: "Status is long, so the full report is attached as a Markdown file.",
+    });
   }
 
   private projectIdForChannel(channelId: string, parentChannelId?: string | null): string | null {
