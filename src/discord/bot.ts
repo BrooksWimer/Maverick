@@ -62,6 +62,8 @@ type ResolvedEpic = {
 
 type WorkSmartGoalChoice = "none" | "business-context" | "engineering-learning" | "both";
 
+type AsyncWorkstreamCommand = "plan" | "answer-plan" | "dispatch" | "review" | "verify";
+
 function isDiscordApiError(error: unknown, code?: number): boolean {
   if (!error || typeof error !== "object") {
     return false;
@@ -115,6 +117,10 @@ export function buildAttachedTextReply(params: {
       }),
     ],
   };
+}
+
+export function shouldPostPlanGeneratedMessage(event: { needsAnswers: boolean }): boolean {
+  return !event.needsAnswers;
 }
 
 export function parsePlanningAnswerInput(text: string): {
@@ -730,10 +736,6 @@ export class DiscordBot {
     });
 
     eventBus.on("decision.needed", (event) => {
-      if (event.trigger !== "auto") {
-        return;
-      }
-
       this.runBackgroundTask("decision.needed", async () => {
         const workstream = this.orchestrator.getWorkstream(event.workstreamId);
         if (!workstream) {
@@ -754,7 +756,7 @@ export class DiscordBot {
     });
 
     eventBus.on("plan.generated", (event) => {
-      if (event.trigger !== "auto" || event.needsAnswers) {
+      if (!shouldPostPlanGeneratedMessage(event)) {
         return;
       }
 
@@ -1276,18 +1278,11 @@ export class DiscordBot {
     const instruction = interaction.options.getString("instruction", true);
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
 
-    const result = await this.orchestrator.dispatch(workstream.id, instruction);
-    const hasLongOutput = (result.output?.length ?? 0) > DISCORD_INLINE_RESULT_LIMIT;
-
-    await interaction.editReply({
-      content: [
-        `Dispatched to \`${workstream.name}\``,
-        `Status: \`${result.status}\``,
-        result.summary ? `Summary: ${truncate(result.summary, 1400)}` : null,
-        hasLongOutput ? "Full result was posted in the thread as an attached Markdown file." : null,
-      ]
-        .filter(Boolean)
-        .join("\n"),
+    await this.startAsyncWorkstreamCommand(interaction, workstream, "dispatch", {
+      description: "Starting Codex implementation in the background.",
+      run: async () => {
+        await this.orchestrator.dispatch(workstream.id, instruction);
+      },
     });
   }
 
@@ -1324,98 +1319,58 @@ export class DiscordBot {
     const target = interaction.options.getString("target") ?? undefined;
     const useClaude = interaction.options.getBoolean("claude") ?? false;
 
-    const result = await this.orchestrator.review(workstream.id, target, {
-      reviewer: useClaude ? "claude" : "primary",
-      trigger: "manual",
+    await this.startAsyncWorkstreamCommand(interaction, workstream, "review", {
+      description: `Running ${useClaude ? "Claude" : "primary"} review in the background.`,
+      run: async (channel) => {
+        const result = await this.orchestrator.review(workstream.id, target, {
+          reviewer: useClaude ? "claude" : "primary",
+          trigger: "manual",
+        });
+
+        if (!useClaude && channel) {
+          await this.safeSend(
+            channel,
+            this.buildReviewCommandCompletedMessage(
+              workstream.id,
+              workstream.name,
+              useClaude ? "claude" : "primary",
+              result.severity,
+              result.findings,
+            ),
+          );
+        }
+      },
     });
-    await interaction.editReply(
-      this.buildInlineOrAttachedReply({
-        headerLines: [
-          `Review for \`${workstream.name}\` completed.`,
-          `Reviewer: \`${useClaude ? "claude" : "primary"}\``,
-          `Severity: \`${result.severity}\``,
-        ],
-        previewBody: result.findings,
-        previewLimit: 1500,
-        fullBody: [
-          `Workstream: ${workstream.name}`,
-          `Reviewer: ${useClaude ? "claude" : "primary"}`,
-          `Severity: ${result.severity}`,
-          "",
-          result.findings,
-        ].join("\n"),
-        attachmentName: `review-${workstream.id}.md`,
-        attachmentNotice: "Full review attached as a Markdown file.",
-      })
-    );
   }
 
   private async handleVerify(interaction: ChatInputCommandInteraction): Promise<void> {
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
-    const result = await this.orchestrator.verify(workstream.id, {
-      trigger: "manual",
-    });
 
-    await interaction.editReply(
-      this.buildInlineOrAttachedReply({
-        headerLines: [
-          `Verification for \`${workstream.name}\` completed.`,
-          `Status: \`${result.verificationContext.result.status}\``,
-          `Recommendation: \`${result.verificationContext.result.recommendation}\``,
-        ],
-        previewBody: result.renderedVerification,
-        previewLimit: 1500,
-        fullBody: [
-          `Workstream: ${workstream.name}`,
-          "",
-          result.renderedVerification,
-        ].join("\n"),
-        attachmentName: `verification-${workstream.id}.md`,
-        attachmentNotice: "Full verification report attached as a Markdown file.",
-      })
-    );
+    await this.startAsyncWorkstreamCommand(interaction, workstream, "verify", {
+      description: "Running Claude verification in the background.",
+      run: async () => {
+        await this.orchestrator.verify(workstream.id, {
+          trigger: "manual",
+        });
+      },
+    });
   }
 
   private async handlePlan(interaction: ChatInputCommandInteraction): Promise<void> {
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
     const instruction = interaction.options.getString("instruction", true);
     const resume = interaction.options.getBoolean("resume") ?? false;
-    const plan = await this.orchestrator.generatePlan(workstream.id, instruction, "manual", {
-      resumeExisting: resume,
-    });
-    const dispatchReady = Boolean(plan.finalExecutionPrompt);
-    const previewMarkdown = plan.planningContext.explanation?.markdown ?? plan.renderedPlan;
 
-    await interaction.editReply(
-      this.buildInlineOrAttachedReply({
-        headerLines: [
-          plan.needsAnswers
-            ? `Stored decision-gated plan for \`${workstream.name}\`; operator answers are still required.`
-            : dispatchReady
-              ? `Stored decision-gated plan for \`${workstream.name}\`; the final execution prompt is ready.`
-              : `Stored decision-gated plan for \`${workstream.name}\`; review the draft because no final execution prompt is ready yet.`,
-          `Instruction: ${truncate(instruction, 500)}`,
-          plan.needsAnswers
-            ? "Use `/workstream answer-plan` with `question-id: answer` lines."
-            : dispatchReady
-              ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
-              : "Run `/workstream plan --resume true` or start a fresh plan once you want to finalize the execution prompt.",
-        ],
-        previewBody: previewMarkdown,
-        previewLimit: 1200,
-        fullBody: [
-          `Workstream: ${workstream.name}`,
-          "",
-          "Instruction:",
-          instruction,
-          "",
-          "Plan:",
-          plan.renderedPlan,
-        ].join("\n"),
-        attachmentName: `claude-plan-${workstream.id}.md`,
-        attachmentNotice: "Full plan attached as a Markdown file.",
-      })
-    );
+    await this.startAsyncWorkstreamCommand(interaction, workstream, "plan", {
+      description: resume
+        ? "Resuming Claude planning in the background."
+        : "Running Claude planning in the background.",
+      run: async () => {
+        await this.orchestrator.generatePlan(workstream.id, instruction, "manual", {
+          resumeExisting: resume,
+        });
+      },
+    });
   }
 
   private async handleAnswerPlan(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1429,36 +1384,110 @@ export class DiscordBot {
       );
     }
 
-    const result = await this.orchestrator.provideDecisionAnswers(workstream.id, parsed.answers, interaction.user.id);
-    const dispatchReady = Boolean(result.finalExecutionPrompt);
-    const previewMarkdown = result.planningContext.explanation?.markdown ?? result.renderedPlan;
+    await this.startAsyncWorkstreamCommand(interaction, workstream, "answer-plan", {
+      description: "Merging planning answers and resuming Claude planning in the background.",
+      run: async () => {
+        await this.orchestrator.provideDecisionAnswers(workstream.id, parsed.answers, interaction.user.id);
+      },
+    });
+  }
 
-    await interaction.editReply(
-      this.buildInlineOrAttachedReply({
-        headerLines: [
-          result.needsAnswers
-            ? `Updated planning for \`${workstream.name}\`; more operator answers are still required.`
-            : dispatchReady
-              ? `Updated planning for \`${workstream.name}\`; the final execution prompt is ready.`
-              : `Updated planning for \`${workstream.name}\`; planning is resolved, but no final execution prompt is ready yet.`,
-          result.needsAnswers
-            ? "Use `/workstream answer-plan` again if you want to resolve the remaining questions."
-            : dispatchReady
-              ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
-              : "Run `/workstream plan --resume true` or start a fresh plan to finalize the execution prompt.",
-        ],
-        previewBody: previewMarkdown,
-        previewLimit: 1200,
-        fullBody: [
-          `Workstream: ${workstream.name}`,
-          "",
-          "Updated planning context:",
-          result.renderedPlan,
-        ].join("\n"),
-        attachmentName: `claude-plan-${workstream.id}.md`,
-        attachmentNotice: "Full planning context attached as a Markdown file.",
-      })
-    );
+  private async startAsyncWorkstreamCommand(
+    interaction: ChatInputCommandInteraction,
+    workstream: WorkstreamRow,
+    command: AsyncWorkstreamCommand,
+    params: {
+      description: string;
+      run: (channel: SendableChannel | null) => Promise<void>;
+    },
+  ): Promise<void> {
+    const label = this.asyncCommandLabel(command);
+    await interaction.editReply({
+      content: [
+        `Started ${label} for \`${workstream.name}\`.`,
+        params.description,
+        "Maverick will post progress and results in this workstream channel instead of waiting on the slash command.",
+        "You can run `/workstream status` at any time.",
+      ].join("\n"),
+    });
+
+    const requestedChannelId = interaction.channelId;
+    this.runBackgroundTask(`workstream.${command}`, async () => {
+      const channel = await this.resolveAsyncCommandChannel(workstream, requestedChannelId);
+      if (channel) {
+        try {
+          await this.safeSend(
+            channel,
+            this.buildAsyncCommandStartedMessage(workstream, command, params.description),
+          );
+        } catch (error) {
+          log.warn({ err: error, workstreamId: workstream.id, command }, "Failed to send async command start notification");
+        }
+      }
+
+      try {
+        await params.run(channel);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.warn({ err: error, workstreamId: workstream.id, command }, "Async workstream command failed");
+        if (channel) {
+          await this.safeSend(channel, this.buildAsyncCommandFailedMessage(workstream, command, message));
+        }
+      }
+    });
+  }
+
+  private async resolveAsyncCommandChannel(
+    workstream: WorkstreamRow,
+    requestedChannelId: string,
+  ): Promise<SendableChannel | null> {
+    return await this.fetchTextChannel(requestedChannelId)
+      ?? await this.resolveNotificationChannel(workstream, "notifications");
+  }
+
+  private asyncCommandLabel(command: AsyncWorkstreamCommand): string {
+    switch (command) {
+      case "plan":
+        return "planning";
+      case "answer-plan":
+        return "planning resume";
+      case "dispatch":
+        return "implementation dispatch";
+      case "review":
+        return "review";
+      case "verify":
+        return "verification";
+    }
+  }
+
+  private buildAsyncCommandStartedMessage(
+    workstream: WorkstreamRow,
+    command: AsyncWorkstreamCommand,
+    description: string,
+  ): MessageCreateOptions {
+    return {
+      content: [
+        `Maverick started ${this.asyncCommandLabel(command)} for \`${workstream.name}\`.`,
+        `Workstream: \`${workstream.id}\``,
+        description,
+        "Results will be posted here when the background work completes.",
+      ].join("\n"),
+    };
+  }
+
+  private buildAsyncCommandFailedMessage(
+    workstream: WorkstreamRow,
+    command: AsyncWorkstreamCommand,
+    message: string,
+  ): MessageCreateOptions {
+    return {
+      content: [
+        `Maverick failed ${this.asyncCommandLabel(command)} for \`${workstream.name}\`.`,
+        `Workstream: \`${workstream.id}\``,
+        `Error: ${truncate(message, 1500)}`,
+        "Run `/workstream status` to inspect the current stored state before retrying.",
+      ].join("\n"),
+    };
   }
 
   private async handleButton(interaction: ButtonInteraction): Promise<void> {
@@ -1956,6 +1985,37 @@ export class DiscordBot {
         `Severity: \`${severity}\``,
         trimmed,
       ].join("\n"),
+    };
+  }
+
+  private buildReviewCommandCompletedMessage(
+    workstreamId: string,
+    workstreamName: string,
+    reviewer: "primary" | "claude",
+    severity: string,
+    findings: string,
+  ): MessageCreateOptions {
+    const trimmed = findings.trim();
+    const headerLines = [
+      `Review for \`${workstreamName}\` completed.`,
+      `Workstream: \`${workstreamId}\``,
+      `Reviewer: \`${reviewer}\``,
+      `Severity: \`${severity}\``,
+    ];
+
+    if (shouldAttachReplyPreview(headerLines, trimmed, 1500)) {
+      return {
+        content: [...headerLines, "Full review attached as a Markdown file."].join("\n"),
+        files: [
+          new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+            name: `review-${workstreamId}.md`,
+          }),
+        ],
+      };
+    }
+
+    return {
+      content: [...headerLines, trimmed].filter(Boolean).join("\n"),
     };
   }
 

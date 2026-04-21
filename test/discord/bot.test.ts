@@ -4,6 +4,7 @@ import {
   parsePlanningAnswerInput,
   persistedEpicIdForResolvedEpic,
   shouldAttachReplyPreview,
+  shouldPostPlanGeneratedMessage,
 } from "../../src/discord/bot.js";
 
 describe("persistedEpicIdForResolvedEpic", () => {
@@ -68,6 +69,16 @@ describe("buildAttachedTextReply", () => {
     expect(String(reply.content).length).toBeLessThanOrEqual(2000);
     expect(reply.content).toContain("Full status attached.");
     expect(reply.files).toHaveLength(1);
+  });
+});
+
+describe("shouldPostPlanGeneratedMessage", () => {
+  it("posts manual and resume plan results when no operator questions remain", () => {
+    expect(shouldPostPlanGeneratedMessage({ needsAnswers: false })).toBe(true);
+  });
+
+  it("does not duplicate question-gated planning messages", () => {
+    expect(shouldPostPlanGeneratedMessage({ needsAnswers: true })).toBe(false);
   });
 });
 
