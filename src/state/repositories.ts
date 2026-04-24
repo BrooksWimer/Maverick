@@ -121,6 +121,24 @@ export interface AssistantNoteRow {
   created_at: string;
 }
 
+export interface AssistantTaskRow {
+  id: string;
+  message_id: string | null;
+  source_contact: string | null;
+  title: string;
+  details: string;
+  primary_context: string;
+  status: string;
+  due_at: string | null;
+  scheduled_for: string | null;
+  note_id: string | null;
+  reminder_id: string | null;
+  calendar_event_id: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AssistantCalendarEventRow {
   id: string;
   message_id: string | null;
@@ -152,6 +170,16 @@ export interface AssistantReminderRow {
   provider_message_id: string | null;
   error: string | null;
   created_at: string;
+}
+
+export interface AssistantSettingRow {
+  id: string;
+  scope_type: string;
+  scope_id: string;
+  feature: string;
+  profile: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // --- Projects ---
@@ -207,9 +235,17 @@ export const workstreams = {
     db.prepare(`
       INSERT INTO workstreams (id, project_id, epic_id, name, description, cwd, branch, execution_backend, discord_channel_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, data.project_id, data.epic_id ?? null, data.name, data.description ?? null,
-      data.cwd ?? null, data.branch ?? null,
-      data.execution_backend ?? "codex-app-server", data.discord_channel_id ?? null);
+    `).run(
+      id,
+      data.project_id,
+      data.epic_id ?? null,
+      data.name,
+      data.description ?? null,
+      data.cwd ?? null,
+      data.branch ?? null,
+      data.execution_backend ?? "codex-app-server",
+      data.discord_channel_id ?? null
+    );
     return workstreams.getById(id)!;
   },
 
@@ -371,6 +407,24 @@ export const artifacts = {
       LIMIT ?
     `).all(workstreamId, limit) as ArtifactRow[];
   },
+
+  listRecent(limit = 50, type?: string): ArtifactRow[] {
+    const db = getDatabase();
+    if (type) {
+      return db.prepare(`
+        SELECT * FROM artifacts
+        WHERE type = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?
+      `).all(type, limit) as ArtifactRow[];
+    }
+
+    return db.prepare(`
+      SELECT * FROM artifacts
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT ?
+    `).all(limit) as ArtifactRow[];
+  },
 };
 
 // --- Approvals ---
@@ -389,8 +443,15 @@ export const approvals = {
     db.prepare(`
       INSERT INTO approvals (id, workstream_id, turn_id, type, description, context_json, tier)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, data.workstream_id, data.turn_id ?? null, data.type,
-      data.description, data.context_json ?? null, data.tier);
+    `).run(
+      id,
+      data.workstream_id,
+      data.turn_id ?? null,
+      data.type,
+      data.description,
+      data.context_json ?? null,
+      data.tier
+    );
     return approvals.getById(id)!;
   },
 
@@ -566,7 +627,7 @@ export const assistantNotes = {
       data.source_contact ?? null,
       data.title,
       data.content,
-      data.note_context ?? "general",
+      data.note_context ?? "personal",
       data.note_kind ?? null,
       data.project_name ?? null,
       data.smart_goal_ids_json ?? null,
@@ -586,6 +647,128 @@ export const assistantNotes = {
     const db = getDatabase();
     return db.prepare("SELECT * FROM assistant_notes ORDER BY created_at DESC LIMIT ?")
       .all(limit) as AssistantNoteRow[];
+  },
+
+  update(
+    id: string,
+    fields: Partial<Pick<AssistantNoteRow, "title" | "content" | "note_context" | "note_kind" | "project_name" | "tags_json">>
+  ): AssistantNoteRow | undefined {
+    const db = getDatabase();
+    const sets: string[] = [];
+    const values: unknown[] = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined) {
+        sets.push(`${key} = ?`);
+        values.push(value);
+      }
+    }
+
+    if (sets.length === 0) {
+      return assistantNotes.getById(id);
+    }
+
+    values.push(id);
+    db.prepare(`UPDATE assistant_notes SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    return assistantNotes.getById(id);
+  },
+};
+
+// --- Assistant tasks ---
+
+export const assistantTasks = {
+  create(data: {
+    id?: string;
+    message_id?: string | null;
+    source_contact?: string | null;
+    title: string;
+    details: string;
+    primary_context?: string;
+    status?: string;
+    due_at?: string | null;
+    scheduled_for?: string | null;
+    note_id?: string | null;
+    reminder_id?: string | null;
+    calendar_event_id?: string | null;
+    completed_at?: string | null;
+  }): AssistantTaskRow {
+    const db = getDatabase();
+    const id = data.id ?? randomUUID();
+    db.prepare(`
+      INSERT INTO assistant_tasks (
+        id, message_id, source_contact, title, details, primary_context, status, due_at, scheduled_for,
+        note_id, reminder_id, calendar_event_id, completed_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.message_id ?? null,
+      data.source_contact ?? null,
+      data.title,
+      data.details,
+      data.primary_context ?? "personal",
+      data.status ?? "inbox",
+      data.due_at ?? null,
+      data.scheduled_for ?? null,
+      data.note_id ?? null,
+      data.reminder_id ?? null,
+      data.calendar_event_id ?? null,
+      data.completed_at ?? null
+    );
+    return assistantTasks.getById(id)!;
+  },
+
+  getById(id: string): AssistantTaskRow | undefined {
+    const db = getDatabase();
+    return db.prepare("SELECT * FROM assistant_tasks WHERE id = ?").get(id) as AssistantTaskRow | undefined;
+  },
+
+  listRecent(limit = 100): AssistantTaskRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_tasks
+      ORDER BY
+        CASE
+          WHEN status = 'overdue' THEN 0
+          WHEN status = 'inbox' THEN 1
+          ELSE 2
+        END,
+        updated_at DESC
+      LIMIT ?
+    `).all(limit) as AssistantTaskRow[];
+  },
+
+  listByStatus(status: string, limit = 100): AssistantTaskRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_tasks
+      WHERE status = ?
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `).all(status, limit) as AssistantTaskRow[];
+  },
+
+  update(
+    id: string,
+    fields: Partial<Pick<AssistantTaskRow,
+      "title" | "details" | "primary_context" | "status" | "due_at" | "scheduled_for" |
+      "note_id" | "reminder_id" | "calendar_event_id" | "completed_at"
+    >>
+  ): AssistantTaskRow | undefined {
+    const db = getDatabase();
+    const sets: string[] = ["updated_at = datetime('now')"];
+    const values: unknown[] = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined) {
+        sets.push(`${key} = ?`);
+        values.push(value);
+      }
+    }
+
+    values.push(id);
+    db.prepare(`UPDATE assistant_tasks SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    return assistantTasks.getById(id);
   },
 };
 
@@ -642,6 +825,16 @@ export const assistantCalendarEvents = {
     const db = getDatabase();
     return db.prepare("SELECT * FROM assistant_calendar_events ORDER BY starts_at ASC LIMIT ?")
       .all(limit) as AssistantCalendarEventRow[];
+  },
+
+  listUpcoming(referenceTime: string, limit = 100): AssistantCalendarEventRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_calendar_events
+      WHERE starts_at >= ?
+      ORDER BY starts_at ASC
+      LIMIT ?
+    `).all(referenceTime, limit) as AssistantCalendarEventRow[];
   },
 
   update(
@@ -722,6 +915,30 @@ export const assistantReminders = {
     `).all(referenceTime) as AssistantReminderRow[];
   },
 
+  update(
+    id: string,
+    fields: Partial<Pick<AssistantReminderRow, "body" | "remind_at" | "destination" | "status" | "error">>
+  ): AssistantReminderRow | undefined {
+    const db = getDatabase();
+    const sets: string[] = [];
+    const values: unknown[] = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined) {
+        sets.push(`${key} = ?`);
+        values.push(value);
+      }
+    }
+
+    if (sets.length === 0) {
+      return assistantReminders.getById(id);
+    }
+
+    values.push(id);
+    db.prepare(`UPDATE assistant_reminders SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    return assistantReminders.getById(id);
+  },
+
   markSent(id: string, providerMessageId?: string | null): AssistantReminderRow | undefined {
     const db = getDatabase();
     db.prepare(`
@@ -740,5 +957,49 @@ export const assistantReminders = {
       WHERE id = ?
     `).run(error, id);
     return assistantReminders.getById(id);
+  },
+};
+
+// --- Assistant settings ---
+
+export const assistantSettings = {
+  upsert(data: {
+    scope_type: string;
+    scope_id: string;
+    feature: string;
+    profile: string;
+  }): AssistantSettingRow {
+    const db = getDatabase();
+    const id = `${data.scope_type}:${data.scope_id}:${data.feature}`;
+    db.prepare(`
+      INSERT INTO assistant_settings (id, scope_type, scope_id, feature, profile)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        profile = excluded.profile,
+        updated_at = datetime('now')
+    `).run(id, data.scope_type, data.scope_id, data.feature, data.profile);
+    return assistantSettings.getById(id)!;
+  },
+
+  getById(id: string): AssistantSettingRow | undefined {
+    const db = getDatabase();
+    return db.prepare("SELECT * FROM assistant_settings WHERE id = ?").get(id) as AssistantSettingRow | undefined;
+  },
+
+  get(scopeType: string, scopeId: string, feature: string): AssistantSettingRow | undefined {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_settings
+      WHERE scope_type = ? AND scope_id = ? AND feature = ?
+      LIMIT 1
+    `).get(scopeType, scopeId, feature) as AssistantSettingRow | undefined;
+  },
+
+  list(): AssistantSettingRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_settings
+      ORDER BY scope_type ASC, scope_id ASC, feature ASC
+    `).all() as AssistantSettingRow[];
   },
 };

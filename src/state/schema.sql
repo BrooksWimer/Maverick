@@ -170,6 +170,30 @@ CREATE TABLE IF NOT EXISTS assistant_notes (
 CREATE INDEX IF NOT EXISTS idx_assistant_notes_message ON assistant_notes(message_id);
 CREATE INDEX IF NOT EXISTS idx_assistant_notes_created ON assistant_notes(created_at);
 
+-- Assistant tasks captured from natural chat and linked follow-up artifacts
+CREATE TABLE IF NOT EXISTS assistant_tasks (
+  id                TEXT PRIMARY KEY,
+  message_id        TEXT REFERENCES assistant_messages(id),
+  source_contact    TEXT,
+  title             TEXT NOT NULL,
+  details           TEXT NOT NULL,
+  primary_context   TEXT NOT NULL DEFAULT 'personal',
+  status            TEXT NOT NULL DEFAULT 'inbox', -- inbox, open, scheduled, done, archived
+  due_at            TEXT,
+  scheduled_for     TEXT,
+  note_id           TEXT REFERENCES assistant_notes(id),
+  reminder_id       TEXT REFERENCES assistant_reminders(id),
+  calendar_event_id TEXT REFERENCES assistant_calendar_events(id),
+  completed_at      TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_assistant_tasks_status ON assistant_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_assistant_tasks_due ON assistant_tasks(due_at);
+CREATE INDEX IF NOT EXISTS idx_assistant_tasks_scheduled ON assistant_tasks(scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_assistant_tasks_message ON assistant_tasks(message_id);
+
 -- Calendar intents recorded by the assistant and optionally synced to a provider
 CREATE TABLE IF NOT EXISTS assistant_calendar_events (
   id                TEXT PRIMARY KEY,
@@ -210,3 +234,17 @@ CREATE TABLE IF NOT EXISTS assistant_reminders (
 
 CREATE INDEX IF NOT EXISTS idx_assistant_reminders_due ON assistant_reminders(status, remind_at);
 CREATE INDEX IF NOT EXISTS idx_assistant_reminders_message ON assistant_reminders(message_id);
+
+-- Assistant settings and model overrides
+CREATE TABLE IF NOT EXISTS assistant_settings (
+  id              TEXT PRIMARY KEY,
+  scope_type      TEXT NOT NULL, -- global, discord-channel
+  scope_id        TEXT NOT NULL,
+  feature         TEXT NOT NULL,
+  profile         TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_settings_scope_feature
+  ON assistant_settings(scope_type, scope_id, feature);

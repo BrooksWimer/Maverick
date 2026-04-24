@@ -174,9 +174,64 @@ export async function createHttpServer(
       return options.assistant!.listReminders(limit ? parseInt(limit, 10) : undefined);
     });
 
+    app.get("/api/assistant/tasks", async (req) => {
+      const { limit, status, context } = req.query as { limit?: string; status?: string; context?: string };
+      const parsedLimit = limit ? parseInt(limit, 10) : undefined;
+      if (status === "inbox") {
+        return options.assistant!.listInbox(parsedLimit, context as
+          | "work"
+          | "personal"
+          | "home"
+          | "errands"
+          | "health"
+          | "planning"
+          | undefined);
+      }
+      return options.assistant!.listTasks(parsedLimit);
+    });
+
     app.get("/api/assistant/calendar", async (req) => {
       const { limit } = req.query as { limit?: string };
       return options.assistant!.listCalendarEvents(limit ? parseInt(limit, 10) : undefined);
+    });
+
+    app.get("/api/assistant/agenda", async (req) => {
+      const { context } = req.query as { context?: string };
+      return options.assistant!.getAgenda(context as
+        | "work"
+        | "personal"
+        | "home"
+        | "errands"
+        | "health"
+        | "planning"
+        | undefined);
+    });
+
+    app.get("/api/assistant/search", async (req) => {
+      const { q, context, limit } = req.query as { q?: string; context?: string; limit?: string };
+      if (!q) {
+        return { error: "Missing q parameter" };
+      }
+
+      return options.assistant!.search(q, {
+        context: context as
+          | "work"
+          | "personal"
+          | "home"
+          | "errands"
+          | "health"
+          | "planning"
+          | undefined,
+        limit: limit ? parseInt(limit, 10) : undefined,
+      });
+    });
+
+    app.get("/api/assistant/models", async (req) => {
+      const { channelId } = req.query as { channelId?: string };
+      return options.assistant!.getModelState({
+        source: "discord",
+        channelId: channelId ?? null,
+      });
     });
 
     app.post("/api/assistant/messages", async (req) => {
@@ -207,6 +262,45 @@ export async function createHttpServer(
         },
       });
       return result;
+    });
+
+    app.post("/api/assistant/tasks/:id/done", async (req) => {
+      const { id } = req.params as { id: string };
+      return options.assistant!.completeTask(id);
+    });
+
+    app.post("/api/assistant/tasks/:id/snooze", async (req) => {
+      const { id } = req.params as { id: string };
+      const { when } = req.body as { when: string };
+      return options.assistant!.snoozeTask(id, when);
+    });
+
+    app.post("/api/assistant/items/:id/retag", async (req) => {
+      const { id } = req.params as { id: string };
+      const { context } = req.body as {
+        context: "work" | "personal" | "home" | "errands" | "health" | "planning";
+      };
+      return options.assistant!.retagItem(id, context);
+    });
+
+    app.post("/api/assistant/models", async (req) => {
+      const body = req.body as {
+        scope: "global" | "discord-channel";
+        scopeId?: string;
+        feature: "classification" | "query" | "summary" | "planning" | "verification" | "review";
+        profile: "cheap" | "default" | "deep";
+      };
+      const scopeId = body.scope === "global" ? "global" : body.scopeId ?? "";
+      if (!scopeId) {
+        return { error: "Missing scopeId" };
+      }
+
+      return options.assistant!.setModelOverride({
+        scope: body.scope,
+        scopeId,
+        feature: body.feature,
+        profile: body.profile,
+      });
     });
 
     app.post("/api/assistant/reminders/process-due", async () => {

@@ -214,6 +214,29 @@
       "pollIntervalMs": 60000,
       "defaultChannel": "discord",
       "requireTimeForReminders": false
+    },
+    "modelRouting": {
+      "profiles": {
+        "cheap": "gpt-5.4-mini",
+        "default": "gpt-5.4",
+        "deep": "gpt-5.2"
+      },
+      "defaults": {
+        "classification": "cheap",
+        "query": "cheap",
+        "summary": "default",
+        "planning": "deep",
+        "verification": "deep",
+        "review": "deep"
+      },
+      "allowMessagePrefixes": true
+    },
+    "drive": {
+      "enabled": true,
+      "provider": "local",
+      "exportPath": "./data/life-os-drive",
+      "googleRootFolderId": null,
+      "syncOnChange": true
     }
   },
   "dailyBrief": {

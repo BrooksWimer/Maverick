@@ -8,8 +8,10 @@ export {
   events,
   assistantMessages,
   assistantNotes,
+  assistantTasks,
   assistantCalendarEvents,
   assistantReminders,
+  assistantSettings,
 } from "./repositories.js";
 export type {
   ProjectRow,
@@ -20,6 +22,8 @@ export type {
   EventRow,
   AssistantMessageRow,
   AssistantNoteRow,
+  AssistantTaskRow,
   AssistantCalendarEventRow,
   AssistantReminderRow,
+  AssistantSettingRow,
 } from "./repositories.js";

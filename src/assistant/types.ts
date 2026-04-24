@@ -1,7 +1,13 @@
+import type { AssistantModelProfileName, AssistantModelRoutingConfig } from "../config/index.js";
+
 export type AssistantMessageSource = "sms" | "discord" | "api";
 
-export type AssistantNoteContext = "general" | "work";
+export type AssistantPrimaryContext = "work" | "personal" | "home" | "errands" | "health" | "planning";
 export type WorkNoteKind = "general" | "project" | "study" | "acceptance-criteria";
+export type AssistantTaskStatus = "inbox" | "open" | "scheduled" | "done" | "archived";
+export type AssistantQueryType = "agenda" | "inbox" | "search";
+export type AssistantModelFeature = "classification" | "query" | "summary" | "planning" | "verification" | "review";
+export type AssistantModelOverrideScope = "global" | "discord-channel";
 
 export interface AssistantAttachment {
   id?: string | null;
@@ -29,7 +35,7 @@ export interface WorkNotesConfig {
 export interface AssistantStructuredNoteInput {
   title?: string | null;
   content?: string | null;
-  context?: AssistantNoteContext;
+  context?: AssistantPrimaryContext;
   noteKind?: WorkNoteKind;
   projectName?: string | null;
   smartGoalIds?: string[];
@@ -41,10 +47,20 @@ export type ParsedAssistantIntent =
       title: string;
       content: string;
       confidence: number;
-      context?: AssistantNoteContext;
+      context?: AssistantPrimaryContext;
       noteKind?: WorkNoteKind;
       projectName?: string | null;
       smartGoalIds?: string[];
+    }
+  | {
+      kind: "task";
+      title: string;
+      details: string;
+      primaryContext: AssistantPrimaryContext;
+      status: AssistantTaskStatus;
+      dueAt: string | null;
+      scheduledFor: string | null;
+      confidence: number;
     }
   | {
       kind: "reminder";
@@ -52,6 +68,7 @@ export type ParsedAssistantIntent =
       remindAt: string;
       parsedFrom: string;
       confidence: number;
+      primaryContext?: AssistantPrimaryContext;
     }
   | {
       kind: "calendar";
@@ -62,6 +79,14 @@ export type ParsedAssistantIntent =
       parsedFrom: string;
       details: string | null;
       location: string | null;
+      confidence: number;
+      primaryContext?: AssistantPrimaryContext;
+    }
+  | {
+      kind: "query";
+      queryType: AssistantQueryType;
+      query: string;
+      primaryContext?: AssistantPrimaryContext | null;
       confidence: number;
     }
   | {
@@ -104,11 +129,17 @@ export interface SmsProvider {
   sendMessage(to: string, body: string): Promise<SmsSendResult>;
 }
 
+export interface AssistantReplyAttachment {
+  name: string;
+  content: string;
+}
+
 export interface AssistantProcessResult {
   reply: string;
   intent: ParsedAssistantIntent["kind"];
   messageId: string;
   createdRecordId?: string;
+  attachment?: AssistantReplyAttachment;
 }
 
 export interface ReminderDispatchResult {
@@ -118,12 +149,87 @@ export interface ReminderDispatchResult {
   error?: string;
 }
 
+export interface AssistantTaskSnapshot {
+  id: string;
+  title: string;
+  details: string;
+  primaryContext: AssistantPrimaryContext;
+  status: AssistantTaskStatus;
+  dueAt: string | null;
+  scheduledFor: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  noteId: string | null;
+  reminderId: string | null;
+  calendarEventId: string | null;
+}
+
+export interface AssistantCalendarSnapshot {
+  id: string;
+  title: string;
+  startsAt: string;
+  endsAt: string | null;
+  timeZone: string;
+  location: string | null;
+  syncStatus: string;
+}
+
+export interface AssistantAgendaWorkstreamSnapshot {
+  id: string;
+  name: string;
+  projectId: string;
+  state: string;
+  currentGoal: string | null;
+  summary: string | null;
+  updatedAt: string;
+}
+
+export interface AssistantAgendaSnapshot {
+  generatedAt: string;
+  timeZone: string;
+  overdueTasks: AssistantTaskSnapshot[];
+  dueTodayTasks: AssistantTaskSnapshot[];
+  openTasks: AssistantTaskSnapshot[];
+  scheduledTasks: AssistantTaskSnapshot[];
+  inboxTasks: AssistantTaskSnapshot[];
+  upcomingCalendar: AssistantCalendarSnapshot[];
+  activeWorkstreams: AssistantAgendaWorkstreamSnapshot[];
+  nextAction: string;
+}
+
+export interface AssistantSearchResult {
+  id: string;
+  type: "task" | "note" | "reminder" | "calendar" | "project-memory";
+  title: string;
+  excerpt: string;
+  primaryContext?: AssistantPrimaryContext | null;
+  relatedAt?: string | null;
+  path?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AssistantModelOverride {
+  scope: AssistantModelOverrideScope;
+  scopeId: string;
+  feature: AssistantModelFeature;
+  profile: AssistantModelProfileName;
+  updatedAt: string;
+}
+
+export interface AssistantModelState {
+  routing: AssistantModelRoutingConfig;
+  overrides: AssistantModelOverride[];
+  effective: Record<AssistantModelFeature, AssistantModelProfileName>;
+}
+
 export interface AssistantInterpreter {
   interpret(input: {
     text: string;
     now: Date;
     timeZone: string;
     attachments?: AssistantAttachment[];
+    model?: string;
   }): Promise<ParsedAssistantIntent | null>;
   shutdown?(): Promise<void> | void;
 }

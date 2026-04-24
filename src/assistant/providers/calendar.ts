@@ -1,16 +1,9 @@
 import { createLogger } from "../../logger.js";
 import type { AssistantConfig } from "../../config/index.js";
 import type { CalendarCreateResult, CalendarEventInput, CalendarProvider } from "../types.js";
+import { refreshGoogleAccessToken } from "./google-auth.js";
 
 const log = createLogger("assistant:calendar");
-
-type GoogleAccessTokenResponse = {
-  access_token?: string;
-  expires_in?: number;
-  token_type?: string;
-  error?: string;
-  error_description?: string;
-};
 
 class MemoryCalendarProvider implements CalendarProvider {
   readonly name = "memory";
@@ -55,7 +48,7 @@ class GoogleCalendarProvider implements CalendarProvider {
     }
 
     try {
-      const accessToken = await this.refreshAccessToken(clientId, clientSecret, refreshToken);
+      const accessToken = await refreshGoogleAccessToken(clientId, clientSecret, refreshToken);
       const calendarId = encodeURIComponent(this.assistantConfig.calendar.calendarId);
       const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`, {
         method: "POST",
@@ -93,34 +86,6 @@ class GoogleCalendarProvider implements CalendarProvider {
         error: message,
       };
     }
-  }
-
-  private async refreshAccessToken(
-    clientId: string,
-    clientSecret: string,
-    refreshToken: string
-  ): Promise<string> {
-    const body = new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-    });
-
-    const response = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body,
-    });
-
-    const payload = (await response.json()) as GoogleAccessTokenResponse;
-    if (!response.ok || !payload.access_token) {
-      throw new Error(payload.error_description ?? payload.error ?? "Unable to refresh Google access token");
-    }
-
-    return payload.access_token;
   }
 }
 

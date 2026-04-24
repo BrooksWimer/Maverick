@@ -35,6 +35,29 @@ const baseConfig: AssistantConfig = {
     defaultChannel: "discord",
     requireTimeForReminders: false,
   },
+  modelRouting: {
+    profiles: {
+      cheap: "gpt-5.4-mini",
+      default: "gpt-5.4",
+      deep: "gpt-5.2",
+    },
+    defaults: {
+      classification: "cheap",
+      query: "cheap",
+      summary: "default",
+      planning: "deep",
+      verification: "deep",
+      review: "deep",
+    },
+    allowMessagePrefixes: true,
+  },
+  drive: {
+    enabled: false,
+    provider: "disabled",
+    exportPath: "./data/life-os-drive",
+    googleRootFolderId: null,
+    syncOnChange: true,
+  },
 };
 
 describe("AssistantService", () => {
@@ -51,14 +74,14 @@ describe("AssistantService", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("stores freeform messages as notes", async () => {
+  it("stores pure reference messages as notes", async () => {
     const service = new AssistantService(baseConfig, {
       now: () => new Date("2026-04-04T10:00:00-04:00"),
     });
 
     const result = await service.processIncomingMessage({
       source: "api",
-      body: "Remember to check on the contractor quote",
+      body: "Remember that the contractor prefers text messages before 9am.",
     });
 
     expect(result.intent).toBe("note");
@@ -66,7 +89,24 @@ describe("AssistantService", () => {
     expect(service.listMessages()).toHaveLength(2);
   });
 
-  it("schedules reminders from inbound texts", async () => {
+  it("turns actionable chat into inbox tasks", async () => {
+    const service = new AssistantService(baseConfig, {
+      now: () => new Date("2026-04-04T10:00:00-04:00"),
+    });
+
+    const result = await service.processIncomingMessage({
+      source: "api",
+      body: "Pick up dry cleaning and ask about tailoring",
+    });
+
+    expect(result.intent).toBe("task");
+    const tasks = service.listTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].status).toBe("inbox");
+    expect(tasks[0].primary_context).toBe("errands");
+  });
+
+  it("creates linked tasks for reminders", async () => {
     const service = new AssistantService(
       {
         ...baseConfig,
@@ -87,9 +127,10 @@ describe("AssistantService", () => {
     });
 
     expect(result.intent).toBe("reminder");
-    const reminders = service.listReminders();
-    expect(reminders).toHaveLength(1);
-    expect(reminders[0].destination).toBe("+15551234567");
+    expect(service.listReminders()).toHaveLength(1);
+    expect(service.listTasks()).toHaveLength(1);
+    expect(service.listTasks()[0].status).toBe("scheduled");
+    expect(service.listTasks()[0].reminder_id).toBe(service.listReminders()[0].id);
   });
 
   it("schedules reminders back into the originating Discord channel", async () => {
@@ -113,10 +154,6 @@ describe("AssistantService", () => {
       body: "remind me to submit rent Monday at 9am",
     });
 
-    const reminders = service.listReminders();
-    expect(reminders).toHaveLength(1);
-    expect(reminders[0].destination).toBe("channel-1");
-
     await service.processDueReminders(new Date("2026-04-06T13:05:00.000Z"));
 
     expect(delivered).toHaveLength(1);
@@ -124,7 +161,7 @@ describe("AssistantService", () => {
     expect(delivered[0].body).toContain("submit rent");
   });
 
-  it("syncs calendar events through the configured provider", async () => {
+  it("syncs calendar events through the configured provider and can create linked tasks", async () => {
     const service = new AssistantService(baseConfig, {
       now: () => new Date("2026-04-04T10:00:00-04:00"),
       calendarProvider: {
@@ -141,7 +178,7 @@ describe("AssistantService", () => {
 
     const result = await service.processIncomingMessage({
       source: "api",
-      body: "calendar tax appointment 2026-04-10 11:00am",
+      body: "calendar submit quarterly taxes 2026-04-10 11:00am",
     });
 
     expect(result.intent).toBe("calendar");
@@ -150,6 +187,49 @@ describe("AssistantService", () => {
     expect(events[0].provider).toBe("mock-calendar");
     expect(events[0].provider_event_id).toBe("evt_123");
     expect(events[0].sync_status).toBe("synced");
+    expect(service.listTasks()).toHaveLength(1);
+    expect(service.listTasks()[0].calendar_event_id).toBe(events[0].id);
+  });
+
+  it("returns markdown attachments for agenda queries", async () => {
+    const service = new AssistantService(baseConfig, {
+      now: () => new Date("2026-04-04T10:00:00-04:00"),
+    });
+
+    await service.processIncomingMessage({
+      source: "api",
+      body: "Pick up dry cleaning and ask about tailoring",
+    });
+
+    const result = await service.processIncomingMessage({
+      source: "api",
+      body: "What do I need to do today?",
+    });
+
+    expect(result.intent).toBe("query");
+    expect(result.attachment?.name).toBe("assistant-agenda.md");
+    expect(result.attachment?.content).toContain("# Assistant Agenda");
+  });
+
+  it("supports channel-scoped model overrides", async () => {
+    const service = new AssistantService(baseConfig, {
+      now: () => new Date("2026-04-04T10:00:00-04:00"),
+    });
+
+    service.setModelOverride({
+      scope: "discord-channel",
+      scopeId: "channel-1",
+      feature: "classification",
+      profile: "deep",
+    });
+
+    const state = service.getModelState({
+      source: "discord",
+      channelId: "channel-1",
+    });
+
+    expect(state.effective.classification).toBe("deep");
+    expect(state.overrides).toHaveLength(1);
   });
 
   it("uses the interpreter for natural language reminder reasoning", async () => {
@@ -172,7 +252,7 @@ describe("AssistantService", () => {
       source: "discord",
       from: "user-1",
       replyTarget: "channel-1",
-      body: "set a reminder for me 15 minutes from now to fart",
+      body: "[deep] set a reminder for me 15 minutes from now to fart",
     });
 
     expect(result.intent).toBe("reminder");

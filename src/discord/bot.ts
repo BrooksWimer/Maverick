@@ -28,6 +28,7 @@ import type { ApprovalRow, WorkstreamRow } from "../state/index.js";
 import type { DiscordRoute, EpicBranchConfig, OrchestratorConfig, ProjectConfig } from "../config/schema.js";
 import { workstreamLaneForEpic } from "../projects/epics.js";
 import type { AssistantAttachment } from "../assistant/types.js";
+import { buildAgendaSummary, renderAgendaMarkdown, renderInboxMarkdown, renderSearchMarkdown } from "../assistant/render.js";
 import { renderWorkstreamStatusSnapshot } from "../orchestrator/status.js";
 
 const log = createLogger("discord");
@@ -187,6 +188,27 @@ function subcommandBuilder(config: OrchestratorConfig) {
     { name: "Business Context", value: "business-context" },
     { name: "Engineering Learning", value: "engineering-learning" },
     { name: "Both Goals", value: "both" },
+  ] as const;
+  const assistantContextChoices = [
+    { name: "Work", value: "work" },
+    { name: "Personal", value: "personal" },
+    { name: "Home", value: "home" },
+    { name: "Errands", value: "errands" },
+    { name: "Health", value: "health" },
+    { name: "Planning", value: "planning" },
+  ] as const;
+  const assistantProfileChoices = [
+    { name: "Cheap", value: "cheap" },
+    { name: "Default", value: "default" },
+    { name: "Deep", value: "deep" },
+  ] as const;
+  const assistantModelFeatureChoices = [
+    { name: "Classification", value: "classification" },
+    { name: "Query", value: "query" },
+    { name: "Summary", value: "summary" },
+    { name: "Planning", value: "planning" },
+    { name: "Verification", value: "verification" },
+    { name: "Review", value: "review" },
   ] as const;
   const addWorkAttachmentOptions = <T extends {
     addAttachmentOption: (builder: (option: any) => any) => T;
@@ -468,6 +490,115 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .setDescription("Generate a preview of today's daily brief")
     );
 
+  const assistant = new SlashCommandBuilder()
+    .setName("assistant")
+    .setDescription("Manage Maverick Life OS notes, tasks, and model routing")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("agenda")
+        .setDescription("Show what needs attention now")
+        .addStringOption((option) =>
+          option
+            .setName("context")
+            .setDescription("Limit to one primary context")
+            .setRequired(false)
+            .addChoices(...assistantContextChoices)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("inbox")
+        .setDescription("Show unresolved actionable items")
+        .addStringOption((option) =>
+          option
+            .setName("context")
+            .setDescription("Limit to one primary context")
+            .setRequired(false)
+            .addChoices(...assistantContextChoices)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("find")
+        .setDescription("Search notes, tasks, reminders, calendar items, and project memory")
+        .addStringOption((option) =>
+          option.setName("query").setDescription("What to search for").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("context")
+            .setDescription("Limit to one primary context")
+            .setRequired(false)
+            .addChoices(...assistantContextChoices)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("done")
+        .setDescription("Mark a task complete")
+        .addStringOption((option) =>
+          option.setName("task").setDescription("Task id").setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("snooze")
+        .setDescription("Defer a task or reminder")
+        .addStringOption((option) =>
+          option.setName("task").setDescription("Task id").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("when")
+            .setDescription("A date/time string JavaScript can parse, like 2026-04-25T14:00:00-04:00")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("retag")
+        .setDescription("Correct an item's primary context")
+        .addStringOption((option) =>
+          option.setName("item").setDescription("Task or note id").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("context")
+            .setDescription("New primary context")
+            .setRequired(true)
+            .addChoices(...assistantContextChoices)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("models")
+        .setDescription("Inspect or override assistant model profiles")
+        .addStringOption((option) =>
+          option
+            .setName("scope")
+            .setDescription("Override scope; omit to inspect current effective settings")
+            .setRequired(false)
+            .addChoices(
+              { name: "Channel", value: "discord-channel" },
+              { name: "Global", value: "global" }
+            )
+        )
+        .addStringOption((option) =>
+          option
+            .setName("feature")
+            .setDescription("Feature to override")
+            .setRequired(false)
+            .addChoices(...assistantModelFeatureChoices)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("profile")
+            .setDescription("Logical model profile")
+            .setRequired(false)
+            .addChoices(...assistantProfileChoices)
+        )
+    );
+
   const maverick = new SlashCommandBuilder()
     .setName("maverick")
     .setDescription("Run Maverick control-plane operations")
@@ -482,6 +613,7 @@ function subcommandBuilder(config: OrchestratorConfig) {
     project.toJSON(),
     work.toJSON(),
     brief.toJSON(),
+    assistant.toJSON(),
     maverick.toJSON(),
   ] satisfies RESTPostAPIApplicationCommandsJSONBody[];
 }
@@ -896,12 +1028,34 @@ export class DiscordBot {
 
       if (this.config.assistant.discord.replyInThread) {
         await message.reply({
-          content: result.reply,
+          ...(result.attachment
+            ? {
+                content: `${result.reply}\n\nFull result attached as a Markdown file.`,
+                files: [
+                  new AttachmentBuilder(Buffer.from(result.attachment.content, "utf8"), {
+                    name: result.attachment.name,
+                  }),
+                ],
+              }
+            : {
+                content: result.reply,
+              }),
           allowedMentions: { repliedUser: false },
         });
       } else {
         await this.safeSend(message.channel as SendableChannel, {
-          content: result.reply,
+          ...(result.attachment
+            ? {
+                content: `${result.reply}\n\nFull result attached as a Markdown file.`,
+                files: [
+                  new AttachmentBuilder(Buffer.from(result.attachment.content, "utf8"), {
+                    name: result.attachment.name,
+                  }),
+                ],
+              }
+            : {
+                content: result.reply,
+              }),
         });
       }
     } catch (error) {
@@ -930,6 +1084,11 @@ export class DiscordBot {
 
     if (interaction.commandName === "brief") {
       await this.handleBriefCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "assistant") {
+      await this.handleAssistantCommand(interaction);
       return;
     }
 
@@ -1108,6 +1267,199 @@ export class DiscordBot {
         }),
       ],
     });
+  }
+
+  private async handleAssistantCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!this.assistant?.isEnabled()) {
+      await interaction.reply({
+        content: "The Maverick assistant is not enabled right now.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const subcommand = interaction.options.getSubcommand();
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    switch (subcommand) {
+      case "agenda":
+        await this.handleAssistantAgenda(interaction);
+        return;
+      case "inbox":
+        await this.handleAssistantInbox(interaction);
+        return;
+      case "find":
+        await this.handleAssistantFind(interaction);
+        return;
+      case "done":
+        await this.handleAssistantDone(interaction);
+        return;
+      case "snooze":
+        await this.handleAssistantSnooze(interaction);
+        return;
+      case "retag":
+        await this.handleAssistantRetag(interaction);
+        return;
+      case "models":
+        await this.handleAssistantModels(interaction);
+        return;
+      default:
+        await interaction.editReply(`Unsupported assistant subcommand: ${subcommand}`);
+    }
+  }
+
+  private async handleAssistantAgenda(interaction: ChatInputCommandInteraction): Promise<void> {
+    const context = interaction.options.getString("context") as
+      | "work"
+      | "personal"
+      | "home"
+      | "errands"
+      | "health"
+      | "planning"
+      | null;
+    const agenda = this.assistant!.getAgenda(context ?? undefined);
+    await interaction.editReply(
+      buildAttachedTextReply({
+        headerLines: [buildAgendaSummary(agenda)],
+        body: renderAgendaMarkdown(agenda),
+        attachmentName: "assistant-agenda.md",
+        attachmentNotice: "Full agenda attached as a Markdown file.",
+      })
+    );
+  }
+
+  private async handleAssistantInbox(interaction: ChatInputCommandInteraction): Promise<void> {
+    const context = interaction.options.getString("context") as
+      | "work"
+      | "personal"
+      | "home"
+      | "errands"
+      | "health"
+      | "planning"
+      | null;
+    const inbox = this.assistant!.listInbox(25, context ?? undefined);
+    const body = renderInboxMarkdown(inbox, this.config.assistant.timeZone, new Date().toISOString());
+    const summary = inbox.length === 0
+      ? "Your assistant inbox is clear."
+      : `Your assistant inbox has ${inbox.length} item${inbox.length === 1 ? "" : "s"} waiting for triage.`;
+    await interaction.editReply(
+      buildAttachedTextReply({
+        headerLines: [summary],
+        body,
+        attachmentName: "assistant-inbox.md",
+        attachmentNotice: "Full inbox attached as a Markdown file.",
+      })
+    );
+  }
+
+  private async handleAssistantFind(interaction: ChatInputCommandInteraction): Promise<void> {
+    const query = interaction.options.getString("query", true);
+    const context = interaction.options.getString("context") as
+      | "work"
+      | "personal"
+      | "home"
+      | "errands"
+      | "health"
+      | "planning"
+      | null;
+    const results = this.assistant!.search(query, {
+      context: context ?? undefined,
+      limit: 20,
+    });
+    const body = renderSearchMarkdown(query, results, this.config.assistant.timeZone, new Date().toISOString());
+    const summary = results.length === 0
+      ? `I couldn't find anything matching "${query}".`
+      : `I found ${results.length} result${results.length === 1 ? "" : "s"} for "${query}".`;
+    await interaction.editReply(
+      buildAttachedTextReply({
+        headerLines: [summary],
+        body,
+        attachmentName: "assistant-search.md",
+        attachmentNotice: "Full search results attached as a Markdown file.",
+      })
+    );
+  }
+
+  private async handleAssistantDone(interaction: ChatInputCommandInteraction): Promise<void> {
+    const taskId = interaction.options.getString("task", true);
+    const task = await this.assistant!.completeTask(taskId);
+    await interaction.editReply(`Completed task \`${task.id}\`: ${task.title}`);
+  }
+
+  private async handleAssistantSnooze(interaction: ChatInputCommandInteraction): Promise<void> {
+    const taskId = interaction.options.getString("task", true);
+    const when = interaction.options.getString("when", true);
+    const parsed = new Date(when);
+    if (Number.isNaN(parsed.getTime())) {
+      await interaction.editReply("I couldn't parse that snooze time. Use an ISO timestamp like 2026-04-25T14:00:00-04:00.");
+      return;
+    }
+
+    const task = await this.assistant!.snoozeTask(taskId, parsed.toISOString());
+    await interaction.editReply(`Snoozed task \`${task.id}\` to ${parsed.toISOString()}.`);
+  }
+
+  private async handleAssistantRetag(interaction: ChatInputCommandInteraction): Promise<void> {
+    const itemId = interaction.options.getString("item", true);
+    const context = interaction.options.getString("context", true) as
+      | "work"
+      | "personal"
+      | "home"
+      | "errands"
+      | "health"
+      | "planning";
+    const result = await this.assistant!.retagItem(itemId, context);
+    await interaction.editReply(`Retagged ${result.type} \`${result.id}\` to \`${context}\`.`);
+  }
+
+  private async handleAssistantModels(interaction: ChatInputCommandInteraction): Promise<void> {
+    const scope = interaction.options.getString("scope") as "global" | "discord-channel" | null;
+    const feature = interaction.options.getString("feature") as
+      | "classification"
+      | "query"
+      | "summary"
+      | "planning"
+      | "verification"
+      | "review"
+      | null;
+    const profile = interaction.options.getString("profile") as "cheap" | "default" | "deep" | null;
+
+    if (feature || profile || scope) {
+      if (!feature || !profile || !scope) {
+        await interaction.editReply("To set a model override, pass `scope`, `feature`, and `profile` together. Leave them blank to inspect current settings.");
+        return;
+      }
+
+      const override = this.assistant!.setModelOverride({
+        scope,
+        scopeId: scope === "global" ? "global" : interaction.channelId,
+        feature,
+        profile,
+      });
+      await interaction.editReply(
+        `Updated assistant model routing: scope=\`${override.scope}\`, feature=\`${override.feature}\`, profile=\`${override.profile}\`.`
+      );
+      return;
+    }
+
+    const state = this.assistant!.getModelState({
+      source: "discord",
+      channelId: interaction.channelId,
+    });
+    const lines = [
+      "Assistant model routing:",
+      `Profiles: cheap=\`${state.routing.profiles.cheap}\`, default=\`${state.routing.profiles.default}\`, deep=\`${state.routing.profiles.deep}\``,
+      `Effective: classification=\`${state.effective.classification}\`, query=\`${state.effective.query}\`, summary=\`${state.effective.summary}\`, planning=\`${state.effective.planning}\`, verification=\`${state.effective.verification}\`, review=\`${state.effective.review}\``,
+    ];
+
+    if (state.overrides.length > 0) {
+      lines.push("", "Overrides:");
+      for (const override of state.overrides.slice(0, 10)) {
+        lines.push(`- ${override.scope}:${override.scopeId} ${override.feature} -> ${override.profile}`);
+      }
+    }
+
+    await interaction.editReply(lines.join("\n"));
   }
 
   private async handleMaverickCommand(interaction: ChatInputCommandInteraction): Promise<void> {

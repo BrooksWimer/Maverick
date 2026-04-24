@@ -11,8 +11,9 @@ import { Orchestrator } from "./orchestrator/index.js";
 import { createHttpServer } from "./http/server.js";
 import { createDiscordBot } from "./discord/index.js";
 import { createLogger } from "./logger.js";
-import { createAssistantService } from "./assistant/index.js";
+import { createAssistantMirrorService, createAssistantService } from "./assistant/index.js";
 import { DailyBriefService } from "./daily-brief/index.js";
+import { eventBus } from "./orchestrator/event-bus.js";
 
 loadEnvironment();
 
@@ -44,10 +45,20 @@ async function main() {
   const orchestrator = new Orchestrator(config);
   await orchestrator.initialize();
 
-  const assistant = createAssistantService(config);
+  const assistantMirror = createAssistantMirrorService(config);
+  assistantMirror.start();
+  const assistant = createAssistantService(config, {
+    mirror: assistantMirror,
+  });
   assistant.start();
   const dailyBrief = new DailyBriefService(orchestrator, config);
   dailyBrief.start();
+
+  eventBus.on("turn.completed", () => assistantMirror.queueSync("turn.completed"));
+  eventBus.on("plan.generated", () => assistantMirror.queueSync("plan.generated"));
+  eventBus.on("review.completed", () => assistantMirror.queueSync("review.completed"));
+  eventBus.on("verification.completed", () => assistantMirror.queueSync("verification.completed"));
+  eventBus.on("brief.generated", () => assistantMirror.queueSync("brief.generated"));
 
   // Start HTTP server
   let httpServer: Awaited<ReturnType<typeof createHttpServer>> | undefined;
@@ -113,6 +124,7 @@ async function main() {
     }
     await runShutdownStep("daily-brief", () => dailyBrief.shutdown());
     await runShutdownStep("assistant", () => assistant.shutdown());
+    await runShutdownStep("assistant-mirror", () => assistantMirror.shutdown());
     await runShutdownStep("orchestrator", () => orchestrator.shutdown());
     if (httpServer) {
       await runShutdownStep("http-server", () => httpServer!.close());

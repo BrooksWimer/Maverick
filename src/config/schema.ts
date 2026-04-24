@@ -203,6 +203,44 @@ export const AssistantReminderConfigSchema = z.object({
   requireTimeForReminders: z.boolean().default(false),
 });
 
+export const AssistantModelProfileNameSchema = z.enum(["cheap", "default", "deep"]);
+
+export const AssistantModelRoutingConfigSchema = z.object({
+  profiles: z.object({
+    cheap: z.string().default("gpt-5.4-mini"),
+    default: z.string().default("gpt-5.4"),
+    deep: z.string().default("gpt-5.2"),
+  }).default({
+    cheap: "gpt-5.4-mini",
+    default: "gpt-5.4",
+    deep: "gpt-5.2",
+  }),
+  defaults: z.object({
+    classification: AssistantModelProfileNameSchema.default("cheap"),
+    query: AssistantModelProfileNameSchema.default("cheap"),
+    summary: AssistantModelProfileNameSchema.default("default"),
+    planning: AssistantModelProfileNameSchema.default("deep"),
+    verification: AssistantModelProfileNameSchema.default("deep"),
+    review: AssistantModelProfileNameSchema.default("deep"),
+  }).default({
+    classification: "cheap",
+    query: "cheap",
+    summary: "default",
+    planning: "deep",
+    verification: "deep",
+    review: "deep",
+  }),
+  allowMessagePrefixes: z.boolean().default(true),
+});
+
+export const AssistantDriveConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: z.enum(["disabled", "local", "google"]).default("disabled"),
+  exportPath: z.string().default("./data/life-os-drive"),
+  googleRootFolderId: z.string().nullable().optional(),
+  syncOnChange: z.boolean().default(true),
+});
+
 export const AssistantConfigSchema = z.object({
   enabled: z.boolean().default(false),
   agentProjectId: z.string().default("maverick"),
@@ -229,6 +267,29 @@ export const AssistantConfigSchema = z.object({
     pollIntervalMs: 60_000,
     defaultChannel: "sms",
     requireTimeForReminders: false,
+  }),
+  modelRouting: AssistantModelRoutingConfigSchema.default({
+    profiles: {
+      cheap: "gpt-5.4-mini",
+      default: "gpt-5.4",
+      deep: "gpt-5.2",
+    },
+    defaults: {
+      classification: "cheap",
+      query: "cheap",
+      summary: "default",
+      planning: "deep",
+      verification: "deep",
+      review: "deep",
+    },
+    allowMessagePrefixes: true,
+  }),
+  drive: AssistantDriveConfigSchema.default({
+    enabled: false,
+    provider: "disabled",
+    exportPath: "./data/life-os-drive",
+    googleRootFolderId: null,
+    syncOnChange: true,
   }),
 });
 
@@ -335,6 +396,29 @@ export const OrchestratorConfigSchema = z.object({
       defaultChannel: "sms",
       requireTimeForReminders: false,
     },
+    modelRouting: {
+      profiles: {
+        cheap: "gpt-5.4-mini",
+        default: "gpt-5.4",
+        deep: "gpt-5.2",
+      },
+      defaults: {
+        classification: "cheap",
+        query: "cheap",
+        summary: "default",
+        planning: "deep",
+        verification: "deep",
+        review: "deep",
+      },
+      allowMessagePrefixes: true,
+    },
+    drive: {
+      enabled: false,
+      provider: "disabled",
+      exportPath: "./data/life-os-drive",
+      googleRootFolderId: null,
+      syncOnChange: true,
+    },
   }),
 
   dailyBrief: DailyBriefConfigSchema.default({
@@ -373,5 +457,8 @@ export type AssistantDiscordConfig = z.infer<typeof AssistantDiscordConfigSchema
 export type AssistantSmsConfig = z.infer<typeof AssistantSmsConfigSchema>;
 export type AssistantCalendarConfig = z.infer<typeof AssistantCalendarConfigSchema>;
 export type AssistantReminderConfig = z.infer<typeof AssistantReminderConfigSchema>;
+export type AssistantModelProfileName = z.infer<typeof AssistantModelProfileNameSchema>;
+export type AssistantModelRoutingConfig = z.infer<typeof AssistantModelRoutingConfigSchema>;
+export type AssistantDriveConfig = z.infer<typeof AssistantDriveConfigSchema>;
 export type DailyBriefConfig = z.infer<typeof DailyBriefConfigSchema>;
 export type BriefConfig = z.infer<typeof BriefConfigSchema>;
