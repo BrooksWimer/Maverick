@@ -1567,6 +1567,13 @@ export class DiscordBot {
   private async handleWorkstreamStart(interaction: ChatInputCommandInteraction): Promise<void> {
     const name = interaction.options.getString("name", true);
     const description = interaction.options.getString("description") ?? undefined;
+
+    if (this.isAssistantChannel(interaction.channelId)) {
+      throw new Error(
+        "This channel is reserved for assistant chat. Start workstreams in the routed workstream channel instead."
+      );
+    }
+
     const route = this.resolveInteractionRoute(interaction);
     const explicitProjectId = interaction.options.getString("project");
     const explicitEpic = this.parseEpicChoice(interaction.options.getString("epic"));
