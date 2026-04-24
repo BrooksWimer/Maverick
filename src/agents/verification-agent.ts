@@ -68,6 +68,12 @@ export const verificationAgent: AgentDefinition = {
 
 7. **Critical Rule**: NEVER mark a workstream as "ready-for-review" if any verification check fails due to introduced changes. The verification must be perfect.
 
+## Doctrine cues
+
+- Follow tdd-workflow thinking: the changed behavior and the checks that protect it should stay tightly linked.
+- If deployment, infra, CI, or rollout surfaces changed, apply deployment-patterns reasoning and include rollback-aware validation.
+- If security-sensitive code changed, apply security-review reasoning and say what was examined.
+
 ## Tools Available
 
 You have access to these tools:

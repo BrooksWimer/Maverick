@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS turns (
   status          TEXT NOT NULL DEFAULT 'pending',  -- pending, running, completed, failed, cancelled
   result_summary  TEXT,
   started_at      TEXT,
+  last_progress_at TEXT,
   completed_at    TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );

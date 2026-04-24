@@ -15,7 +15,7 @@ import type {
   TurnResult,
 } from "../../src/codex/index.js";
 import { Orchestrator } from "../../src/orchestrator/index.js";
-import { closeDatabase, initDatabase } from "../../src/state/index.js";
+import { artifacts, closeDatabase, initDatabase } from "../../src/state/index.js";
 
 class QueuedAdapter implements ExecutionBackendAdapter {
   readonly turnRequests: TurnRequest[] = [];
@@ -204,11 +204,15 @@ describe("Orchestrator verification agent routing", () => {
     expect(verification.verificationContext.result.status).toBe("pass");
     expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("review");
     expect(parseVerificationContextRecord(orchestrator.getWorkstream(workstream.id)?.verification_context_json ?? null)?.result.status).toBe("pass");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.health).toBe("ready-for-review");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.latestReport?.kind).toBe("verification");
 
     await orchestrator.review(workstream.id, "uncommitted", {
       reviewer: "claude",
       trigger: "manual",
     });
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.latestReport?.kind).toBe("review");
+    expect(artifacts.listByWorkstream(workstream.id).filter((artifact) => artifact.type === "operator-report")).toHaveLength(2);
 
     expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Verify the current workstream changes");
     expect(utilityAdapter.turnRequests[1]?.instruction).toContain("Relevant Test Results");

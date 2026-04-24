@@ -63,6 +63,12 @@ export const intakeAgent: AgentDefinition = {
 
 9. **Output Structured Result**: Return your findings in the IntakeResult format (JSON).
 
+## Doctrine cues
+
+- Follow a search-first posture: inspect the actual repo before asserting what needs to happen.
+- Use iterative retrieval: start narrow, then widen only when the evidence requires it.
+- Prefer the smallest durable slice you can scope cleanly.
+
 ## Tools Available
 
 You have access to these tools to explore the codebase:

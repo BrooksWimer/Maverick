@@ -217,7 +217,7 @@
     }
   },
   "dailyBrief": {
-    "enabled": true,
+    "enabled": false,
     "timeZone": "America/New_York",
     "deliveryHour": 21,
     "deliveryMinute": 0,

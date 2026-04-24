@@ -50,7 +50,20 @@ export interface TurnRow {
   status: string;
   result_summary: string | null;
   started_at: string | null;
+  last_progress_at: string | null;
   completed_at: string | null;
+  created_at: string;
+}
+
+export interface ArtifactRow {
+  id: string;
+  workstream_id: string;
+  turn_id: string | null;
+  type: string;
+  name: string;
+  content: string | null;
+  path: string | null;
+  metadata_json: string | null;
   created_at: string;
 }
 
@@ -274,7 +287,7 @@ export const turns = {
   },
 
   update(id: string, fields: Partial<Pick<TurnRow,
-    "codex_turn_id" | "status" | "result_summary" | "started_at" | "completed_at"
+    "codex_turn_id" | "status" | "result_summary" | "started_at" | "last_progress_at" | "completed_at"
   >>): TurnRow | undefined {
     const db = getDatabase();
     const sets: string[] = [];
@@ -291,6 +304,72 @@ export const turns = {
     values.push(id);
     db.prepare(`UPDATE turns SET ${sets.join(", ")} WHERE id = ?`).run(...values);
     return turns.getById(id);
+  },
+};
+
+// --- Artifacts ---
+
+export const artifacts = {
+  create(data: {
+    id?: string;
+    workstream_id: string;
+    turn_id?: string | null;
+    type: string;
+    name: string;
+    content?: string | null;
+    path?: string | null;
+    metadata_json?: string | null;
+  }): ArtifactRow {
+    const db = getDatabase();
+    const id = data.id ?? randomUUID();
+    db.prepare(`
+      INSERT INTO artifacts (id, workstream_id, turn_id, type, name, content, path, metadata_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.workstream_id,
+      data.turn_id ?? null,
+      data.type,
+      data.name,
+      data.content ?? null,
+      data.path ?? null,
+      data.metadata_json ?? null,
+    );
+    return artifacts.getById(id)!;
+  },
+
+  getById(id: string): ArtifactRow | undefined {
+    const db = getDatabase();
+    return db.prepare("SELECT * FROM artifacts WHERE id = ?").get(id) as ArtifactRow | undefined;
+  },
+
+  getLatestByWorkstream(workstreamId: string, type?: string): ArtifactRow | undefined {
+    const db = getDatabase();
+    if (type) {
+      return db.prepare(`
+        SELECT * FROM artifacts
+        WHERE workstream_id = ? AND type = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+      `).get(workstreamId, type) as ArtifactRow | undefined;
+    }
+
+    return db.prepare(`
+      SELECT * FROM artifacts
+      WHERE workstream_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT 1
+    `).get(workstreamId) as ArtifactRow | undefined;
+  },
+
+  listByWorkstream(workstreamId: string, limit = 50): ArtifactRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM artifacts
+      WHERE workstream_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT ?
+    `).all(workstreamId, limit) as ArtifactRow[];
   },
 };
 

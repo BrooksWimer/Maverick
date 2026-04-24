@@ -56,9 +56,17 @@ import {
 } from "../agents/verification-support.js";
 import { createLogger } from "../logger.js";
 import { eventBus } from "./event-bus.js";
+import type {
+  ActiveOperationSnapshot,
+  OperatorReportArtifactMetadata,
+  OperatorValidationEvidence,
+  StatusLatestTurn,
+  WorkstreamHealth,
+  WorkstreamStatusSnapshot,
+} from "./status.js";
 import { WorkstreamStateMachine } from "./state-machine.js";
-import { projects, workstreams, turns, approvals, events as eventLog } from "../state/index.js";
-import type { WorkstreamRow } from "../state/index.js";
+import { artifacts, projects, workstreams, turns, approvals, events as eventLog } from "../state/index.js";
+import type { ArtifactRow, TurnRow, WorkstreamRow } from "../state/index.js";
 import { createAdapter, type ExecutionBackendAdapter } from "../codex/index.js";
 import type { ApprovalRequest, ExecutionThread, ReviewResult } from "../codex/types.js";
 import type { EscalationTier, OrchestratorConfig, ProjectConfig, RemoteHostConfig } from "../config/schema.js";
@@ -137,6 +145,23 @@ const HUMAN_DECISION_PATTERNS = [
   /\bdrop\s+table\b/i,
   /\bformat\b/i,
 ];
+
+const PROTECTED_CONFIG_PATH_PATTERNS = [
+  /(^|[\\/])\.github[\\/]/i,
+  /(^|[\\/])deploy[\\/]/i,
+  /(^|[\\/])docker-compose(\.[^.]+)?\.ya?ml$/i,
+  /(^|[\\/])dockerfile$/i,
+  /(^|[\\/])package(-lock)?\.json$/i,
+  /(^|[\\/])pnpm-lock\.ya?ml$/i,
+  /(^|[\\/])yarn\.lock$/i,
+  /(^|[\\/])tsconfig(\.[^.]+)?\.json$/i,
+  /(^|[\\/])\.eslintrc(\.[^.]+)?$/i,
+  /(^|[\\/])eslint\.config\.[^.]+$/i,
+  /(^|[\\/])\.prettierrc(\.[^.]+)?$/i,
+  /(^|[\\/])prettier\.config\.[^.]+$/i,
+];
+
+const QUIET_HEALTH_THRESHOLD_MS = 20 * 60 * 1000;
 
 const SAFE_REMOTE_INSPECTION_PATTERNS = [
   /\bgit\s+(?:-c\s+\S+\s+)?(?:-C\s+\S+\s+)?(status|diff|show|log)\b/i,
@@ -218,11 +243,20 @@ function collectContextStrings(value: unknown): string[] {
   return [];
 }
 
+type ActiveOperationKind = ActiveOperationSnapshot["kind"];
+
+type ActiveOperationState = {
+  kind: ActiveOperationKind;
+  startedAt: string;
+  lastProgressAt: string;
+};
+
 export class Orchestrator {
   private config: OrchestratorConfig;
   private adapters: Map<string, ExecutionBackendAdapter> = new Map();
   private stateMachines: Map<string, WorkstreamStateMachine> = new Map();
   private activeTurnByWorkstream = new Map<string, string>();
+  private activeOperationByWorkstream = new Map<string, ActiveOperationState>();
   private projectBootstrap = new Map<string, BootstrapStatus>();
   private utilityClaudeAdapter: ExecutionBackendAdapter | null = null;
   private briefTimer: NodeJS.Timeout | null = null;
@@ -263,6 +297,7 @@ export class Orchestrator {
       adapter.onOutput((threadId, content, isPartial) => {
         const ws = this.findWorkstreamByThread(threadId);
         if (ws) {
+          this.touchProgress("implementation", ws.id);
           eventBus.emit("turn.output", {
             workstreamId: ws.id,
             turnId: this.activeTurnByWorkstream.get(ws.id) ?? "",
@@ -451,10 +486,13 @@ export class Orchestrator {
       instruction,
     });
     this.activeTurnByWorkstream.set(workstreamId, turn.id);
+    const startedAt = new Date().toISOString();
+    this.beginActiveOperation(workstreamId, "implementation", startedAt);
 
     turns.update(turn.id, {
       status: "running",
-      started_at: new Date().toISOString(),
+      started_at: startedAt,
+      last_progress_at: startedAt,
     });
 
     workstreams.update(workstreamId, { current_goal: instruction });
@@ -487,17 +525,23 @@ export class Orchestrator {
       });
 
       // Update turn
+      const completedAt = new Date().toISOString();
       turns.update(turn.id, {
         codex_turn_id: result.backendTurnId,
         status: result.status,
         result_summary: result.summary,
-        completed_at: new Date().toISOString(),
+        last_progress_at: completedAt,
+        completed_at: completedAt,
       });
 
       // Update workstream summary
       workstreams.update(workstreamId, {
         summary: result.summary,
       });
+      this.persistOperatorReport(
+        dispatchWorkstream,
+        this.buildDispatchOperatorReport(dispatchWorkstream, turn.id, result),
+      );
 
       eventBus.emit("turn.completed", {
         workstreamId,
@@ -525,16 +569,27 @@ export class Orchestrator {
         this.maybeStartAutoClaudeReview(dispatchWorkstream, turn.id, result.status);
       }
       this.activeTurnByWorkstream.delete(workstreamId);
+      this.completeActiveOperation(workstreamId);
       log.info({ workstreamId, turnId: turn.id, status: result.status }, "Turn completed");
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const completedAt = new Date().toISOString();
 
       turns.update(turn.id, {
         status: "failed",
         result_summary: message,
-        completed_at: new Date().toISOString(),
+        last_progress_at: completedAt,
+        completed_at: completedAt,
       });
+      this.persistOperatorReport(
+        dispatchWorkstream,
+        this.buildDispatchOperatorReport(dispatchWorkstream, turn.id, {
+          status: "failed",
+          output: message,
+          summary: message,
+        }),
+      );
 
       eventBus.emit("turn.completed", {
         workstreamId,
@@ -551,6 +606,7 @@ export class Orchestrator {
       });
 
       this.activeTurnByWorkstream.delete(workstreamId);
+      this.completeActiveOperation(workstreamId);
       throw err;
     }
   }
@@ -561,6 +617,7 @@ export class Orchestrator {
 
     const adapter = this.getAdapter(ws.project_id);
     await adapter.steerTurn({ threadId: ws.codex_thread_id, instruction });
+    this.touchProgress("implementation", workstreamId);
 
     eventLog.emit({
       workstream_id: workstreamId,
@@ -579,6 +636,7 @@ export class Orchestrator {
     await adapter.interruptTurn(ws.codex_thread_id);
     const cancelledTurns = this.markRunningTurnsCancelled(workstreamId, "Cancelled by user.");
     const expiredApprovals = approvals.expirePendingByWorkstream(workstreamId, "cancel");
+    this.completeActiveOperation(workstreamId);
 
     workstreams.update(workstreamId, { current_goal: null, waiting_on_approval: 0, pending_decision: null });
 
@@ -606,6 +664,7 @@ export class Orchestrator {
     }
 
     const cancelledTurns = this.markRunningTurnsCancelled(workstreamId, `Archived by ${archivedBy}`);
+    this.completeActiveOperation(workstreamId);
 
     const expiredApprovals = approvals.expirePendingByWorkstream(workstreamId, archivedBy);
 
@@ -672,40 +731,52 @@ export class Orchestrator {
     }
 
     const effectiveTarget = target ?? "uncommitted";
-    const result =
-      reviewer === "claude"
-        ? await this.runClaudeReview(ws, effectiveTarget)
-        : await this.getAdapter(ws.project_id).startReview({
-            threadId: ws.codex_thread_id!,
-            cwd: ws.cwd ?? this.getProject(ws.project_id).repoPath,
-            target: effectiveTarget,
-          });
+    const latestTurn = turns.listByWorkstream(ws.id).slice(-1)[0] ?? null;
+    this.beginActiveOperation(workstreamId, "review");
+    try {
+      const result =
+        reviewer === "claude"
+          ? await this.runClaudeReview(ws, effectiveTarget, latestTurn?.id ?? null)
+          : await this.getAdapter(ws.project_id).startReview({
+              threadId: ws.codex_thread_id!,
+              cwd: ws.cwd ?? this.getProject(ws.project_id).repoPath,
+              target: effectiveTarget,
+            });
 
-    eventLog.emit({
-      workstream_id: workstreamId,
-      project_id: ws.project_id,
-      event_type: "review.completed",
-      payload: {
-        severity: result.severity,
-        findingsLength: result.findings.length,
-        reviewer,
-        trigger: options?.trigger ?? "manual",
-      },
-      source: "orchestrator",
-    });
+      this.touchProgress("review", workstreamId, latestTurn?.id ?? undefined);
+      this.persistOperatorReport(
+        ws,
+        this.buildReviewOperatorReport(ws, latestTurn?.id ?? null, result, reviewer, effectiveTarget),
+      );
 
-    if (reviewer === "claude") {
-      eventBus.emit("review.completed", {
-        workstreamId,
-        reviewer: "claude",
-        severity: result.severity,
-        findings: result.findings,
-        suggestions: result.suggestions ?? [],
-        target: effectiveTarget,
+      eventLog.emit({
+        workstream_id: workstreamId,
+        project_id: ws.project_id,
+        event_type: "review.completed",
+        payload: {
+          severity: result.severity,
+          findingsLength: result.findings.length,
+          reviewer,
+          trigger: options?.trigger ?? "manual",
+        },
+        source: "orchestrator",
       });
-    }
 
-    return result;
+      if (reviewer === "claude") {
+        eventBus.emit("review.completed", {
+          workstreamId,
+          reviewer: "claude",
+          severity: result.severity,
+          findings: result.findings,
+          suggestions: result.suggestions ?? [],
+          target: effectiveTarget,
+        });
+      }
+
+      return result;
+    } finally {
+      this.completeActiveOperation(workstreamId);
+    }
   }
 
   async verify(
@@ -742,92 +813,103 @@ export class Orchestrator {
       turns.listByWorkstream(workstream.id).slice(-1)[0] ??
       null;
     const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, verificationConfig.model);
-    const agentResult = await runAgent(
-      adapter,
-      "verification",
-      {
-        projectId: project.id,
-        repoPath: project.repoPath,
-        workstreamId: workstream.id,
-        workstreamName: workstream.name,
-        workstreamState: workstream.state,
-        instruction: [
-          "Verify the current workstream changes and determine whether they are ready for review.",
-          latestTurn?.instruction ? `Latest implementation instruction: ${latestTurn.instruction}` : null,
-        ]
-          .filter((line): line is string => Boolean(line))
-          .join("\n"),
-        cwd,
-        addDirs: [cwd],
-        epicCharter: this.getEpicCharterContext(workstream),
-        agentsMd: this.readAgentsMd(project),
-        extra: {
-          "Latest Turn Summary": latestTurn?.result_summary ?? workstream.summary ?? "No turn summary recorded.",
-          "Latest Turn Output": this.getLatestTurnOutput(
-            workstream.id,
-            latestTurn?.result_summary ?? workstream.summary ?? "",
-          ),
-          "Git Status": this.readGitOutput(["status", "--short", "--branch"], cwd),
-          "Git Diff": this.readGitReviewDiff(cwd, "uncommitted"),
-          "Structured Intake": planningContext?.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
-          "Goal Frame": planningContext?.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
-          "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
-          "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
-          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+    this.beginActiveOperation(workstreamId, "verification");
+    try {
+      const agentResult = await runAgent(
+        adapter,
+        "verification",
+        {
+          projectId: project.id,
+          repoPath: project.repoPath,
+          workstreamId: workstream.id,
+          workstreamName: workstream.name,
+          workstreamState: workstream.state,
+          instruction: [
+            "Verify the current workstream changes and determine whether they are ready for review.",
+            latestTurn?.instruction ? `Latest implementation instruction: ${latestTurn.instruction}` : null,
+          ]
+            .filter((line): line is string => Boolean(line))
+            .join("\n"),
+          cwd,
+          addDirs: [cwd],
+          epicCharter: this.getEpicCharterContext(workstream),
+          agentsMd: this.readAgentsMd(project),
+          extra: {
+            "Latest Turn Summary": latestTurn?.result_summary ?? workstream.summary ?? "No turn summary recorded.",
+            "Latest Turn Output": this.getLatestTurnOutput(
+              workstream.id,
+              latestTurn?.result_summary ?? workstream.summary ?? "",
+            ),
+            "Git Status": this.readGitOutput(["status", "--short", "--branch"], cwd),
+            "Git Diff": this.readGitReviewDiff(cwd, "uncommitted"),
+            "Structured Intake": planningContext?.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
+            "Goal Frame": planningContext?.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
+            "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
+            "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
+            "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+          },
         },
-      },
-      {
-        threadId: previousContext?.verificationThreadId ?? undefined,
-        model: verificationConfig.model,
-        maxTurns: 8,
-        permissionMode: "auto",
-      },
-    );
+        {
+          threadId: previousContext?.verificationThreadId ?? undefined,
+          model: verificationConfig.model,
+          maxTurns: 8,
+          permissionMode: "auto",
+          onOutput: this.buildOperationOutputHandler("verification", workstream.id, latestTurn?.id ?? null),
+        },
+      );
 
-    if (agentResult.status !== "completed") {
-      throw new Error(agentResult.output || "Claude verification failed.");
-    }
+      if (agentResult.status !== "completed") {
+        throw new Error(agentResult.output || "Claude verification failed.");
+      }
 
-    const verificationResult = coerceVerificationResult(agentResult.structured, agentResult.output);
-    let verificationContext = buildVerificationContextRecord({
-      result: verificationResult,
-      rawAgentOutput: agentResult.output,
-      verificationThreadId: agentResult.threadId,
-      sourceTurnId: latestTurn?.id ?? options?.sourceTurnId ?? null,
-      trigger: options?.trigger ?? "manual",
-      previous: previousContext,
-    });
-    if (verificationResult.status === "fail" && verificationResult.introducedFailures.length > 0) {
-      verificationContext = {
-        ...verificationContext,
-        incidentTriage: await this.runVerificationIncidentTriage(
-          workstream,
-          latestTurn?.instruction ?? workstream.current_goal ?? "No recorded implementation instruction.",
-          verificationContext,
-          planningContext,
-          verificationConfig.model,
-          epicContextAnalysis,
-        ),
+      const verificationResult = coerceVerificationResult(agentResult.structured, agentResult.output);
+      let verificationContext = buildVerificationContextRecord({
+        result: verificationResult,
+        rawAgentOutput: agentResult.output,
+        verificationThreadId: agentResult.threadId,
+        sourceTurnId: latestTurn?.id ?? options?.sourceTurnId ?? null,
+        trigger: options?.trigger ?? "manual",
+        previous: previousContext,
+      });
+      if (verificationResult.status === "fail" && verificationResult.introducedFailures.length > 0) {
+        verificationContext = {
+          ...verificationContext,
+          incidentTriage: await this.runVerificationIncidentTriage(
+            workstream,
+            latestTurn?.instruction ?? workstream.current_goal ?? "No recorded implementation instruction.",
+            verificationContext,
+            planningContext,
+            verificationConfig.model,
+            epicContextAnalysis,
+          ),
+        };
+      }
+      const renderedVerification = this.persistVerificationContext(
+        workstream,
+        verificationContext,
+        options?.trigger ?? "manual",
+      );
+      this.touchProgress("verification", workstream.id, latestTurn?.id ?? undefined);
+      this.persistOperatorReport(
+        workstream,
+        this.buildVerificationOperatorReport(workstream, latestTurn?.id ?? null, verificationContext),
+      );
+      const updatedWorkstream = workstreams.getById(workstream.id) ?? workstream;
+
+      if (
+        verificationResult.status === "pass" &&
+        (options?.trigger ?? "manual") === "auto"
+      ) {
+        this.maybeStartAutoClaudeReviewAfterVerification(updatedWorkstream, latestTurn?.id ?? null);
+      }
+
+      return {
+        verificationContext,
+        renderedVerification,
       };
+    } finally {
+      this.completeActiveOperation(workstreamId);
     }
-    const renderedVerification = this.persistVerificationContext(
-      workstream,
-      verificationContext,
-      options?.trigger ?? "manual",
-    );
-    const updatedWorkstream = workstreams.getById(workstream.id) ?? workstream;
-
-    if (
-      verificationResult.status === "pass" &&
-      (options?.trigger ?? "manual") === "auto"
-    ) {
-      this.maybeStartAutoClaudeReviewAfterVerification(updatedWorkstream, latestTurn?.id ?? null);
-    }
-
-    return {
-      verificationContext,
-      renderedVerification,
-    };
   }
 
   async generateBrief(options?: {
@@ -892,100 +974,111 @@ export class Orchestrator {
     const previousContext = options.resumeExisting ? storedContext : null;
     const effectiveInstruction = previousContext?.originalInstruction ?? instruction;
     const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, planningConfig.model);
-    const intake =
-      previousContext?.intake ??
-      await this.runPlanningIntake(workstream, effectiveInstruction, planningConfig.model, epicContextAnalysis);
-    const goalFrame =
-      previousContext?.goalFrame ??
-      await this.runPlanningGoalFrame(workstream, effectiveInstruction, intake, planningConfig.model, epicContextAnalysis);
-    const modeling =
-      previousContext?.modeling ??
-      await this.runPlanningModeling(workstream, effectiveInstruction, intake, goalFrame, planningConfig.model, epicContextAnalysis);
-    const testDesign =
-      previousContext?.testDesign ??
-      await this.runPlanningTestDesign(
-        workstream,
-        effectiveInstruction,
-        intake,
-        goalFrame,
-        modeling,
-        planningConfig.model,
-        epicContextAnalysis,
+    this.beginActiveOperation(workstreamId, "planning");
+    try {
+      const intake =
+        previousContext?.intake ??
+        await this.runPlanningIntake(workstream, effectiveInstruction, planningConfig.model, epicContextAnalysis);
+      const goalFrame =
+        previousContext?.goalFrame ??
+        await this.runPlanningGoalFrame(workstream, effectiveInstruction, intake, planningConfig.model, epicContextAnalysis);
+      const modeling =
+        previousContext?.modeling ??
+        await this.runPlanningModeling(workstream, effectiveInstruction, intake, goalFrame, planningConfig.model, epicContextAnalysis);
+      const testDesign =
+        previousContext?.testDesign ??
+        await this.runPlanningTestDesign(
+          workstream,
+          effectiveInstruction,
+          intake,
+          goalFrame,
+          modeling,
+          planningConfig.model,
+          epicContextAnalysis,
+        );
+      const agentResult = await runAgent(
+        adapter,
+        "planning",
+        this.buildPlanningAgentContext(
+          workstream,
+          effectiveInstruction,
+          intake,
+          goalFrame,
+          modeling,
+          testDesign,
+          previousContext,
+          undefined,
+          epicContextAnalysis,
+        ),
+        {
+          threadId: previousContext?.planningThreadId ?? undefined,
+          model: planningConfig.model,
+          maxTurns: 6,
+          permissionMode: "plan",
+          onOutput: this.buildOperationOutputHandler("planning", workstream.id),
+        },
       );
-    const agentResult = await runAgent(
-      adapter,
-      "planning",
-      this.buildPlanningAgentContext(
-        workstream,
-        effectiveInstruction,
+
+      if (agentResult.status !== "completed") {
+        throw new Error(agentResult.output || "Claude plan generation failed.");
+      }
+
+      const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
+      const basePlanningContext = buildPlanningContextRecord({
+        originalInstruction: effectiveInstruction,
+        result: planningResult,
+        rawAgentOutput: agentResult.output,
         intake,
         goalFrame,
         modeling,
         testDesign,
-        previousContext,
-        undefined,
+        planningThreadId: agentResult.threadId,
+        previous: previousContext,
+      });
+      const feedbackRequest = await this.runPlanningFeedbackRequest(
+        workstream,
+        effectiveInstruction,
+        basePlanningContext,
+        planningConfig.model,
         epicContextAnalysis,
-      ),
-      {
-        threadId: previousContext?.planningThreadId ?? undefined,
-        model: planningConfig.model,
-        maxTurns: 6,
-        permissionMode: "plan",
-      },
-    );
+      );
+      const explanation = await this.runPlanningExplanation(
+        workstream,
+        effectiveInstruction,
+        basePlanningContext,
+        feedbackRequest,
+        planningConfig.model,
+        epicContextAnalysis,
+      );
+      const planningContext = buildPlanningContextRecord({
+        originalInstruction: effectiveInstruction,
+        result: planningResult,
+        rawAgentOutput: agentResult.output,
+        intake,
+        goalFrame,
+        modeling,
+        testDesign,
+        feedbackRequest,
+        explanation,
+        planningThreadId: agentResult.threadId,
+        previous: previousContext,
+      });
 
-    if (agentResult.status !== "completed") {
-      throw new Error(agentResult.output || "Claude plan generation failed.");
+      const renderedPlan = this.persistPlanningContext(workstream, effectiveInstruction, planningContext, trigger);
+      this.touchProgress("planning", workstream.id);
+      this.persistOperatorReport(
+        workstream,
+        this.buildPlanOperatorReport(workstream, planningContext, trigger),
+      );
+      return {
+        renderedPlan,
+        planningContext,
+        finalExecutionPrompt: planningContext.finalExecutionPrompt,
+        needsAnswers: planningContext.pendingQuestions.length > 0,
+      };
+    } finally {
+      this.completeActiveOperation(workstreamId);
     }
-
-    const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
-    const basePlanningContext = buildPlanningContextRecord({
-      originalInstruction: effectiveInstruction,
-      result: planningResult,
-      rawAgentOutput: agentResult.output,
-      intake,
-      goalFrame,
-      modeling,
-      testDesign,
-      planningThreadId: agentResult.threadId,
-      previous: previousContext,
-    });
-    const feedbackRequest = await this.runPlanningFeedbackRequest(
-      workstream,
-      effectiveInstruction,
-      basePlanningContext,
-      planningConfig.model,
-      epicContextAnalysis,
-    );
-    const explanation = await this.runPlanningExplanation(
-      workstream,
-      effectiveInstruction,
-      basePlanningContext,
-      feedbackRequest,
-      planningConfig.model,
-      epicContextAnalysis,
-    );
-    const planningContext = buildPlanningContextRecord({
-      originalInstruction: effectiveInstruction,
-      result: planningResult,
-      rawAgentOutput: agentResult.output,
-      intake,
-      goalFrame,
-      modeling,
-      testDesign,
-      feedbackRequest,
-      explanation,
-      planningThreadId: agentResult.threadId,
-      previous: previousContext,
-    });
-
-    const renderedPlan = this.persistPlanningContext(workstream, effectiveInstruction, planningContext, trigger);
-    return {
-      renderedPlan,
-      planningContext,
-      finalExecutionPrompt: planningContext.finalExecutionPrompt,
-      needsAnswers: planningContext.pendingQuestions.length > 0,
-    };
   }
 
   getPlanningContext(workstreamId: string): PlanningContextRecord | null {
@@ -1012,152 +1105,163 @@ export class Orchestrator {
       throw new Error(`Workstream ${workstreamId} has no stored planning context to resume.`);
     }
 
-    const { mergedAnswers, appliedIds, unknownIds } = mergePlanningAnswers(existingContext, answers, {
-      answeredBy: answeredBy ?? null,
-    });
-
-    if (appliedIds.length === 0) {
-      const suffix =
-        unknownIds.length > 0
-          ? ` Unknown question ids: ${unknownIds.join(", ")}.`
-          : "";
-      throw new Error(`No planning answers matched the current pending questions.${suffix}`);
-    }
-
-    eventLog.emit({
-      workstream_id: workstream.id,
-      project_id: workstream.project_id,
-      event_type: "plan.answersProvided",
-      payload: {
-        answerIds: appliedIds,
+    this.beginActiveOperation(workstreamId, "planning");
+    try {
+      const { mergedAnswers, appliedIds, unknownIds } = mergePlanningAnswers(existingContext, answers, {
         answeredBy: answeredBy ?? null,
-      },
-      source: "orchestrator",
-    });
+      });
 
-    const project = this.getProject(workstream.project_id);
-    const planningConfig = project.claudePlanning;
-    if (!planningConfig?.enabled) {
-      throw new Error(`Claude planning is disabled for project ${project.id}.`);
-    }
+      if (appliedIds.length === 0) {
+        const suffix =
+          unknownIds.length > 0
+            ? ` Unknown question ids: ${unknownIds.join(", ")}.`
+            : "";
+        throw new Error(`No planning answers matched the current pending questions.${suffix}`);
+      }
 
-    const adapter = await this.getUtilityClaudeAdapter();
-    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, planningConfig.model);
-    const intake =
-      existingContext.intake ??
-      await this.runPlanningIntake(workstream, existingContext.originalInstruction, planningConfig.model, epicContextAnalysis);
-    const goalFrame =
-      existingContext.goalFrame ??
-      await this.runPlanningGoalFrame(
-        workstream,
-        existingContext.originalInstruction,
-        intake,
-        planningConfig.model,
-        epicContextAnalysis,
+      eventLog.emit({
+        workstream_id: workstream.id,
+        project_id: workstream.project_id,
+        event_type: "plan.answersProvided",
+        payload: {
+          answerIds: appliedIds,
+          answeredBy: answeredBy ?? null,
+        },
+        source: "orchestrator",
+      });
+
+      const project = this.getProject(workstream.project_id);
+      const planningConfig = project.claudePlanning;
+      if (!planningConfig?.enabled) {
+        throw new Error(`Claude planning is disabled for project ${project.id}.`);
+      }
+
+      const adapter = await this.getUtilityClaudeAdapter();
+      const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, planningConfig.model);
+      const intake =
+        existingContext.intake ??
+        await this.runPlanningIntake(workstream, existingContext.originalInstruction, planningConfig.model, epicContextAnalysis);
+      const goalFrame =
+        existingContext.goalFrame ??
+        await this.runPlanningGoalFrame(
+          workstream,
+          existingContext.originalInstruction,
+          intake,
+          planningConfig.model,
+          epicContextAnalysis,
+        );
+      const modeling =
+        existingContext.modeling ??
+        await this.runPlanningModeling(
+          workstream,
+          existingContext.originalInstruction,
+          intake,
+          goalFrame,
+          planningConfig.model,
+          epicContextAnalysis,
+        );
+      const testDesign =
+        existingContext.testDesign ??
+        await this.runPlanningTestDesign(
+          workstream,
+          existingContext.originalInstruction,
+          intake,
+          goalFrame,
+          modeling,
+          planningConfig.model,
+          epicContextAnalysis,
+        );
+      const agentResult = await runAgent(
+        adapter,
+        "planning",
+        this.buildPlanningAgentContext(
+          workstream,
+          existingContext.originalInstruction,
+          intake,
+          goalFrame,
+          modeling,
+          testDesign,
+          existingContext,
+          mergedAnswers,
+          epicContextAnalysis,
+        ),
+        {
+          threadId: existingContext.planningThreadId ?? undefined,
+          model: planningConfig.model,
+          maxTurns: 6,
+          permissionMode: "plan",
+          onOutput: this.buildOperationOutputHandler("planning", workstream.id),
+        },
       );
-    const modeling =
-      existingContext.modeling ??
-      await this.runPlanningModeling(
-        workstream,
-        existingContext.originalInstruction,
-        intake,
-        goalFrame,
-        planningConfig.model,
-        epicContextAnalysis,
-      );
-    const testDesign =
-      existingContext.testDesign ??
-      await this.runPlanningTestDesign(
-        workstream,
-        existingContext.originalInstruction,
-        intake,
-        goalFrame,
-        modeling,
-        planningConfig.model,
-        epicContextAnalysis,
-      );
-    const agentResult = await runAgent(
-      adapter,
-      "planning",
-      this.buildPlanningAgentContext(
-        workstream,
-        existingContext.originalInstruction,
+
+      if (agentResult.status !== "completed") {
+        throw new Error(agentResult.output || "Claude planning resume failed.");
+      }
+
+      const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
+      const basePlanningContext = buildPlanningContextRecord({
+        originalInstruction: existingContext.originalInstruction,
+        result: planningResult,
+        rawAgentOutput: agentResult.output,
         intake,
         goalFrame,
         modeling,
         testDesign,
-        existingContext,
-        mergedAnswers,
+        planningThreadId: agentResult.threadId,
+        answers: mergedAnswers,
+        previous: existingContext,
+      });
+      const feedbackRequest = await this.runPlanningFeedbackRequest(
+        workstream,
+        existingContext.originalInstruction,
+        basePlanningContext,
+        planningConfig.model,
         epicContextAnalysis,
-      ),
-      {
-        threadId: existingContext.planningThreadId ?? undefined,
-        model: planningConfig.model,
-        maxTurns: 6,
-        permissionMode: "plan",
-      },
-    );
+      );
+      const explanation = await this.runPlanningExplanation(
+        workstream,
+        existingContext.originalInstruction,
+        basePlanningContext,
+        feedbackRequest,
+        planningConfig.model,
+        epicContextAnalysis,
+      );
+      const planningContext = buildPlanningContextRecord({
+        originalInstruction: existingContext.originalInstruction,
+        result: planningResult,
+        rawAgentOutput: agentResult.output,
+        intake,
+        goalFrame,
+        modeling,
+        testDesign,
+        feedbackRequest,
+        explanation,
+        planningThreadId: agentResult.threadId,
+        answers: mergedAnswers,
+        previous: existingContext,
+      });
 
-    if (agentResult.status !== "completed") {
-      throw new Error(agentResult.output || "Claude planning resume failed.");
+      const renderedPlan = this.persistPlanningContext(
+        workstream,
+        existingContext.originalInstruction,
+        planningContext,
+        "resume",
+      );
+      this.touchProgress("planning", workstream.id);
+      this.persistOperatorReport(
+        workstream,
+        this.buildPlanOperatorReport(workstream, planningContext, "resume"),
+      );
+
+      return {
+        renderedPlan,
+        planningContext,
+        finalExecutionPrompt: planningContext.finalExecutionPrompt,
+        needsAnswers: planningContext.pendingQuestions.length > 0,
+      };
+    } finally {
+      this.completeActiveOperation(workstreamId);
     }
-
-    const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
-    const basePlanningContext = buildPlanningContextRecord({
-      originalInstruction: existingContext.originalInstruction,
-      result: planningResult,
-      rawAgentOutput: agentResult.output,
-      intake,
-      goalFrame,
-      modeling,
-      testDesign,
-      planningThreadId: agentResult.threadId,
-      answers: mergedAnswers,
-      previous: existingContext,
-    });
-    const feedbackRequest = await this.runPlanningFeedbackRequest(
-      workstream,
-      existingContext.originalInstruction,
-      basePlanningContext,
-      planningConfig.model,
-      epicContextAnalysis,
-    );
-    const explanation = await this.runPlanningExplanation(
-      workstream,
-      existingContext.originalInstruction,
-      basePlanningContext,
-      feedbackRequest,
-      planningConfig.model,
-      epicContextAnalysis,
-    );
-    const planningContext = buildPlanningContextRecord({
-      originalInstruction: existingContext.originalInstruction,
-      result: planningResult,
-      rawAgentOutput: agentResult.output,
-      intake,
-      goalFrame,
-      modeling,
-      testDesign,
-      feedbackRequest,
-      explanation,
-      planningThreadId: agentResult.threadId,
-      answers: mergedAnswers,
-      previous: existingContext,
-    });
-
-    const renderedPlan = this.persistPlanningContext(
-      workstream,
-      existingContext.originalInstruction,
-      planningContext,
-      "resume",
-    );
-
-    return {
-      renderedPlan,
-      planningContext,
-      finalExecutionPrompt: planningContext.finalExecutionPrompt,
-      needsAnswers: planningContext.pendingQuestions.length > 0,
-    };
   }
 
   // --- Query methods ---
@@ -1200,6 +1304,61 @@ export class Orchestrator {
     return turns.listByWorkstream(workstreamId);
   }
 
+  getWorkstreamStatusSnapshot(workstreamId: string): WorkstreamStatusSnapshot | null {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      return null;
+    }
+
+    const latestTurn = this.getLatestStatusTurn(workstream.id);
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    const verificationContext = parseVerificationContextRecord(workstream.verification_context_json);
+    const latestReport = this.getLatestOperatorReport(workstream.id);
+    const pendingApprovalCount = approvals.listPending(workstream.id).length;
+    const activeOperation = this.getActiveOperationSnapshot(workstream, latestTurn);
+    const nextAction = this.computeNextAction(workstream, planningContext, verificationContext, latestReport, activeOperation);
+    const { health, reason } = this.computeHealth(
+      workstream,
+      planningContext,
+      verificationContext,
+      latestTurn,
+      latestReport,
+      activeOperation,
+      pendingApprovalCount,
+    );
+
+    return {
+      workstreamId: workstream.id,
+      workstreamName: workstream.name,
+      projectId: workstream.project_id,
+      epicId: workstream.epic_id,
+      state: workstream.state,
+      branch: workstream.branch,
+      workspace: workstream.cwd,
+      codexThreadId: workstream.codex_thread_id,
+      currentGoal: workstream.current_goal,
+      waitingOnApproval: Boolean(workstream.waiting_on_approval) || pendingApprovalCount > 0,
+      pendingApprovalCount,
+      health,
+      healthReason: reason,
+      planning: {
+        status: planningContext?.status ?? "none",
+        pendingQuestionCount: planningContext?.pendingQuestions.length ?? 0,
+        finalPromptReady: Boolean(planningContext?.finalExecutionPrompt),
+      },
+      verification: {
+        status: verificationContext?.result.status ?? "none",
+        recommendation: verificationContext?.result.recommendation ?? null,
+        introducedFailureCount: verificationContext?.result.introducedFailures.length ?? 0,
+      },
+      latestTurn,
+      latestReport,
+      activeOperation,
+      nextAction,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
   getPendingApprovals(workstreamId?: string) {
     return approvals.listPending(workstreamId);
   }
@@ -1231,6 +1390,7 @@ export class Orchestrator {
 
     const status = approved ? "approved" : "denied";
     const resolved = approvals.resolve(approval.id, status, decidedBy);
+    this.touchProgress("implementation", ws.id);
 
     const stillPending = approvals.listPending(ws.id);
     if (stillPending.length === 0) {
@@ -1298,6 +1458,571 @@ export class Orchestrator {
       pendingApprovals: approvals.listPending().length,
       timestamp: new Date().toISOString(),
     };
+  }
+
+  private beginActiveOperation(
+    workstreamId: string,
+    kind: ActiveOperationKind,
+    startedAt = new Date().toISOString(),
+  ): void {
+    this.activeOperationByWorkstream.set(workstreamId, {
+      kind,
+      startedAt,
+      lastProgressAt: startedAt,
+    });
+  }
+
+  private completeActiveOperation(workstreamId: string): void {
+    this.activeOperationByWorkstream.delete(workstreamId);
+  }
+
+  private buildOperationOutputHandler(
+    kind: ActiveOperationKind,
+    workstreamId: string,
+    turnId?: string | null,
+  ): (content: string, isPartial: boolean) => void {
+    return () => {
+      this.touchProgress(kind, workstreamId, turnId ?? undefined);
+    };
+  }
+
+  private touchProgress(
+    kind: ActiveOperationKind,
+    workstreamId: string,
+    turnId?: string,
+    at = new Date().toISOString(),
+  ): void {
+    const activeOperation = this.activeOperationByWorkstream.get(workstreamId);
+    if (activeOperation) {
+      this.activeOperationByWorkstream.set(workstreamId, {
+        ...activeOperation,
+        kind,
+        lastProgressAt: at,
+      });
+    } else {
+      this.activeOperationByWorkstream.set(workstreamId, {
+        kind,
+        startedAt: at,
+        lastProgressAt: at,
+      });
+    }
+
+    const resolvedTurnId = turnId ?? this.activeTurnByWorkstream.get(workstreamId);
+    if (resolvedTurnId) {
+      this.touchTurnProgress(resolvedTurnId, at);
+    }
+  }
+
+  private touchTurnProgress(turnId: string, at = new Date().toISOString()): void {
+    turns.update(turnId, {
+      last_progress_at: at,
+    });
+  }
+
+  private getLatestStatusTurn(workstreamId: string): StatusLatestTurn | null {
+    const turn = turns.listByWorkstream(workstreamId).slice(-1)[0] ?? null;
+    if (!turn) {
+      return null;
+    }
+
+    return {
+      id: turn.id,
+      status: turn.status,
+      instruction: turn.instruction,
+      resultSummary: turn.result_summary,
+      startedAt: turn.started_at,
+      lastProgressAt: turn.last_progress_at,
+      completedAt: turn.completed_at,
+    };
+  }
+
+  private getLatestOperatorReport(workstreamId: string): OperatorReportArtifactMetadata | null {
+    const artifact = artifacts.getLatestByWorkstream(workstreamId, "operator-report");
+    if (!artifact?.metadata_json) {
+      return null;
+    }
+
+    return this.parseOperatorReportMetadata(artifact.metadata_json);
+  }
+
+  private parseOperatorReportMetadata(metadataJson: string | null): OperatorReportArtifactMetadata | null {
+    if (!metadataJson) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(metadataJson) as Record<string, unknown>;
+      const kind = parsed.kind;
+      if (kind !== "plan" && kind !== "dispatch" && kind !== "verification" && kind !== "review") {
+        return null;
+      }
+
+      const validation = Array.isArray(parsed.validation)
+        ? parsed.validation.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+              return [];
+            }
+
+            const candidate = entry as Record<string, unknown>;
+            const label = typeof candidate.label === "string" ? candidate.label.trim() : "";
+            const detail = typeof candidate.detail === "string" ? candidate.detail.trim() : "";
+            const status = candidate.status;
+            if (!label || !detail) {
+              return [];
+            }
+
+            if (
+              status !== "pass" &&
+              status !== "fail" &&
+              status !== "warning" &&
+              status !== "info" &&
+              status !== "skipped"
+            ) {
+              return [];
+            }
+
+            return [{
+              label,
+              detail,
+              status,
+              command: typeof candidate.command === "string" ? candidate.command.trim() : undefined,
+            } satisfies OperatorValidationEvidence];
+          })
+        : [];
+
+      return {
+        schemaVersion: typeof parsed.schemaVersion === "number" ? Math.max(1, Math.trunc(parsed.schemaVersion)) : 1,
+        kind,
+        headline: typeof parsed.headline === "string" ? parsed.headline.trim() : "Operator report",
+        summary: typeof parsed.summary === "string" ? parsed.summary.trim() : "",
+        filesChanged: Array.isArray(parsed.filesChanged)
+          ? parsed.filesChanged.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+          : [],
+        validation,
+        remainingRisks: Array.isArray(parsed.remainingRisks)
+          ? parsed.remainingRisks.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+          : [],
+        nextAction: typeof parsed.nextAction === "string" ? parsed.nextAction.trim() : "Monitor the workstream.",
+        sourceEvent: typeof parsed.sourceEvent === "string" ? parsed.sourceEvent.trim() : "unknown",
+        generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt.trim() : new Date().toISOString(),
+        turnId: typeof parsed.turnId === "string" && parsed.turnId.length > 0 ? parsed.turnId : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private persistOperatorReport(
+    workstream: WorkstreamRow,
+    metadata: OperatorReportArtifactMetadata,
+  ): ArtifactRow {
+    return artifacts.create({
+      workstream_id: workstream.id,
+      turn_id: metadata.turnId,
+      type: "operator-report",
+      name: `${metadata.kind}-operator-report`,
+      content: this.renderOperatorReportMarkdown(metadata),
+      metadata_json: JSON.stringify(metadata),
+    });
+  }
+
+  private renderOperatorReportMarkdown(report: OperatorReportArtifactMetadata): string {
+    return [
+      `# ${report.headline}`,
+      "",
+      `Summary: ${report.summary}`,
+      `Generated: ${report.generatedAt}`,
+      `Source event: ${report.sourceEvent}`,
+      report.filesChanged.length > 0
+        ? ["", "## Files Changed", ...report.filesChanged.map((file) => `- ${file}`)].join("\n")
+        : null,
+      report.validation.length > 0
+        ? ["", "## Validation Evidence", ...report.validation.map((entry) => {
+            const commandSuffix = entry.command ? ` via \`${entry.command}\`` : "";
+            return `- [${entry.status}] ${entry.label}: ${entry.detail}${commandSuffix}`;
+          })].join("\n")
+        : null,
+      report.remainingRisks.length > 0
+        ? ["", "## Remaining Risks", ...report.remainingRisks.map((risk) => `- ${risk}`)].join("\n")
+        : null,
+      "",
+      `## Next Action`,
+      report.nextAction,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
+  }
+
+  private buildPlanOperatorReport(
+    workstream: WorkstreamRow,
+    planningContext: PlanningContextRecord,
+    trigger: PlanningRunTrigger,
+  ): OperatorReportArtifactMetadata {
+    return {
+      schemaVersion: 1,
+      kind: "plan",
+      headline:
+        planningContext.status === "needs-answers"
+          ? "Planning is waiting on operator input"
+          : planningContext.finalExecutionPrompt
+            ? "Planning is ready to dispatch"
+            : "Planning stored structured analysis",
+      summary:
+        planningContext.status === "needs-answers"
+          ? `Planning surfaced ${planningContext.pendingQuestions.length} operator answer(s) before dispatch is safe.`
+          : planningContext.finalExecutionPrompt
+            ? "Planning produced a final Codex execution prompt for the next implementation slice."
+            : "Planning stored structured analysis, but the final execution prompt still needs refinement.",
+      filesChanged: Array.from(
+        new Set(planningContext.result.steps.flatMap((step) => step.files)),
+      ),
+      validation: [
+        {
+          label: "Planning readiness",
+          status:
+            planningContext.status === "needs-answers"
+              ? "warning"
+              : planningContext.finalExecutionPrompt
+                ? "pass"
+                : "info",
+          detail:
+            planningContext.status === "needs-answers"
+              ? `${planningContext.pendingQuestions.length} operator answer(s) remain.`
+              : planningContext.finalExecutionPrompt
+                ? "Final execution prompt stored."
+                : "Structured context stored without a final execution prompt yet.",
+        },
+      ],
+      remainingRisks: Array.from(
+        new Set([...planningContext.result.risks, ...planningContext.result.remainingUnknowns]),
+      ),
+      nextAction:
+        planningContext.status === "needs-answers"
+          ? "Answer the pending planning questions."
+          : planningContext.finalExecutionPrompt
+            ? "Dispatch the next implementation step using the stored execution prompt."
+            : "Resume planning and finalize the execution prompt before dispatch.",
+      sourceEvent: `plan.generated:${trigger}`,
+      generatedAt: new Date().toISOString(),
+      turnId: null,
+    };
+  }
+
+  private buildDispatchOperatorReport(
+    workstream: WorkstreamRow,
+    turnId: string,
+    result: Pick<import("../codex/types.js").TurnResult, "status" | "summary" | "output">,
+  ): OperatorReportArtifactMetadata {
+    const autoVerificationEnabled = Boolean(this.getProject(workstream.project_id).claudeVerification?.enabled);
+    const validationStatus = result.status === "completed" ? "info" : "fail";
+    return {
+      schemaVersion: 1,
+      kind: "dispatch",
+      headline:
+        result.status === "completed"
+          ? "Implementation turn completed"
+          : result.status === "cancelled"
+            ? "Implementation turn was cancelled"
+            : "Implementation turn failed",
+      summary: result.summary?.trim() || result.output.trim() || `Turn finished with status ${result.status}.`,
+      filesChanged: this.collectWorkspaceChangedFiles(workstream),
+      validation: [
+        {
+          label: "Implementation turn",
+          status: validationStatus,
+          detail: result.summary?.trim() || `Turn finished with status ${result.status}.`,
+        },
+        ...(result.status === "completed" && autoVerificationEnabled
+          ? [{
+              label: "Follow-up verification",
+              status: "info",
+              detail: "Claude verification is available for this project.",
+            } satisfies OperatorValidationEvidence]
+          : []),
+      ],
+      remainingRisks:
+        result.status === "completed"
+          ? []
+          : ["Implementation did not finish cleanly, so verification evidence is incomplete."],
+      nextAction:
+        result.status !== "completed"
+          ? "Inspect the failed turn output and decide whether to retry or steer the workstream."
+          : autoVerificationEnabled
+            ? "Run or wait for verification before treating this slice as review-ready."
+            : "Verify the changes before moving to review.",
+      sourceEvent: "turn.completed",
+      generatedAt: new Date().toISOString(),
+      turnId,
+    };
+  }
+
+  private buildVerificationOperatorReport(
+    workstream: WorkstreamRow,
+    turnId: string | null,
+    verificationContext: VerificationContextRecord,
+  ): OperatorReportArtifactMetadata {
+    return {
+      schemaVersion: 1,
+      kind: "verification",
+      headline:
+        verificationContext.result.status === "pass"
+          ? "Verification passed"
+          : "Verification found introduced failures",
+      summary:
+        verificationContext.result.status === "pass"
+          ? "All required verification checks passed for the current slice."
+          : `${verificationContext.result.introducedFailures.length} introduced failure(s) need attention before review.`,
+      filesChanged: this.collectWorkspaceChangedFiles(workstream),
+      validation: verificationContext.result.checks.map((check) => ({
+        label: check.name,
+        status: check.status === "pass"
+          ? "pass"
+          : check.status === "skipped"
+            ? "skipped"
+            : "fail",
+        detail: check.output || check.status,
+        command: check.command,
+      })),
+      remainingRisks: Array.from(
+        new Set([
+          ...verificationContext.result.introducedFailures,
+          ...(verificationContext.incidentTriage?.escalationReason ? [verificationContext.incidentTriage.escalationReason] : []),
+        ]),
+      ),
+      nextAction:
+        verificationContext.result.status === "pass"
+          ? "Review the workstream and decide whether to ship."
+          : verificationContext.incidentTriage?.escalationNeeded
+            ? "Inspect the verification incident triage and resolve the escalated blocker."
+            : "Fix the introduced verification failures and rerun verification.",
+      sourceEvent: `verification.completed:${verificationContext.trigger}`,
+      generatedAt: new Date().toISOString(),
+      turnId,
+    };
+  }
+
+  private buildReviewOperatorReport(
+    workstream: WorkstreamRow,
+    turnId: string | null,
+    result: ReviewResult & { verdict?: string },
+    reviewer: "primary" | "claude",
+    target: string,
+  ): OperatorReportArtifactMetadata {
+    const reviewStatus: OperatorValidationEvidence["status"] =
+      result.severity === "clean"
+        ? "pass"
+        : result.severity === "minor"
+          ? "warning"
+          : "fail";
+    return {
+      schemaVersion: 1,
+      kind: "review",
+      headline: reviewer === "claude" ? "Claude review completed" : "Primary review completed",
+      summary: result.findings.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() ?? "Review completed.",
+      filesChanged: this.collectWorkspaceChangedFiles(workstream),
+      validation: [
+        {
+          label: "Review severity",
+          status: reviewStatus,
+          detail: `Severity ${result.severity} on target ${target} via ${reviewer}.`,
+        },
+      ],
+      remainingRisks: Array.from(
+        new Set([
+          ...(result.suggestions ?? []),
+          ...this.extractNarrativeBullets(result.findings, 4),
+        ]),
+      ),
+      nextAction:
+        result.severity === "clean"
+          ? "Ship or merge when you are ready."
+          : result.severity === "minor"
+            ? "Review the caveats and decide whether to ship or follow up."
+            : "Address the review findings before shipping.",
+      sourceEvent: `review.completed:${reviewer}`,
+      generatedAt: new Date().toISOString(),
+      turnId,
+    };
+  }
+
+  private collectWorkspaceChangedFiles(workstream: WorkstreamRow): string[] {
+    const cwd = workstream.cwd ?? this.getProject(workstream.project_id).repoPath;
+    const statusOutput = this.readGitOutput(["status", "--short"], cwd);
+    if (!statusOutput || statusOutput.startsWith("Git command failed")) {
+      return [];
+    }
+
+    return statusOutput
+      .split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 3)
+      .map((line) => line.slice(3).split(" -> ").slice(-1)[0]?.trim() ?? "")
+      .filter((line) => line.length > 0);
+  }
+
+  private extractNarrativeBullets(text: string, limit: number): string[] {
+    return text
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[-*]\s*/, "").trim())
+      .filter((line) => line.length > 0 && !line.startsWith("Verdict:") && !line.startsWith("Passes:"))
+      .slice(0, limit);
+  }
+
+  private getActiveOperationSnapshot(
+    workstream: WorkstreamRow,
+    latestTurn: StatusLatestTurn | null,
+  ): ActiveOperationSnapshot | null {
+    const explicit = this.activeOperationByWorkstream.get(workstream.id);
+    if (explicit) {
+      return {
+        kind: explicit.kind,
+        startedAt: explicit.startedAt,
+        lastProgressAt: explicit.lastProgressAt,
+        quiet: Date.now() - new Date(explicit.lastProgressAt).getTime() >= QUIET_HEALTH_THRESHOLD_MS,
+      };
+    }
+
+    if (latestTurn?.status === "running") {
+      const startedAt = latestTurn.startedAt ?? latestTurn.lastProgressAt ?? new Date().toISOString();
+      const lastProgressAt = latestTurn.lastProgressAt ?? startedAt;
+      return {
+        kind: "implementation",
+        startedAt,
+        lastProgressAt,
+        quiet: Date.now() - new Date(lastProgressAt).getTime() >= QUIET_HEALTH_THRESHOLD_MS,
+      };
+    }
+
+    return null;
+  }
+
+  private computeHealth(
+    workstream: WorkstreamRow,
+    planningContext: PlanningContextRecord | null,
+    verificationContext: VerificationContextRecord | null,
+    latestTurn: StatusLatestTurn | null,
+    latestReport: OperatorReportArtifactMetadata | null,
+    activeOperation: ActiveOperationSnapshot | null,
+    pendingApprovalCount: number,
+  ): { health: WorkstreamHealth; reason: string | null } {
+    if (workstream.state === "done") {
+      return { health: "done", reason: "Workstream is archived or completed." };
+    }
+
+    if (workstream.state === "blocked") {
+      return { health: "blocked", reason: "Workstream is in the blocked state." };
+    }
+
+    if (Boolean(workstream.waiting_on_approval) || pendingApprovalCount > 0) {
+      return {
+        health: "waiting-on-approval",
+        reason: `${pendingApprovalCount || 1} approval request(s) are pending.`,
+      };
+    }
+
+    if (planningContext?.status === "needs-answers") {
+      return {
+        health: "awaiting-input",
+        reason: `Planning is waiting on ${planningContext.pendingQuestions.length} operator answer(s).`,
+      };
+    }
+
+    if (activeOperation?.quiet) {
+      return {
+        health: "quiet",
+        reason: `${activeOperation.kind} has been quiet since ${activeOperation.lastProgressAt}.`,
+      };
+    }
+
+    if (activeOperation) {
+      return {
+        health: "running",
+        reason: `${activeOperation.kind} is active.`,
+      };
+    }
+
+    if (latestTurn?.status === "failed") {
+      return {
+        health: "failed",
+        reason: latestTurn.resultSummary ?? "The latest implementation turn failed.",
+      };
+    }
+
+    if (verificationContext?.result.status === "fail") {
+      return {
+        health: "failed",
+        reason: `${verificationContext.result.introducedFailures.length} introduced verification failure(s) remain.`,
+      };
+    }
+
+    if (
+      workstream.state === "review" &&
+      verificationContext?.result.status === "pass" &&
+      (!latestReport || latestReport.kind !== "review" || latestReport.validation[0]?.status !== "fail")
+    ) {
+      return {
+        health: "ready-for-review",
+        reason: "Verification passed and the workstream is waiting in review.",
+      };
+    }
+
+    return {
+      health: "idle",
+      reason: workstream.summary ?? null,
+    };
+  }
+
+  private computeNextAction(
+    workstream: WorkstreamRow,
+    planningContext: PlanningContextRecord | null,
+    verificationContext: VerificationContextRecord | null,
+    latestReport: OperatorReportArtifactMetadata | null,
+    activeOperation: ActiveOperationSnapshot | null,
+  ): string {
+    const pendingApprovalCount = approvals.listPending(workstream.id).length;
+    if (Boolean(workstream.waiting_on_approval) || pendingApprovalCount > 0) {
+      return "Resolve the pending approval request.";
+    }
+
+    if (planningContext?.status === "needs-answers") {
+      return "Answer the pending planning questions.";
+    }
+
+    if (planningContext?.status === "needs-final-prompt") {
+      return "Resume planning and finalize the execution prompt before dispatch.";
+    }
+
+    if (activeOperation?.quiet) {
+      return "Inspect the quiet run and decide whether to steer, cancel, or wait longer.";
+    }
+
+    if (verificationContext?.result.status === "fail") {
+      return "Fix the introduced verification failures and rerun verification.";
+    }
+
+    if (
+      latestReport?.kind === "review" &&
+      (
+        latestReport.validation.some((entry) => entry.status === "fail" || entry.status === "warning") ||
+        latestReport.remainingRisks.length > 0
+      )
+    ) {
+      return "Address the review findings before shipping.";
+    }
+
+    if (latestReport?.kind === "dispatch") {
+      return latestReport.nextAction;
+    }
+
+    if (workstream.state === "review") {
+      return "Review the latest verification evidence and decide whether to ship.";
+    }
+
+    if (planningContext?.finalExecutionPrompt || workstream.state === "implementation" || workstream.state === "planning") {
+      return "Dispatch the next implementation step.";
+    }
+
+    return latestReport?.nextAction ?? "Monitor the workstream.";
   }
 
   // --- Internal ---
@@ -1406,7 +2131,11 @@ export class Orchestrator {
     ].join("\n");
   }
 
-  private async runClaudeReview(workstream: WorkstreamRow, target: string): Promise<ReviewResult> {
+  private async runClaudeReview(
+    workstream: WorkstreamRow,
+    target: string,
+    sourceTurnId: string | null,
+  ): Promise<ReviewResult & { verdict?: string }> {
     const project = this.getProject(workstream.project_id);
     const reviewConfig = project.claudeReview;
     if (!reviewConfig?.enabled) {
@@ -1454,6 +2183,7 @@ export class Orchestrator {
         model: reviewConfig.model,
         maxTurns: 4,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("review", workstream.id, sourceTurnId),
       },
     );
 
@@ -1461,7 +2191,16 @@ export class Orchestrator {
       throw new Error(agentResult.output || "Claude review failed.");
     }
 
-    return coerceReviewAgentResult(agentResult.structured, agentResult.output);
+    this.touchProgress("review", workstream.id, sourceTurnId ?? undefined);
+    const reviewResult = coerceReviewAgentResult(agentResult.structured, agentResult.output) as ReviewResult & { verdict?: string };
+    const verdict =
+      agentResult.structured && typeof agentResult.structured.verdict === "string"
+        ? agentResult.structured.verdict.trim()
+        : undefined;
+    if (verdict) {
+      reviewResult.verdict = verdict;
+    }
+    return reviewResult;
   }
 
   private async generateBriefInternal(params: {
@@ -1724,6 +2463,7 @@ export class Orchestrator {
         model,
         maxTurns: 6,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
       },
     );
 
@@ -1731,6 +2471,7 @@ export class Orchestrator {
       throw new Error(agentResult.output || "Claude intake generation failed.");
     }
 
+    this.touchProgress("planning", workstream.id);
     return parseIntakeResult(agentResult.structured, instruction);
   }
 
@@ -1772,6 +2513,7 @@ export class Orchestrator {
         model,
         maxTurns: 4,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
       },
     );
 
@@ -1779,6 +2521,7 @@ export class Orchestrator {
       throw new Error(agentResult.output || "Claude goal framing failed.");
     }
 
+    this.touchProgress("planning", workstream.id);
     return parseGoalFrameResult(agentResult.structured, intake);
   }
 
@@ -1822,9 +2565,11 @@ export class Orchestrator {
         model,
         maxTurns: 4,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
       },
     );
 
+    this.touchProgress("planning", workstream.id);
     return parseModelingResult(
       agentResult.status === "completed" ? agentResult.structured : null,
       goalFrame.problemStatement || intake.scope || instruction,
@@ -1872,9 +2617,11 @@ export class Orchestrator {
         model,
         maxTurns: 4,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
       },
     );
 
+    this.touchProgress("planning", workstream.id);
     return parseTestDesignResult(
       agentResult.status === "completed" ? agentResult.structured : null,
       goalFrame.successCriteria[0] ?? intake.acceptanceCriteria[0] ?? instruction,
@@ -1926,9 +2673,11 @@ export class Orchestrator {
         model,
         maxTurns: 4,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
       },
     );
 
+    this.touchProgress("planning", workstream.id);
     return coerceOperatorFeedbackResult(
       agentResult.status === "completed" ? agentResult.structured : null,
       planningContext.pendingQuestions,
@@ -1977,9 +2726,11 @@ export class Orchestrator {
         model,
         maxTurns: 4,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
       },
     );
 
+    this.touchProgress("planning", workstream.id);
     return coerceExplanationResult(
       agentResult.status === "completed" ? agentResult.structured : null,
       planningContext,
@@ -2248,9 +2999,11 @@ export class Orchestrator {
         model,
         maxTurns: 6,
         permissionMode: "plan",
+        onOutput: this.buildOperationOutputHandler("verification", workstream.id, verificationContext.sourceTurnId),
       },
     );
 
+    this.touchProgress("verification", workstream.id, verificationContext.sourceTurnId ?? undefined);
     return coerceIncidentTriageResult(
       agentResult.status === "completed" ? agentResult.structured : null,
       agentResult.output,
@@ -2473,6 +3226,7 @@ export class Orchestrator {
       context_json: JSON.stringify(request.context),
       tier,
     });
+    this.touchProgress("implementation", workstreamId);
 
     workstreams.update(workstreamId, {
       waiting_on_approval: 1,
@@ -2504,6 +3258,7 @@ export class Orchestrator {
         status: "approved",
         decidedBy: "auto",
       });
+      this.touchProgress("implementation", workstreamId);
 
       eventLog.emit({
         workstream_id: workstreamId,
@@ -2558,6 +3313,9 @@ export class Orchestrator {
       typeof request.context.requestMethod === "string" ? request.context.requestMethod : undefined;
 
     if (requestMethod === "item/fileChange/requestApproval") {
+      if (this.isProtectedConfigChangeRequest(request)) {
+        return "approval-gated";
+      }
       return "auto";
     }
 
@@ -2586,6 +3344,9 @@ export class Orchestrator {
     }
 
     if (request.type === "file-change") {
+      if (this.isProtectedConfigChangeRequest(request)) {
+        return "approval-gated";
+      }
       return "auto";
     }
 
@@ -2594,6 +3355,11 @@ export class Orchestrator {
 
   private buildApprovalContextText(request: ApprovalRequest): string {
     return [request.description, ...collectContextStrings(request.context)].join("\n");
+  }
+
+  private isProtectedConfigChangeRequest(request: ApprovalRequest): boolean {
+    return collectContextStrings(request.context)
+      .some((entry) => PROTECTED_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(entry)));
   }
 
   private isRoutineCommand(request: ApprovalRequest): boolean {
@@ -2893,6 +3659,7 @@ export class Orchestrator {
       turns.update(turn.id, {
         status: "cancelled",
         result_summary: summary,
+        last_progress_at: completedAt,
         completed_at: completedAt,
       });
     }

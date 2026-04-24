@@ -89,6 +89,7 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
     "verification_context_json",
     "ALTER TABLE workstreams ADD COLUMN verification_context_json TEXT"
   );
+  ensureColumn(db, "turns", "last_progress_at", "ALTER TABLE turns ADD COLUMN last_progress_at TEXT");
   ensureColumn(
     db,
     "assistant_notes",

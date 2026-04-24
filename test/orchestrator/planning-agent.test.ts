@@ -14,7 +14,7 @@ import type {
   TurnResult,
 } from "../../src/codex/index.js";
 import { Orchestrator } from "../../src/orchestrator/index.js";
-import { closeDatabase, initDatabase } from "../../src/state/index.js";
+import { artifacts, closeDatabase, initDatabase } from "../../src/state/index.js";
 
 class QueuedAdapter implements ExecutionBackendAdapter {
   readonly name: string;
@@ -353,6 +353,9 @@ describe("Orchestrator planning agent flow", () => {
     expect(storedAfterInitial?.planning_context_json).toContain("discord-ux");
     expect(storedAfterInitial?.planning_context_json).toContain("\"goalFrame\"");
     expect(storedAfterInitial?.plan).toContain("Pending planning questions");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.health).toBe("awaiting-input");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.latestReport?.kind).toBe("plan");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.nextAction).toContain("Answer the pending planning questions");
     await expect(orchestrator.dispatch(workstream.id, instruction)).rejects.toThrow("planning still has unresolved questions");
 
     const resumedPlan = await orchestrator.provideDecisionAnswers(
@@ -369,9 +372,14 @@ describe("Orchestrator planning agent flow", () => {
     expect(storedAfterResume?.pending_decision).toBeNull();
     expect(storedAfterResume?.plan).toContain("Final Codex execution prompt");
     expect(storedAfterResume?.planning_context_json).toContain("discord-user");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.latestReport?.kind).toBe("plan");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.nextAction).toContain("Dispatch the next implementation step");
 
     await orchestrator.dispatch(workstream.id, instruction);
     expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("implementation");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.latestReport?.kind).toBe("dispatch");
+    expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.nextAction).toContain("Verify the changes before moving to review");
+    expect(artifacts.listByWorkstream(workstream.id).filter((artifact) => artifact.type === "operator-report")).toHaveLength(3);
 
     expect(dispatchAdapter.turnRequests[0]?.instruction).toBe(resumedPlan.finalExecutionPrompt);
     expect(utilityAdapter.turnRequests).toHaveLength(9);

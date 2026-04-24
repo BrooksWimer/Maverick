@@ -63,6 +63,15 @@ export async function createHttpServer(
     return ws;
   });
 
+  app.get("/api/workstreams/:id/status", async (req) => {
+    const { id } = req.params as { id: string };
+    const snapshot = orchestrator.getWorkstreamStatusSnapshot(id);
+    if (!snapshot) {
+      return { error: "Workstream not found" };
+    }
+    return snapshot;
+  });
+
   app.post("/api/workstreams", async (req) => {
     const body = req.body as { projectId: string; name: string; description?: string; epicId?: string };
     const ws = await orchestrator.createWorkstream({

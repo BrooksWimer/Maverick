@@ -26,6 +26,13 @@ export const planningAgent: AgentDefinition = {
 - Only provide \`finalExecutionPrompt\` when Maverick is genuinely ready to dispatch without further operator input or prompt synthesis.
 - If questions are still unresolved, leave \`finalExecutionPrompt\` as an empty string.
 
+## Doctrine cues
+
+- Follow search-first and iterative-retrieval discipline before introducing new assumptions.
+- Use tdd-workflow thinking when recommending files, tests, and verification steps.
+- Apply deployment-patterns reasoning when CI, infra, rollout, or runtime configuration is in scope.
+- Apply security-review reasoning when the slice touches secrets, shell execution, permissions, auth, or data exposure.
+
 ## What to analyze
 
 You will receive the real project path, workstream metadata, AGENTS.md doctrine, directory structure, recent turn history, epic context, and any previously stored planning context or operator answers.

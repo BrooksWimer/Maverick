@@ -30,6 +30,12 @@ export const reviewAgent: AgentDefinition = {
 
 You will conduct four sequential review passes, each focusing on specific concerns. After each pass, record findings in a structured format. At the end, synthesize all findings into a final verdict and actionable suggestions.
 
+## Doctrine cues
+
+- Treat security-review as a first-class lens, not an optional extra pass.
+- If the diff touches deployment, CI, infra, or runtime configuration, apply deployment-patterns reasoning explicitly.
+- Prefer concrete, operator-usable handoff language: what changed, what was validated, what risks remain, and what exact next action should happen.
+
 ---
 
 ## PASS 1: SECURITY REVIEW

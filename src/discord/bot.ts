@@ -28,8 +28,7 @@ import type { ApprovalRow, WorkstreamRow } from "../state/index.js";
 import type { DiscordRoute, EpicBranchConfig, OrchestratorConfig, ProjectConfig } from "../config/schema.js";
 import { workstreamLaneForEpic } from "../projects/epics.js";
 import type { AssistantAttachment } from "../assistant/types.js";
-import { parsePlanningContextRecord } from "../agents/planning-support.js";
-import { parseVerificationContextRecord } from "../agents/verification-support.js";
+import { renderWorkstreamStatusSnapshot } from "../orchestrator/status.js";
 
 const log = createLogger("discord");
 
@@ -649,7 +648,13 @@ export class DiscordBot {
               ? `Maverick hit a failure in \`${workstream.name}\`.`
               : `Maverick updated \`${workstream.name}\` with status \`${event.status}\`.`;
 
-        await this.safeSend(channel, this.buildTurnCompletedMessage(heading, event.turnId, event.summary, event.output));
+        await this.safeSend(
+          channel,
+          this.appendStatusFooter(
+            this.buildTurnCompletedMessage(heading, event.turnId, event.summary, event.output),
+            workstream.id,
+          ),
+        );
       });
     });
 
@@ -711,7 +716,13 @@ export class DiscordBot {
           return;
         }
 
-        await this.safeSend(channel, this.buildReviewCompletedMessage(event.workstreamId, event.severity, event.findings));
+        await this.safeSend(
+          channel,
+          this.appendStatusFooter(
+            this.buildReviewCompletedMessage(event.workstreamId, event.severity, event.findings),
+            event.workstreamId,
+          ),
+        );
       });
     });
 
@@ -725,11 +736,14 @@ export class DiscordBot {
 
         await this.safeSend(
           channel,
-          this.buildVerificationCompletedMessage(
+          this.appendStatusFooter(
+            this.buildVerificationCompletedMessage(
+              event.workstreamId,
+              event.status,
+              event.recommendation,
+              event.renderedVerification,
+            ),
             event.workstreamId,
-            event.status,
-            event.recommendation,
-            event.renderedVerification,
           ),
         );
       });
@@ -1268,7 +1282,9 @@ export class DiscordBot {
 
     const lines = ["Workstreams in this channel:"];
     for (const workstream of channelWorkstreams.slice(0, 10)) {
-      lines.push(`- \`${workstream.id}\` ${workstream.name} [${workstream.state}]`);
+      const snapshot = this.orchestrator.getWorkstreamStatusSnapshot(workstream.id);
+      const suffix = snapshot ? `${workstream.state} / ${snapshot.health}` : workstream.state;
+      lines.push(`- \`${workstream.id}\` ${workstream.name} [${suffix}]`);
     }
 
     await interaction.editReply(this.buildWorkstreamStatusReply(lines.join("\n")));
@@ -1560,42 +1576,17 @@ export class DiscordBot {
   }
 
   private formatWorkstream(workstream: WorkstreamRow): string {
-    const latestTurn = this.orchestrator.getWorkstreamTurns(workstream.id).slice(-1)[0] ?? null;
-    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
-    const verificationContext = parseVerificationContextRecord(workstream.verification_context_json);
+    const snapshot = this.orchestrator.getWorkstreamStatusSnapshot(workstream.id);
+    if (!snapshot) {
+      return [
+        `Workstream: \`${workstream.name}\``,
+        `ID: \`${workstream.id}\``,
+        `Project: \`${workstream.project_id}\``,
+        `State: \`${workstream.state}\``,
+      ].join("\n");
+    }
 
-    return [
-      `Workstream: \`${workstream.name}\``,
-      `ID: \`${workstream.id}\``,
-      `Project: \`${workstream.project_id}\``,
-      workstream.epic_id ? `Epic: \`${workstream.epic_id}\`` : null,
-      `State: \`${workstream.state}\``,
-      workstream.branch ? `Branch: \`${workstream.branch}\`` : "Branch: shared repository root",
-      workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
-      latestTurn ? `Latest turn: \`${latestTurn.status}\`` : null,
-      workstream.current_goal ? `Current goal: ${truncate(workstream.current_goal, 1200)}` : null,
-      latestTurn?.result_summary && latestTurn.status !== "completed"
-        ? `Latest turn summary: ${truncate(latestTurn.result_summary, 1200)}`
-        : null,
-      planningContext
-        ? planningContext.pendingQuestions.length > 0
-          ? `Planning: awaiting ${planningContext.pendingQuestions.length} answer(s)`
-          : planningContext.finalExecutionPrompt
-            ? "Planning: final execution prompt ready"
-            : "Planning: structured context stored, final prompt not ready"
-        : null,
-      verificationContext
-        ? verificationContext.result.status === "pass"
-          ? "Verification: passed"
-          : `Verification: failed with ${verificationContext.result.introducedFailures.length} introduced issue${verificationContext.result.introducedFailures.length === 1 ? "" : "s"}`
-        : null,
-      workstream.plan ? `Stored plan: ${truncate(workstream.plan, 1200)}` : null,
-      workstream.summary ? `Summary: ${truncate(workstream.summary, 1200)}` : null,
-      workstream.codex_thread_id ? `Codex thread: \`${workstream.codex_thread_id}\`` : null,
-      `Waiting on approval: ${workstream.waiting_on_approval ? "yes" : "no"}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    return renderWorkstreamStatusSnapshot(snapshot);
   }
 
   private buildWorkstreamStatusReply(statusText: string): InteractionEditReplyOptions {
@@ -2135,6 +2126,31 @@ export class DiscordBot {
           name: params.attachmentName,
         }),
       ],
+    };
+  }
+
+  private appendStatusFooter(
+    options: MessageCreateOptions,
+    workstreamId: string,
+  ): MessageCreateOptions {
+    const snapshot = this.orchestrator.getWorkstreamStatusSnapshot(workstreamId);
+    if (!snapshot) {
+      return options;
+    }
+
+    const footerLines = [
+      `Health: \`${snapshot.health}\``,
+      snapshot.latestReport ? `Latest report: ${snapshot.latestReport.headline}` : null,
+      `Next action: ${snapshot.nextAction}`,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
+
+    const baseContent = typeof options.content === "string" ? options.content : "";
+    const combined = [baseContent, footerLines].filter(Boolean).join("\n\n");
+    return {
+      ...options,
+      content: truncate(combined, 1900),
     };
   }
 
