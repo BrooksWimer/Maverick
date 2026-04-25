@@ -69,6 +69,23 @@ describe("parseAssistantIntent", () => {
     expect(intent.endsAt).toBe("2026-04-07T19:15:00.000Z");
   });
 
+  it("parses recurring weekday calendar items", () => {
+    const intent = parseAssistantIntent("calendar take vitamins every weekday at 5:30pm", {
+      referenceDate: new Date("2026-04-24T20:00:00-04:00"),
+      defaultEventDurationMinutes: 30,
+    });
+
+    expect(intent.kind).toBe("calendar");
+    if (intent.kind !== "calendar") {
+      return;
+    }
+
+    expect(intent.title).toBe("take vitamins");
+    expect(intent.startsAt).toBe("2026-04-27T21:30:00.000Z");
+    expect(intent.endsAt).toBe("2026-04-27T22:00:00.000Z");
+    expect(intent.recurrenceRule).toBe("RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR");
+  });
+
   it("classifies work study notes toward the engineering learning smart goal", () => {
     const intent = parseAssistantIntent("Study note: read a distributed systems article and write takeaways", {
       workSmartGoals: [

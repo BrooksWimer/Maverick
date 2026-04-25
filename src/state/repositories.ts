@@ -147,6 +147,7 @@ export interface AssistantCalendarEventRow {
   details: string | null;
   starts_at: string;
   ends_at: string | null;
+  recurrence_rule: string | null;
   timezone: string;
   location: string | null;
   provider: string;
@@ -783,6 +784,7 @@ export const assistantCalendarEvents = {
     details?: string | null;
     starts_at: string;
     ends_at?: string | null;
+    recurrence_rule?: string | null;
     timezone: string;
     location?: string | null;
     provider?: string;
@@ -794,10 +796,10 @@ export const assistantCalendarEvents = {
     const id = data.id ?? randomUUID();
     db.prepare(`
       INSERT INTO assistant_calendar_events (
-        id, message_id, source_contact, title, details, starts_at, ends_at, timezone, location,
+        id, message_id, source_contact, title, details, starts_at, ends_at, recurrence_rule, timezone, location,
         provider, provider_event_id, sync_status, sync_error
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.message_id ?? null,
@@ -806,6 +808,7 @@ export const assistantCalendarEvents = {
       data.details ?? null,
       data.starts_at,
       data.ends_at ?? null,
+      data.recurrence_rule ?? null,
       data.timezone,
       data.location ?? null,
       data.provider ?? "memory",

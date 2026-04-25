@@ -175,6 +175,7 @@ function renderTaskLine(task: AssistantTaskSnapshot, timeZone: string): string {
 function renderCalendarLine(event: AssistantCalendarSnapshot, timeZone: string): string {
   const parts = [
     formatDateTime(event.startsAt, timeZone),
+    event.recurrenceRule ? `recurs: ${describeRecurrenceRule(event.recurrenceRule)}` : null,
     event.location ? `location: ${event.location}` : null,
     `sync: ${event.syncStatus}`,
   ].filter(Boolean);
@@ -203,4 +204,38 @@ export function normalizeStoredContext(value: string | null | undefined): Assist
     default:
       return "personal";
   }
+}
+
+function describeRecurrenceRule(rule: string): string {
+  if (rule === "RRULE:FREQ=DAILY") {
+    return "daily";
+  }
+  if (rule === "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR") {
+    return "every weekday";
+  }
+  if (rule === "RRULE:FREQ=WEEKLY;BYDAY=SA,SU") {
+    return "every weekend";
+  }
+
+  const byDayMatch = rule.match(/BYDAY=([A-Z,]+)/);
+  if (!byDayMatch?.[1]) {
+    return "recurring";
+  }
+
+  const dayLabels: Record<string, string> = {
+    SU: "Sunday",
+    MO: "Monday",
+    TU: "Tuesday",
+    WE: "Wednesday",
+    TH: "Thursday",
+    FR: "Friday",
+    SA: "Saturday",
+  };
+
+  const labels = byDayMatch[1]
+    .split(",")
+    .map((value) => dayLabels[value] ?? value)
+    .filter(Boolean);
+
+  return labels.length > 0 ? labels.join(", ") : "recurring";
 }

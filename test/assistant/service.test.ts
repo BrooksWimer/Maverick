@@ -162,17 +162,16 @@ describe("AssistantService", () => {
   });
 
   it("syncs calendar events through the configured provider and can create linked tasks", async () => {
+    const createEvent = vi.fn(async () => ({
+      provider: "mock-calendar",
+      status: "synced" as const,
+      providerEventId: "evt_123",
+    }));
     const service = new AssistantService(baseConfig, {
       now: () => new Date("2026-04-04T10:00:00-04:00"),
       calendarProvider: {
         name: "mock-calendar",
-        async createEvent() {
-          return {
-            provider: "mock-calendar",
-            status: "synced",
-            providerEventId: "evt_123",
-          };
-        },
+        createEvent,
       },
     });
 
@@ -189,6 +188,44 @@ describe("AssistantService", () => {
     expect(events[0].sync_status).toBe("synced");
     expect(service.listTasks()).toHaveLength(1);
     expect(service.listTasks()[0].calendar_event_id).toBe(events[0].id);
+    expect(createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      title: "submit quarterly taxes",
+      recurrenceRule: null,
+    }));
+  });
+
+  it("syncs recurring calendar events and keeps the next occurrence in agenda", async () => {
+    const createEvent = vi.fn(async () => ({
+      provider: "mock-calendar",
+      status: "synced" as const,
+      providerEventId: "evt_recurring",
+    }));
+    const service = new AssistantService(baseConfig, {
+      now: () => new Date("2026-04-24T20:00:00-04:00"),
+      calendarProvider: {
+        name: "mock-calendar",
+        createEvent,
+      },
+    });
+
+    const result = await service.processIncomingMessage({
+      source: "api",
+      body: "calendar take vitamins every weekday at 5:30pm",
+    });
+
+    expect(result.intent).toBe("calendar");
+    const events = service.listCalendarEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0].recurrence_rule).toBe("RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR");
+    expect(createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      recurrenceRule: "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+    }));
+
+    const agenda = service.getAgenda(undefined, new Date("2026-04-28T00:00:00.000Z"));
+    expect(agenda.upcomingCalendar).toHaveLength(1);
+    expect(agenda.upcomingCalendar[0].title).toBe("take vitamins");
+    expect(agenda.upcomingCalendar[0].recurrenceRule).toBe("RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR");
+    expect(agenda.upcomingCalendar[0].startsAt).toBe("2026-04-28T21:30:00.000Z");
   });
 
   it("returns markdown attachments for agenda queries", async () => {

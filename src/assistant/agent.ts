@@ -41,6 +41,7 @@ type AgentEnvelope = {
     startsAtIso?: string;
     endsAtIso?: string | null;
     isAllDay?: boolean;
+    recurrenceRule?: string | null;
     details?: string | null;
     location?: string | null;
     primaryContext?: "work" | "personal" | "home" | "errands" | "health" | "planning";
@@ -163,7 +164,7 @@ function buildInterpretationPrompt(
     '- "note": save a note or memory',
     '- "task": create a task with one primary context and a status of inbox, open, or scheduled',
     '- "reminder": schedule a reminder at a specific future ISO timestamp',
-    '- "calendar": create a calendar item with ISO timestamps',
+    '- "calendar": create a calendar item with ISO timestamps and an optional Google-style RRULE recurrenceRule when the user asks for a repeating event',
     '- "query": one of agenda, inbox, or search',
     '- "clarification": ask a concise question if required information is missing',
     "Primary contexts: work, personal, home, errands, health, planning.",
@@ -177,7 +178,7 @@ function buildInterpretationPrompt(
       "\"note\":{\"title\":\"...\",\"content\":\"...\",\"context\":\"work|personal|home|errands|health|planning\",\"noteKind\":\"general|project|study|acceptance-criteria\",\"projectName\":\"...\",\"smartGoalIds\":[\"...\"]}|null," +
       "\"task\":{\"title\":\"...\",\"details\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\",\"status\":\"inbox|open|scheduled\",\"dueAtIso\":\"...\",\"scheduledForIso\":\"...\"}|null," +
       "\"reminder\":{\"body\":\"...\",\"remindAtIso\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
-      "\"calendar\":{\"title\":\"...\",\"startsAtIso\":\"...\",\"endsAtIso\":\"...\",\"isAllDay\":false,\"details\":\"...\",\"location\":null,\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
+      "\"calendar\":{\"title\":\"...\",\"startsAtIso\":\"...\",\"endsAtIso\":\"...\",\"isAllDay\":false,\"recurrenceRule\":\"RRULE:FREQ=DAILY|RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR|RRULE:FREQ=WEEKLY;BYDAY=MO,...\",\"details\":\"...\",\"location\":null,\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
       "\"query\":{\"queryType\":\"agenda|inbox|search\",\"query\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
       "\"clarification\":{\"message\":\"...\"}|null" +
     "}",
@@ -285,6 +286,7 @@ function toParsedIntent(envelope: AgentEnvelope): ParsedAssistantIntent | null {
         startsAt: envelope.calendar.startsAtIso,
         endsAt: envelope.calendar.endsAtIso ?? null,
         isAllDay: Boolean(envelope.calendar.isAllDay),
+        recurrenceRule: envelope.calendar.recurrenceRule ?? null,
         parsedFrom: "agent",
         details: envelope.calendar.details ?? null,
         location: envelope.calendar.location ?? null,

@@ -121,6 +121,12 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
     "idx_assistant_notes_project_name",
     "CREATE INDEX IF NOT EXISTS idx_assistant_notes_project_name ON assistant_notes(project_name)"
   );
+  ensureColumn(
+    db,
+    "assistant_calendar_events",
+    "recurrence_rule",
+    "ALTER TABLE assistant_calendar_events ADD COLUMN recurrence_rule TEXT"
+  );
 
   log.info({ schemaPath }, "Database schema applied");
   return db;

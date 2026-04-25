@@ -99,6 +99,7 @@ function buildGoogleCalendarPayload(input: CalendarEventInput): Record<string, u
       summary: input.title,
       description: input.description ?? undefined,
       location: input.location ?? undefined,
+      recurrence: input.recurrenceRule ? [input.recurrenceRule] : undefined,
       start: {
         date: startDate.toISOString().slice(0, 10),
         timeZone: input.timeZone,
@@ -114,6 +115,7 @@ function buildGoogleCalendarPayload(input: CalendarEventInput): Record<string, u
     summary: input.title,
     description: input.description ?? undefined,
     location: input.location ?? undefined,
+    recurrence: input.recurrenceRule ? [input.recurrenceRule] : undefined,
     start: {
       dateTime: input.startsAt,
       timeZone: input.timeZone,

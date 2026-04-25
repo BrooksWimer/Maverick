@@ -76,6 +76,7 @@ export type ParsedAssistantIntent =
       startsAt: string;
       endsAt: string | null;
       isAllDay: boolean;
+      recurrenceRule: string | null;
       parsedFrom: string;
       details: string | null;
       location: string | null;
@@ -103,6 +104,7 @@ export interface CalendarEventInput {
   timeZone: string;
   location?: string | null;
   isAllDay?: boolean;
+  recurrenceRule?: string | null;
 }
 
 export interface CalendarCreateResult {
@@ -173,6 +175,7 @@ export interface AssistantCalendarSnapshot {
   timeZone: string;
   location: string | null;
   syncStatus: string;
+  recurrenceRule: string | null;
 }
 
 export interface AssistantAgendaWorkstreamSnapshot {

@@ -461,6 +461,7 @@ function buildAgendaSnapshot(timeZone: string, generatedAt: string) {
       timeZone: event.timezone,
       location: event.location,
       syncStatus: event.sync_status,
+      recurrenceRule: event.recurrence_rule ?? null,
     })),
     activeWorkstreams: workstreams.listActive().slice(0, 6).map((workstream) => ({
       id: workstream.id,

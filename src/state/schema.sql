@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS assistant_calendar_events (
   details           TEXT,
   starts_at         TEXT NOT NULL,
   ends_at           TEXT,
+  recurrence_rule   TEXT,
   timezone          TEXT NOT NULL,
   location          TEXT,
   provider          TEXT NOT NULL DEFAULT 'memory',

@@ -29,6 +29,7 @@ type ScheduleParseResult = {
   startsAt: string;
   endsAt: string | null;
   isAllDay: boolean;
+  recurrenceRule?: string | null;
   parsedFrom: string;
 };
 
@@ -140,7 +141,7 @@ function parseCalendarIntent(
   }
 
   const remainder = match[1].trim();
-  const split = splitDescriptionAndSchedule(remainder);
+  const split = splitCalendarDescriptionAndSchedule(remainder);
   if (!split.scheduleText) {
     return {
       kind: "clarification",
@@ -149,7 +150,7 @@ function parseCalendarIntent(
     };
   }
 
-  const scheduled = parseScheduleText(split.scheduleText, {
+  const scheduled = parseCalendarScheduleText(split.scheduleText, {
     referenceDate: options.referenceDate,
     defaultHour: 9,
     defaultDurationMinutes: options.defaultEventDurationMinutes ?? 30,
@@ -171,6 +172,7 @@ function parseCalendarIntent(
     startsAt: scheduled.startsAt,
     endsAt: scheduled.endsAt,
     isAllDay: scheduled.isAllDay,
+    recurrenceRule: scheduled.recurrenceRule ?? null,
     parsedFrom: scheduled.parsedFrom,
     details: text,
     location: null,
@@ -496,6 +498,21 @@ function splitDescriptionAndSchedule(text: string): {
   };
 }
 
+function splitCalendarDescriptionAndSchedule(text: string): {
+  description: string;
+  scheduleText: string | null;
+} {
+  const recurringIndex = findRecurringScheduleIndex(text);
+  if (recurringIndex >= 0) {
+    return {
+      description: cleanupSentence(text.slice(0, recurringIndex)),
+      scheduleText: cleanupSentence(text.slice(recurringIndex)),
+    };
+  }
+
+  return splitDescriptionAndSchedule(text);
+}
+
 function parseTaskScheduleText(
   raw: string,
   options: {
@@ -521,6 +538,18 @@ function parseTaskScheduleText(
     scheduledFor: scheduled.isAllDay ? null : scheduled.startsAt,
     parsedFrom: scheduled.parsedFrom,
   };
+}
+
+function parseCalendarScheduleText(
+  raw: string,
+  options: {
+    referenceDate?: Date;
+    defaultHour: number;
+    defaultDurationMinutes: number;
+    allowAllDay: boolean;
+  }
+): ScheduleParseResult | null {
+  return parseRecurringScheduleText(raw, options) ?? parseScheduleText(raw, options);
 }
 
 function parseScheduleText(
@@ -592,6 +621,91 @@ function parseScheduleText(
   return null;
 }
 
+function parseRecurringScheduleText(
+  raw: string,
+  options: {
+    referenceDate?: Date;
+    defaultHour: number;
+    defaultDurationMinutes: number;
+    allowAllDay: boolean;
+  }
+): ScheduleParseResult | null {
+  const reference = options.referenceDate ?? new Date();
+  const duration = extractDurationMinutes(raw, options.defaultDurationMinutes);
+  const text = cleanupSentence(duration.text);
+  const timeMatch = text.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  const explicitTime = timeMatch ? parseTimeParts(timeMatch[1], timeMatch[2], timeMatch[3]) : null;
+  const normalized = cleanupSentence(
+    text.replace(/\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i, "")
+  ).toLowerCase();
+
+  if (normalized === "daily" || normalized === "every day") {
+    const firstDate = resolveRecurringDate(reference, null, explicitTime, options.defaultHour);
+    return buildRecurringScheduleResult(
+      firstDate,
+      explicitTime,
+      text,
+      options.defaultHour,
+      duration.minutes,
+      options.allowAllDay,
+      "RRULE:FREQ=DAILY"
+    );
+  }
+
+  if (["every weekday", "every workday", "every workweek"].includes(normalized)) {
+    const firstDate = resolveRecurringDate(reference, [1, 2, 3, 4, 5], explicitTime, options.defaultHour);
+    return buildRecurringScheduleResult(
+      firstDate,
+      explicitTime,
+      text,
+      options.defaultHour,
+      duration.minutes,
+      options.allowAllDay,
+      "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+    );
+  }
+
+  if (normalized === "every weekend") {
+    const firstDate = resolveRecurringDate(reference, [0, 6], explicitTime, options.defaultHour);
+    return buildRecurringScheduleResult(
+      firstDate,
+      explicitTime,
+      text,
+      options.defaultHour,
+      duration.minutes,
+      options.allowAllDay,
+      "RRULE:FREQ=WEEKLY;BYDAY=SA,SU"
+    );
+  }
+
+  const weekdayListMatch = normalized.match(
+    /^every\s+((?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)(?:\s*(?:,|and)\s*(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))*)$/
+  );
+  if (weekdayListMatch?.[1]) {
+    const weekdayNames = weekdayListMatch[1]
+      .split(/\s*(?:,|and)\s*/i)
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const weekdayNumbers = weekdayNames
+      .map((name) => WEEKDAY_INDEX[name])
+      .filter((value): value is number => value !== undefined);
+    if (weekdayNumbers.length > 0) {
+      const firstDate = resolveRecurringDate(reference, weekdayNumbers, explicitTime, options.defaultHour);
+      return buildRecurringScheduleResult(
+        firstDate,
+        explicitTime,
+        text,
+        options.defaultHour,
+        duration.minutes,
+        options.allowAllDay,
+        `RRULE:FREQ=WEEKLY;BYDAY=${weekdayNumbers.map(toRruleDay).join(",")}`
+      );
+    }
+  }
+
+  return null;
+}
+
 function buildScheduleResult(
   date: Date,
   explicitTime: { hour: number; minute: number } | null,
@@ -622,6 +736,51 @@ function buildScheduleResult(
     isAllDay: false,
     parsedFrom,
   };
+}
+
+function buildRecurringScheduleResult(
+  date: Date,
+  explicitTime: { hour: number; minute: number } | null,
+  parsedFrom: string,
+  defaultHour: number,
+  durationMinutes: number,
+  allowAllDay: boolean,
+  recurrenceRule: string
+): ScheduleParseResult {
+  return {
+    ...buildScheduleResult(date, explicitTime, parsedFrom, defaultHour, durationMinutes, allowAllDay),
+    recurrenceRule,
+  };
+}
+
+function resolveRecurringDate(
+  reference: Date,
+  allowedDays: number[] | null,
+  explicitTime: { hour: number; minute: number } | null,
+  defaultHour: number
+): Date {
+  const hour = explicitTime?.hour ?? defaultHour;
+  const minute = explicitTime?.minute ?? 0;
+
+  for (let offset = 0; offset < 14; offset += 1) {
+    const candidate = new Date(reference);
+    candidate.setHours(0, 0, 0, 0);
+    candidate.setDate(candidate.getDate() + offset);
+
+    if (allowedDays && !allowedDays.includes(candidate.getDay())) {
+      continue;
+    }
+
+    candidate.setHours(hour, minute, 0, 0);
+    if (offset > 0 || candidate.getTime() > reference.getTime()) {
+      return candidate;
+    }
+  }
+
+  const fallback = new Date(reference);
+  fallback.setHours(hour, minute, 0, 0);
+  fallback.setDate(fallback.getDate() + 1);
+  return fallback;
 }
 
 function resolveRelativeDate(anchor: string, reference: Date): Date {
@@ -675,6 +834,56 @@ function parseTimeParts(
   }
 
   return { hour, minute };
+}
+
+function toRruleDay(day: number): string {
+  switch (day) {
+    case 0:
+      return "SU";
+    case 1:
+      return "MO";
+    case 2:
+      return "TU";
+    case 3:
+      return "WE";
+    case 4:
+      return "TH";
+    case 5:
+      return "FR";
+    case 6:
+      return "SA";
+    default:
+      return "MO";
+  }
+}
+
+function findRecurringScheduleIndex(text: string): number {
+  const normalized = text.toLowerCase();
+  const literalPhrases = [
+    " daily",
+    " every day",
+    " every weekday",
+    " every workday",
+    " every workweek",
+    " every weekend",
+  ];
+
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const phrase of literalPhrases) {
+    const index = normalized.indexOf(phrase);
+    if (index >= 0) {
+      earliest = Math.min(earliest, index + 1);
+    }
+  }
+
+  const weekdayPattern =
+    /\bevery\s+(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)(?:\s*(?:,|and)\s*(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))*(?:\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm))?/i;
+  const weekdayMatch = weekdayPattern.exec(text);
+  if (weekdayMatch?.index !== undefined) {
+    earliest = Math.min(earliest, weekdayMatch.index);
+  }
+
+  return Number.isFinite(earliest) ? earliest : -1;
 }
 
 function extractDurationMinutes(text: string, defaultMinutes: number): { text: string; minutes: number } {

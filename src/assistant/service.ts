@@ -292,9 +292,12 @@ export class AssistantService {
     const openTasks = tasks.filter((task) => task.status === "open");
     const scheduledTasks = tasks.filter((task) => task.status === "scheduled" && (task.scheduledFor ?? task.dueAt ?? "") >= referenceIso);
     const inboxTasks = tasks.filter((task) => task.status === "inbox");
-    const upcomingCalendar = assistantCalendarEvents.listUpcoming(referenceIso, 20)
-      .map((event) => this.toCalendarSnapshot(event))
+    const upcomingCalendar = assistantCalendarEvents.listRecent(500)
+      .map((event) => this.toCalendarSnapshot(event, now))
+      .filter((event): event is AssistantCalendarSnapshot & { metadata?: Record<string, unknown> } => event !== null)
       .filter((event) => !context || normalizeStoredContext(event.metadata?.primaryContext as string | undefined) === context);
+    upcomingCalendar.sort((left, right) => left.startsAt.localeCompare(right.startsAt));
+
     const activeWorkstreams = workstreams.listActive()
       .slice(0, 6)
       .map((workstream) => ({
@@ -886,6 +889,7 @@ export class AssistantService {
       details: intent.details,
       starts_at: intent.startsAt,
       ends_at: intent.endsAt,
+      recurrence_rule: intent.recurrenceRule,
       timezone: this.config.timeZone,
       location: intent.location,
       provider: this.calendarProvider.name,
@@ -900,6 +904,7 @@ export class AssistantService {
       timeZone: this.config.timeZone,
       location: intent.location,
       isAllDay: intent.isAllDay,
+      recurrenceRule: intent.recurrenceRule,
     });
 
     assistantCalendarEvents.update(created.id, {
@@ -936,6 +941,7 @@ export class AssistantService {
         syncStatus: providerResult.status,
         error: providerResult.error ?? null,
         parsedFrom: intent.parsedFrom,
+        recurrenceRule: intent.recurrenceRule,
       }),
     });
 
@@ -954,7 +960,13 @@ export class AssistantService {
     const whenLabel = intent.isAllDay
       ? formatDate(intent.startsAt, this.config.timeZone)
       : formatDateTime(intent.startsAt, this.config.timeZone);
-    const reply = buildCalendarReply(intent.title, whenLabel, providerResult.status, linkedTaskId !== null);
+    const reply = buildCalendarReply(
+      intent.title,
+      whenLabel,
+      providerResult.status,
+      linkedTaskId !== null,
+      intent.recurrenceRule
+    );
 
     this.recordReply(reply, source, from);
     this.queueMirrorSync("assistant.calendar.created");
@@ -1188,19 +1200,25 @@ export class AssistantService {
     title: string;
     starts_at: string;
     ends_at: string | null;
+    recurrence_rule?: string | null;
     timezone: string;
     location: string | null;
     sync_status: string;
-  }): AssistantCalendarSnapshot & { metadata?: Record<string, unknown> } {
+  }, referenceTime = this.now()): (AssistantCalendarSnapshot & { metadata?: Record<string, unknown> }) | null {
     const metadata = parseJsonRecord(assistantMessages.getById(event.message_id ?? "")?.metadata_json ?? null);
+    const resolvedOccurrence = resolveCalendarOccurrence(event, referenceTime);
+    if (!resolvedOccurrence) {
+      return null;
+    }
     return {
       id: event.id,
       title: event.title,
-      startsAt: event.starts_at,
-      endsAt: event.ends_at,
+      startsAt: resolvedOccurrence.startsAt,
+      endsAt: resolvedOccurrence.endsAt,
       timeZone: event.timezone,
       location: event.location,
       syncStatus: event.sync_status,
+      recurrenceRule: event.recurrence_rule ?? null,
       metadata,
     };
   }
@@ -1399,16 +1417,18 @@ function buildCalendarReply(
   title: string,
   whenLabel: string,
   status: "synced" | "pending-config" | "failed",
-  linkedTask: boolean
+  linkedTask: boolean,
+  recurrenceRule: string | null
 ): string {
+  const recurrenceLabel = recurrenceRule ? `${describeRecurrenceRule(recurrenceRule)} starting ` : "";
   const taskSuffix = linkedTask ? " I also created a linked task for it." : "";
   if (status === "synced") {
-    return `Calendar event created: "${title}" on ${whenLabel}.${taskSuffix}`.trim();
+    return `Calendar event created: "${title}" ${recurrenceLabel}${whenLabel}.${taskSuffix}`.trim();
   }
   if (status === "pending-config") {
-    return `Captured "${title}" for ${whenLabel}, but calendar sync still needs provider setup.${taskSuffix}`.trim();
+    return `Captured "${title}" ${recurrenceLabel}${whenLabel}, but calendar sync still needs provider setup.${taskSuffix}`.trim();
   }
-  return `I saved "${title}" for ${whenLabel}, but the calendar provider reported an error.${taskSuffix}`.trim();
+  return `I saved "${title}" ${recurrenceLabel}${whenLabel}, but the calendar provider reported an error.${taskSuffix}`.trim();
 }
 
 function parseEnvList(value: string | undefined): string[] {
@@ -1482,3 +1502,124 @@ function parseJsonRecord(value: string | null): Record<string, unknown> {
     return {};
   }
 }
+
+function describeRecurrenceRule(rule: string): string {
+  if (rule === "RRULE:FREQ=DAILY") {
+    return "daily";
+  }
+  if (rule === "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR") {
+    return "every weekday";
+  }
+  if (rule === "RRULE:FREQ=WEEKLY;BYDAY=SA,SU") {
+    return "every weekend";
+  }
+
+  const byDayMatch = rule.match(/BYDAY=([A-Z,]+)/);
+  if (!byDayMatch?.[1]) {
+    return "recurring";
+  }
+
+  const labels = byDayMatch[1]
+    .split(",")
+    .map((value) => RRULE_DAY_LABELS[value] ?? value)
+    .filter(Boolean);
+
+  return labels.length > 0 ? `every ${labels.join(", ")}` : "recurring";
+}
+
+function resolveCalendarOccurrence(
+  event: {
+    starts_at: string;
+    ends_at: string | null;
+    recurrence_rule?: string | null;
+  },
+  referenceTime: Date
+): { startsAt: string; endsAt: string | null } | null {
+  if (!event.recurrence_rule) {
+    return event.starts_at >= referenceTime.toISOString()
+      ? {
+          startsAt: event.starts_at,
+          endsAt: event.ends_at,
+        }
+      : null;
+  }
+
+  const baseStart = new Date(event.starts_at);
+  const baseEnd = event.ends_at ? new Date(event.ends_at) : null;
+  const durationMs = baseEnd ? baseEnd.getTime() - baseStart.getTime() : null;
+  const rule = event.recurrence_rule;
+
+  if (rule === "RRULE:FREQ=DAILY") {
+    const nextStart = resolveNextRecurringStart(baseStart, referenceTime, null);
+    return nextStart
+      ? {
+          startsAt: nextStart.toISOString(),
+          endsAt: durationMs !== null ? new Date(nextStart.getTime() + durationMs).toISOString() : null,
+        }
+      : null;
+  }
+
+  const byDayMatch = rule.match(/BYDAY=([A-Z,]+)/);
+  if (!byDayMatch?.[1]) {
+    return event.starts_at >= referenceTime.toISOString()
+      ? {
+          startsAt: event.starts_at,
+          endsAt: event.ends_at,
+        }
+      : null;
+  }
+
+  const allowedDays = byDayMatch[1]
+    .split(",")
+    .map((value) => RRULE_DAY_INDEX[value])
+    .filter((value): value is number => value !== undefined);
+  const nextStart = resolveNextRecurringStart(baseStart, referenceTime, allowedDays);
+  return nextStart
+    ? {
+        startsAt: nextStart.toISOString(),
+        endsAt: durationMs !== null ? new Date(nextStart.getTime() + durationMs).toISOString() : null,
+      }
+    : null;
+}
+
+function resolveNextRecurringStart(
+  baseStart: Date,
+  referenceTime: Date,
+  allowedDays: number[] | null
+): Date | null {
+  for (let offset = 0; offset < 35; offset += 1) {
+    const candidate = new Date(baseStart);
+    candidate.setDate(baseStart.getDate() + offset);
+    if (candidate.getTime() < baseStart.getTime()) {
+      continue;
+    }
+    if (allowedDays && !allowedDays.includes(candidate.getDay())) {
+      continue;
+    }
+    if (candidate.getTime() >= referenceTime.getTime()) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+const RRULE_DAY_LABELS: Record<string, string> = {
+  SU: "Sunday",
+  MO: "Monday",
+  TU: "Tuesday",
+  WE: "Wednesday",
+  TH: "Thursday",
+  FR: "Friday",
+  SA: "Saturday",
+};
+
+const RRULE_DAY_INDEX: Record<string, number> = {
+  SU: 0,
+  MO: 1,
+  TU: 2,
+  WE: 3,
+  TH: 4,
+  FR: 5,
+  SA: 6,
+};
