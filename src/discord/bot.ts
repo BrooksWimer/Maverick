@@ -30,6 +30,7 @@ import { workstreamLaneForEpic } from "../projects/epics.js";
 import type { AssistantAttachment } from "../assistant/types.js";
 import { buildAgendaSummary, renderAgendaMarkdown, renderInboxMarkdown, renderSearchMarkdown } from "../assistant/render.js";
 import { renderWorkstreamStatusSnapshot } from "../orchestrator/status.js";
+import { renderMarkdownDocument } from "../markdown/presentation.js";
 
 const log = createLogger("discord");
 
@@ -2243,10 +2244,18 @@ export class DiscordBot {
     output?: string
   ): MessageCreateOptions {
     const normalizedOutput = output?.trim() ?? "";
+    const fullBody = renderMarkdownDocument({
+      title: heading,
+      summary: summary ? [summary] : [],
+      facts: [{ label: "Turn ID", value: `\`${turnId}\`` }],
+      sections: normalizedOutput
+        ? [{ title: "Details", lines: normalizedOutput.split(/\r?\n/).map((line) => line || " ") }]
+        : [],
+    });
     const shouldAttachOutput = normalizedOutput.length > DISCORD_INLINE_RESULT_LIMIT;
 
     if (shouldAttachOutput) {
-      const attachment = new AttachmentBuilder(Buffer.from(normalizedOutput, "utf8"), {
+      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
         name: `maverick-turn-${turnId}.md`,
       });
 
@@ -2281,8 +2290,14 @@ export class DiscordBot {
     markdown: string
   ): MessageCreateOptions {
     const trimmed = markdown.trim();
+    const fullBody = renderMarkdownDocument({
+      title: "Maverick Brief",
+      summary: [summary],
+      facts: [{ label: "Generated", value: generatedAt }],
+      sections: [{ title: "Details", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
+    });
     if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
-      const attachment = new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
         name: `maverick-brief-${generatedAt.replace(/[:]/g, "-")}.md`,
       });
 
@@ -2312,8 +2327,14 @@ export class DiscordBot {
     findings: string
   ): MessageCreateOptions {
     const trimmed = findings.trim();
+    const fullBody = renderMarkdownDocument({
+      title: "Post-Turn Review",
+      summary: [`Severity: \`${severity}\``],
+      facts: [{ label: "Workstream", value: `\`${workstreamId}\`` }],
+      sections: [{ title: "Findings", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
+    });
     if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
-      const attachment = new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
         name: `claude-review-${workstreamId}.md`,
       });
 
@@ -2352,12 +2373,18 @@ export class DiscordBot {
       `Reviewer: \`${reviewer}\``,
       `Severity: \`${severity}\``,
     ];
+    const fullBody = renderMarkdownDocument({
+      title: `Review - ${workstreamName}`,
+      summary: [`Reviewer: \`${reviewer}\``, `Severity: \`${severity}\``],
+      facts: [{ label: "Workstream", value: `\`${workstreamId}\`` }],
+      sections: [{ title: "Findings", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
+    });
 
     if (shouldAttachReplyPreview(headerLines, trimmed, 1500)) {
       return {
         content: [...headerLines, "Full review attached as a Markdown file."].join("\n"),
         files: [
-          new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+          new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
             name: `review-${workstreamId}.md`,
           }),
         ],
@@ -2376,8 +2403,14 @@ export class DiscordBot {
     renderedVerification: string
   ): MessageCreateOptions {
     const trimmed = renderedVerification.trim();
+    const fullBody = renderMarkdownDocument({
+      title: "Verification Report",
+      summary: [`Status: \`${status}\``, `Recommendation: \`${recommendation}\``],
+      facts: [{ label: "Workstream", value: `\`${workstreamId}\`` }],
+      sections: [{ title: "Evidence", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
+    });
     if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
-      const attachment = new AttachmentBuilder(Buffer.from(trimmed, "utf8"), {
+      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
         name: `verification-${workstreamId}.md`,
       });
 
@@ -2416,6 +2449,17 @@ export class DiscordBot {
       "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
     ];
 
+    const fullBody = renderMarkdownDocument({
+      title: `Planning Questions - ${workstreamName}`,
+      summary: ["Planning is waiting on operator input."],
+      facts: [{ label: "Instruction", value: truncate(instruction, 500) }],
+      callouts: [{
+        label: "Reply Format",
+        body: "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
+        tone: "warning",
+      }],
+      sections: [{ title: "Details", lines: renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
+    });
     if (!shouldAttachReplyPreview(headerLines, formattedMarkdown, 1400)) {
       return {
         content: [...headerLines, formattedMarkdown].join("\n"),
@@ -2425,7 +2469,7 @@ export class DiscordBot {
     return {
       content: [...headerLines, "Full planning context attached as a Markdown file."].join("\n"),
       files: [
-        new AttachmentBuilder(Buffer.from(renderedPlan, "utf8"), {
+        new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
           name: "planning-questions.md",
         }),
       ],
@@ -2447,6 +2491,23 @@ export class DiscordBot {
         : "A structured plan was stored, but no final execution prompt is ready yet.",
     ];
 
+    const fullBody = renderMarkdownDocument({
+      title: `Planning Ready - ${workstreamName}`,
+      summary: [
+        finalExecutionPrompt
+          ? "Planning produced a final execution prompt."
+          : "A structured plan was stored, but no final execution prompt is ready yet.",
+      ],
+      facts: [{ label: "Instruction", value: truncate(instruction, 500) }],
+      callouts: [{
+        label: "Next Action",
+        body: finalExecutionPrompt
+          ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
+          : "Review the stored plan and refine the execution prompt before dispatching.",
+        tone: finalExecutionPrompt ? "success" : "warning",
+      }],
+      sections: [{ title: "Details", lines: renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
+    });
     if (!shouldAttachReplyPreview(headerLines, formattedMarkdown, 1400)) {
       return {
         content: [...headerLines, formattedMarkdown].join("\n"),
@@ -2456,7 +2517,7 @@ export class DiscordBot {
     return {
       content: [...headerLines, "Full planning context attached as a Markdown file."].join("\n"),
       files: [
-        new AttachmentBuilder(Buffer.from(renderedPlan, "utf8"), {
+        new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
           name: "planning-ready.md",
         }),
       ],

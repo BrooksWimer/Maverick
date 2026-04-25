@@ -1,3 +1,5 @@
+import { renderMarkdownDocument, renderBulletSection } from "../markdown/presentation.js";
+
 export type WorkstreamHealth =
   | "done"
   | "blocked"
@@ -91,58 +93,70 @@ function renderValidationLine(evidence: OperatorValidationEvidence): string {
   return `- [${evidence.status}] ${evidence.label}: ${evidence.detail}${commandSuffix}`;
 }
 
-function renderList(title: string, values: string[]): string | null {
-  if (values.length === 0) {
-    return null;
-  }
-
-  return [title, ...values.map((value) => `- ${value}`)].join("\n");
-}
-
 export function renderWorkstreamStatusSnapshot(snapshot: WorkstreamStatusSnapshot): string {
   const report = snapshot.latestReport;
 
-  return [
-    `Workstream: \`${snapshot.workstreamName}\``,
-    `ID: \`${snapshot.workstreamId}\``,
-    `Project: \`${snapshot.projectId}\``,
-    snapshot.epicId ? `Epic: \`${snapshot.epicId}\`` : null,
-    `State: \`${snapshot.state}\``,
-    `Health: \`${snapshot.health}\`${snapshot.healthReason ? ` - ${snapshot.healthReason}` : ""}`,
-    snapshot.branch ? `Branch: \`${snapshot.branch}\`` : "Branch: shared repository root",
-    snapshot.workspace ? `Workspace: \`${snapshot.workspace}\`` : null,
-    snapshot.activeOperation
-      ? `Active operation: \`${snapshot.activeOperation.kind}\` (last progress ${snapshot.activeOperation.lastProgressAt})`
-      : null,
-    snapshot.currentGoal ? `Current goal: ${snapshot.currentGoal}` : null,
-    snapshot.latestTurn ? `Latest turn: \`${snapshot.latestTurn.status}\`` : null,
-    snapshot.latestTurn?.resultSummary ? `Latest turn summary: ${snapshot.latestTurn.resultSummary}` : null,
-    snapshot.planning.status !== "none"
-      ? snapshot.planning.status === "needs-answers"
-        ? `Planning: awaiting ${snapshot.planning.pendingQuestionCount} answer(s)`
-        : snapshot.planning.status === "ready"
-          ? "Planning: final execution prompt ready"
-          : "Planning: structured context stored, final prompt not ready"
-      : null,
-    snapshot.verification.status !== "none"
-      ? snapshot.verification.status === "pass"
-        ? "Verification: passed"
-        : `Verification: failed with ${snapshot.verification.introducedFailureCount} introduced issue${snapshot.verification.introducedFailureCount === 1 ? "" : "s"}`
-      : null,
-    report ? "" : null,
-    report ? `Latest report: ${report.headline}` : null,
-    report ? `Report summary: ${report.summary}` : null,
-    report && report.filesChanged.length > 0
-      ? `Files changed: ${report.filesChanged.join(", ")}`
-      : null,
-    report && report.validation.length > 0
-      ? ["Validation evidence:", ...report.validation.map((entry) => renderValidationLine(entry))].join("\n")
-      : null,
-    report ? renderList("Remaining risks:", report.remainingRisks) : null,
-    `Next action: ${snapshot.nextAction}`,
-    snapshot.codexThreadId ? `Codex thread: \`${snapshot.codexThreadId}\`` : null,
-    `Waiting on approval: ${snapshot.waitingOnApproval ? "yes" : "no"}`,
-  ]
-    .filter((line): line is string => Boolean(line))
-    .join("\n");
+  return renderMarkdownDocument({
+    title: `Workstream Status - ${snapshot.workstreamName}`,
+    summary: [
+      `State: \`${snapshot.state}\``,
+      `Health: \`${snapshot.health}\`${snapshot.healthReason ? ` - ${snapshot.healthReason}` : ""}`,
+      snapshot.currentGoal ? `Goal: ${snapshot.currentGoal}` : "",
+    ].filter(Boolean),
+    facts: [
+      { label: "Workstream ID", value: `\`${snapshot.workstreamId}\`` },
+      { label: "Project", value: `\`${snapshot.projectId}\`` },
+      { label: "Epic", value: snapshot.epicId ? `\`${snapshot.epicId}\`` : null },
+      { label: "Branch", value: snapshot.branch ? `\`${snapshot.branch}\`` : "shared repository root" },
+      { label: "Workspace", value: snapshot.workspace ? `\`${snapshot.workspace}\`` : null },
+      { label: "Codex thread", value: snapshot.codexThreadId ? `\`${snapshot.codexThreadId}\`` : null },
+      { label: "Waiting on approval", value: snapshot.waitingOnApproval ? "yes" : "no" },
+      {
+        label: "Active operation",
+        value: snapshot.activeOperation
+          ? `\`${snapshot.activeOperation.kind}\` (last progress ${snapshot.activeOperation.lastProgressAt})`
+          : null,
+      },
+      { label: "Latest turn", value: snapshot.latestTurn ? `\`${snapshot.latestTurn.status}\`` : null },
+    ],
+    callouts: [
+      {
+        label: "Next Action",
+        body: snapshot.nextAction,
+        tone: snapshot.health === "failed" || snapshot.health === "blocked" ? "warning" : "info",
+      },
+      report
+        ? {
+            label: "Latest Report",
+            body: `${report.headline}${report.summary ? `\n\n${report.summary}` : ""}`,
+            tone: "info" as const,
+          }
+        : null,
+    ].filter(Boolean) as Array<{ label: string; body: string; tone?: "info" | "warning" }>,
+    sections: [
+      renderBulletSection("Planning", [
+        snapshot.planning.status === "none"
+          ? "No structured planning state recorded."
+          : snapshot.planning.status === "needs-answers"
+            ? `Awaiting ${snapshot.planning.pendingQuestionCount} answer(s).`
+            : snapshot.planning.status === "ready"
+              ? "Final execution prompt ready."
+              : "Structured context stored, but final prompt is not ready.",
+      ]),
+      renderBulletSection("Verification", [
+        snapshot.verification.status === "none"
+          ? "No verification recorded."
+          : snapshot.verification.status === "pass"
+            ? "Verification passed."
+            : `Verification failed with ${snapshot.verification.introducedFailureCount} introduced issue${snapshot.verification.introducedFailureCount === 1 ? "" : "s"}.`,
+      ]),
+      renderBulletSection("Latest Turn", snapshot.latestTurn?.resultSummary ? [snapshot.latestTurn.resultSummary] : []),
+      renderBulletSection("Files Changed", report?.filesChanged ?? []),
+      {
+        title: "Evidence",
+        lines: report?.validation.map((entry) => renderValidationLine(entry)) ?? [],
+      },
+      renderBulletSection("Open Items", report?.remainingRisks ?? []),
+    ],
+  });
 }

@@ -5,6 +5,7 @@ import type {
   AssistantSearchResult,
   AssistantTaskSnapshot,
 } from "./types.js";
+import { renderMarkdownDocument } from "../markdown/presentation.js";
 
 type MarkdownSection = {
   title: string;
@@ -12,23 +13,17 @@ type MarkdownSection = {
 };
 
 export function renderAssistantMarkdown(title: string, summary: string[], sections: MarkdownSection[]): string {
-  const lines = [`# ${title}`, ""];
+  const nextActionSection = sections.find((section) => section.title === "Next Action");
+  const remainingSections = sections.filter((section) => section.title !== "Next Action");
 
-  if (summary.length > 0) {
-    lines.push("## Summary", ...summary.map((line) => `- ${line}`), "");
-  }
-
-  for (const section of sections) {
-    lines.push(`## ${section.title}`);
-    if (section.lines.length === 0) {
-      lines.push("- None.");
-    } else {
-      lines.push(...section.lines);
-    }
-    lines.push("");
-  }
-
-  return lines.join("\n").trim();
+  return renderMarkdownDocument({
+    title,
+    summary,
+    callouts: nextActionSection
+      ? [{ label: "Next Action", body: nextActionSection.lines.join("\n"), tone: "info" }]
+      : [],
+    sections: remainingSections,
+  });
 }
 
 export function renderAgendaMarkdown(snapshot: AssistantAgendaSnapshot): string {

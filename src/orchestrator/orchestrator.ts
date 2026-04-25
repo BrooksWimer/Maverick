@@ -55,6 +55,7 @@ import {
   renderVerificationSummary,
 } from "../agents/verification-support.js";
 import { createLogger } from "../logger.js";
+import { renderMarkdownDocument } from "../markdown/presentation.js";
 import { eventBus } from "./event-bus.js";
 import type {
   ActiveOperationSnapshot,
@@ -1627,30 +1628,39 @@ export class Orchestrator {
   }
 
   private renderOperatorReportMarkdown(report: OperatorReportArtifactMetadata): string {
-    return [
-      `# ${report.headline}`,
-      "",
-      `Summary: ${report.summary}`,
-      `Generated: ${report.generatedAt}`,
-      `Source event: ${report.sourceEvent}`,
-      report.filesChanged.length > 0
-        ? ["", "## Files Changed", ...report.filesChanged.map((file) => `- ${file}`)].join("\n")
-        : null,
-      report.validation.length > 0
-        ? ["", "## Validation Evidence", ...report.validation.map((entry) => {
+    return renderMarkdownDocument({
+      title: report.headline,
+      summary: [report.summary],
+      facts: [
+        { label: "Generated", value: report.generatedAt },
+        { label: "Source event", value: report.sourceEvent },
+        { label: "Report kind", value: report.kind },
+      ],
+      callouts: [
+        {
+          label: "Next Action",
+          body: report.nextAction,
+          tone: report.kind === "verification" || report.kind === "review" ? "warning" : "info",
+        },
+      ],
+      sections: [
+        {
+          title: "What Changed",
+          lines: report.filesChanged.map((file) => `- ${file}`),
+        },
+        {
+          title: "Evidence",
+          lines: report.validation.map((entry) => {
             const commandSuffix = entry.command ? ` via \`${entry.command}\`` : "";
             return `- [${entry.status}] ${entry.label}: ${entry.detail}${commandSuffix}`;
-          })].join("\n")
-        : null,
-      report.remainingRisks.length > 0
-        ? ["", "## Remaining Risks", ...report.remainingRisks.map((risk) => `- ${risk}`)].join("\n")
-        : null,
-      "",
-      `## Next Action`,
-      report.nextAction,
-    ]
-      .filter((line): line is string => Boolean(line))
-      .join("\n");
+          }),
+        },
+        {
+          title: "Open Items",
+          lines: report.remainingRisks.map((risk) => `- ${risk}`),
+        },
+      ],
+    });
   }
 
   private buildPlanOperatorReport(
