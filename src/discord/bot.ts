@@ -172,6 +172,106 @@ export function shouldPostPlanGeneratedMessage(event: { needsAnswers: boolean })
   return !event.needsAnswers;
 }
 
+function buildPlanningQuestionsNotificationMessage(params: {
+  workstreamName: string;
+  instruction: string;
+  renderedPlan: string;
+}): MessageCreateOptions {
+  const fullBody = renderMarkdownDocument({
+    title: `Planning Questions - ${params.workstreamName}`,
+    summary: ["Planning is waiting on operator input."],
+    facts: [{ label: "Instruction", value: truncate(params.instruction, 500) }],
+    callouts: [{
+      label: "Reply Format",
+      body: "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
+      tone: "warning",
+    }],
+    sections: [{ title: "Details", lines: params.renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
+  });
+  return { content: fullBody };
+}
+
+function buildPlanGeneratedNotificationMessage(params: {
+  workstreamName: string;
+  instruction: string;
+  renderedPlan: string;
+  finalExecutionPrompt: string | null;
+}): MessageCreateOptions {
+  const fullBody = renderMarkdownDocument({
+    title: `Planning Ready - ${params.workstreamName}`,
+    summary: [
+      params.finalExecutionPrompt
+        ? "Planning produced a final execution prompt."
+        : "A structured plan was stored, but no final execution prompt is ready yet.",
+    ],
+    facts: [{ label: "Instruction", value: truncate(params.instruction, 500) }],
+    callouts: [{
+      label: "Next Action",
+      body: params.finalExecutionPrompt
+        ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
+        : "Review the stored plan and refine the execution prompt before dispatching.",
+      tone: params.finalExecutionPrompt ? "success" : "warning",
+    }],
+    sections: [{ title: "Details", lines: params.renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
+  });
+  return { content: fullBody };
+}
+
+function buildFormattedPlanningSummaryMessage(params: {
+  workstreamName: string;
+  instruction: string;
+  formattedMarkdown: string;
+}): MessageCreateOptions {
+  const trimmedMarkdown = params.formattedMarkdown.trim();
+  const parts = [
+    `# Planning Summary - ${params.workstreamName}`,
+    `Instruction: ${truncate(params.instruction, 500)}`,
+    trimmedMarkdown,
+  ].filter(Boolean);
+
+  return {
+    content: parts.join("\n\n"),
+  };
+}
+
+export function buildPlanNotificationMessages(params: {
+  workstreamName: string;
+  instruction: string;
+  renderedPlan: string;
+  formattedMarkdown: string;
+  finalExecutionPrompt: string | null;
+  needsAnswers: boolean;
+}): MessageCreateOptions[] {
+  const messages: MessageCreateOptions[] = [
+    params.needsAnswers
+      ? buildPlanningQuestionsNotificationMessage({
+        workstreamName: params.workstreamName,
+        instruction: params.instruction,
+        renderedPlan: params.renderedPlan,
+      })
+      : buildPlanGeneratedNotificationMessage({
+        workstreamName: params.workstreamName,
+        instruction: params.instruction,
+        renderedPlan: params.renderedPlan,
+        finalExecutionPrompt: params.finalExecutionPrompt,
+      }),
+  ];
+
+  const trimmedRenderedPlan = params.renderedPlan.trim();
+  const trimmedFormattedMarkdown = params.formattedMarkdown.trim();
+  if (trimmedFormattedMarkdown && trimmedFormattedMarkdown !== trimmedRenderedPlan) {
+    messages.push(
+      buildFormattedPlanningSummaryMessage({
+        workstreamName: params.workstreamName,
+        instruction: params.instruction,
+        formattedMarkdown: trimmedFormattedMarkdown,
+      })
+    );
+  }
+
+  return messages;
+}
+
 export function parsePlanningAnswerInput(text: string): {
   answers: Record<string, string>;
   invalidLines: string[];
@@ -934,10 +1034,16 @@ export class DiscordBot {
           return;
         }
 
-        await this.safeSend(
-          channel,
-          this.buildPlanningQuestionsMessage(workstream.name, event.instruction, event.renderedPlan)
-        );
+        for (const message of buildPlanNotificationMessages({
+          workstreamName: workstream.name,
+          instruction: event.instruction,
+          renderedPlan: event.renderedPlan,
+          formattedMarkdown: event.formattedMarkdown,
+          finalExecutionPrompt: null,
+          needsAnswers: true,
+        })) {
+          await this.safeSend(channel, message);
+        }
       });
     });
 
@@ -958,15 +1064,16 @@ export class DiscordBot {
           return;
         }
 
-        await this.safeSend(
-          channel,
-          this.buildPlanGeneratedMessage(
-            workstream.name,
-            event.instruction,
-            event.renderedPlan,
-            event.finalExecutionPrompt,
-          )
-        );
+        for (const message of buildPlanNotificationMessages({
+          workstreamName: workstream.name,
+          instruction: event.instruction,
+          renderedPlan: event.renderedPlan,
+          formattedMarkdown: event.formattedMarkdown,
+          finalExecutionPrompt: event.finalExecutionPrompt,
+          needsAnswers: false,
+        })) {
+          await this.safeSend(channel, message);
+        }
       });
     });
 
@@ -2401,51 +2508,6 @@ export class DiscordBot {
       summary: [`Status: \`${status}\``, `Recommendation: \`${recommendation}\``],
       facts: [{ label: "Workstream", value: `\`${workstreamId}\`` }],
       sections: [{ title: "Evidence", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
-    });
-    return { content: fullBody };
-  }
-
-  private buildPlanningQuestionsMessage(
-    workstreamName: string,
-    instruction: string,
-    renderedPlan: string,
-  ): MessageCreateOptions {
-    const fullBody = renderMarkdownDocument({
-      title: `Planning Questions - ${workstreamName}`,
-      summary: ["Planning is waiting on operator input."],
-      facts: [{ label: "Instruction", value: truncate(instruction, 500) }],
-      callouts: [{
-        label: "Reply Format",
-        body: "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
-        tone: "warning",
-      }],
-      sections: [{ title: "Details", lines: renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
-    });
-    return { content: fullBody };
-  }
-
-  private buildPlanGeneratedMessage(
-    workstreamName: string,
-    instruction: string,
-    renderedPlan: string,
-    finalExecutionPrompt: string | null,
-  ): MessageCreateOptions {
-    const fullBody = renderMarkdownDocument({
-      title: `Planning Ready - ${workstreamName}`,
-      summary: [
-        finalExecutionPrompt
-          ? "Planning produced a final execution prompt."
-          : "A structured plan was stored, but no final execution prompt is ready yet.",
-      ],
-      facts: [{ label: "Instruction", value: truncate(instruction, 500) }],
-      callouts: [{
-        label: "Next Action",
-        body: finalExecutionPrompt
-          ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
-          : "Review the stored plan and refine the execution prompt before dispatching.",
-        tone: finalExecutionPrompt ? "success" : "warning",
-      }],
-      sections: [{ title: "Details", lines: renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
     });
     return { content: fullBody };
   }

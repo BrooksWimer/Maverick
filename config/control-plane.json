@@ -121,6 +121,32 @@
       "requireEpicForWorktree": true
     },
     {
+      "id": "portfolio-resume",
+      "name": "Portfolio & Resume",
+      "repoPath": "C:\\Users\\wimer\\Desktop\\portfolio",
+      "maxConcurrentWorkstreams": 2,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet"
+      },
+      "claudeVerification": {
+        "enabled": true,
+        "autoAfterTurn": true,
+        "model": "sonnet"
+      },
+      "metadata": {
+        "description": "Portfolio website and resume refresh workspace for presenting recent projects, work experience, and proof artifacts",
+        "primary_focus": "portfolio-resume",
+        "featured_projects": "netwise,maverick"
+      }
+    },
+    {
       "id": "work",
       "name": "Work",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Work",
@@ -160,6 +186,11 @@
         "channelId": "1491259320686346260",
         "purpose": "workstreams",
         "epicId": "wifi-speakers-manual-alignment"
+      },
+      {
+        "projectId": "portfolio-resume",
+        "channelId": "1497643572831453264",
+        "purpose": "workstreams"
       },
       {
         "projectId": "work",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPlanNotificationMessages,
   buildAttachedTextReply,
   parsePlanningAnswerInput,
   persistedEpicIdForResolvedEpic,
@@ -90,6 +91,39 @@ describe("shouldPostPlanGeneratedMessage", () => {
 
   it("does not duplicate question-gated planning messages", () => {
     expect(shouldPostPlanGeneratedMessage({ needsAnswers: true })).toBe(false);
+  });
+});
+
+describe("buildPlanNotificationMessages", () => {
+  it("sends the full rendered plan first and the formatted summary second when they differ", () => {
+    const messages = buildPlanNotificationMessages({
+      workstreamName: "Portfolio Refresh",
+      instruction: "Update the portfolio and resume.",
+      renderedPlan: "## Full Plan\n\n- Step 1\n- Step 2",
+      formattedMarkdown: "## Quick Take\n\n- Focus on Maverick and Netwise\n- Verify rendered output",
+      finalExecutionPrompt: "Run the stored prompt.",
+      needsAnswers: false,
+    });
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.content).toContain("Planning Ready - Portfolio Refresh");
+    expect(messages[0]?.content).toContain("## Full Plan");
+    expect(messages[1]?.content).toContain("# Planning Summary - Portfolio Refresh");
+    expect(messages[1]?.content).toContain("## Quick Take");
+  });
+
+  it("avoids sending a duplicate summary when formatted markdown matches the rendered plan", () => {
+    const messages = buildPlanNotificationMessages({
+      workstreamName: "Portfolio Refresh",
+      instruction: "Update the portfolio and resume.",
+      renderedPlan: "## Full Plan\n\n- Step 1\n- Step 2",
+      formattedMarkdown: "## Full Plan\n\n- Step 1\n- Step 2",
+      finalExecutionPrompt: null,
+      needsAnswers: true,
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.content).toContain("Planning Questions - Portfolio Refresh");
   });
 });
 
