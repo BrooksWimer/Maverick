@@ -5,6 +5,7 @@ import {
   persistedEpicIdForResolvedEpic,
   shouldAttachReplyPreview,
   shouldPostPlanGeneratedMessage,
+  splitDiscordMessageContent,
 } from "../../src/discord/bot.js";
 
 describe("persistedEpicIdForResolvedEpic", () => {
@@ -45,30 +46,40 @@ describe("shouldAttachReplyPreview", () => {
 });
 
 describe("buildAttachedTextReply", () => {
-  it("keeps short status replies inline", () => {
+  it("renders markdown bodies directly into the Discord message content", () => {
     const reply = buildAttachedTextReply({
       headerLines: ["Workstream status:"],
-      body: "State: planning",
+      body: "# Workstream Status\n\n## Summary\n- State: planning",
       attachmentName: "workstream-status.md",
       attachmentNotice: "Full status attached.",
     });
 
-    expect(reply.content).toBe("Workstream status:\nState: planning");
+    expect(reply.content).toBe("# Workstream Status\n\n## Summary\n- State: planning");
     expect(reply.files).toBeUndefined();
   });
 
-  it("attaches long status replies instead of exceeding Discord content limits", () => {
+  it("falls back to header plus body for plain text replies", () => {
     const reply = buildAttachedTextReply({
       headerLines: ["Workstream status:"],
-      body: "x".repeat(5000),
+      body: "State: planning",
       previewLimit: 1500,
       attachmentName: "workstream-status.md",
       attachmentNotice: "Full status attached.",
     });
 
-    expect(String(reply.content).length).toBeLessThanOrEqual(2000);
-    expect(reply.content).toContain("Full status attached.");
-    expect(reply.files).toHaveLength(1);
+    expect(reply.content).toBe("Workstream status:\n\nState: planning");
+    expect(reply.files).toBeUndefined();
+  });
+});
+
+describe("splitDiscordMessageContent", () => {
+  it("splits long rendered markdown into multiple safe Discord messages", () => {
+    const content = "# Title\n\n" + Array.from({ length: 300 }, (_, index) => `- item ${index}`).join("\n");
+    const chunks = splitDiscordMessageContent(content, 400);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.length <= 400)).toBe(true);
+    expect(chunks[0]).toContain("# Title");
   });
 });
 

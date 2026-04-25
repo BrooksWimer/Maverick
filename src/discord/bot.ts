@@ -1,6 +1,5 @@
 import {
   ActionRowBuilder,
-  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ButtonInteraction,
@@ -46,8 +45,8 @@ type SendableChannel = TextBasedChannel & {
   send: (options: string | MessageCreateOptions) => Promise<unknown>;
 };
 
-const DISCORD_INLINE_RESULT_LIMIT = 1500;
 const DISCORD_STATUS_PREVIEW_LIMIT = 1500;
+const DISCORD_RENDERED_MESSAGE_LIMIT = 1900;
 
 type ParsedEpicChoice = {
   projectId: string;
@@ -95,6 +94,68 @@ export function shouldAttachReplyPreview(
   return inlinePreview !== previewBody || inlineContent.length > 1900;
 }
 
+export function splitDiscordMessageContent(
+  content: string,
+  maxLength = DISCORD_RENDERED_MESSAGE_LIMIT
+): string[] {
+  const normalized = content.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return [""];
+  }
+
+  const chunks: string[] = [];
+  let remaining = normalized;
+
+  while (remaining.length > maxLength) {
+    const window = remaining.slice(0, maxLength + 1);
+    const breakIndex = pickChunkBreakIndex(window, maxLength);
+    const chunk = remaining.slice(0, breakIndex).trimEnd();
+
+    chunks.push(chunk || remaining.slice(0, maxLength));
+    remaining = remaining.slice(Math.max(breakIndex, 1)).trimStart();
+  }
+
+  if (remaining) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+function pickChunkBreakIndex(window: string, maxLength: number): number {
+  const paragraphBreak = window.lastIndexOf("\n\n");
+  if (paragraphBreak >= Math.floor(maxLength * 0.5)) {
+    return paragraphBreak;
+  }
+
+  const lineBreak = window.lastIndexOf("\n");
+  if (lineBreak >= Math.floor(maxLength * 0.5)) {
+    return lineBreak;
+  }
+
+  const wordBreak = window.lastIndexOf(" ");
+  if (wordBreak >= Math.floor(maxLength * 0.5)) {
+    return wordBreak;
+  }
+
+  return maxLength;
+}
+
+function mergeRenderedReply(headerLines: string[], body: string): string {
+  const trimmedBody = body.trim();
+  const trimmedHeaders = headerLines.map((line) => line.trim()).filter(Boolean);
+
+  if (!trimmedBody) {
+    return trimmedHeaders.join("\n\n");
+  }
+
+  if (trimmedBody.startsWith("# ")) {
+    return trimmedBody;
+  }
+
+  return [...trimmedHeaders, trimmedBody].filter(Boolean).join("\n\n");
+}
+
 export function buildAttachedTextReply(params: {
   headerLines: string[];
   body: string;
@@ -102,21 +163,8 @@ export function buildAttachedTextReply(params: {
   attachmentName: string;
   attachmentNotice: string;
 }): InteractionEditReplyOptions {
-  const previewLimit = params.previewLimit ?? DISCORD_STATUS_PREVIEW_LIMIT;
-  const inlinePreview = truncate(params.body, previewLimit);
-  const inlineContent = [...params.headerLines, inlinePreview].filter(Boolean).join("\n");
-
-  if (!shouldAttachReplyPreview(params.headerLines, params.body, previewLimit)) {
-    return { content: inlineContent };
-  }
-
   return {
-    content: [...params.headerLines, params.attachmentNotice].filter(Boolean).join("\n"),
-    files: [
-      new AttachmentBuilder(Buffer.from(params.body, "utf8"), {
-        name: params.attachmentName,
-      }),
-    ],
+    content: mergeRenderedReply(params.headerLines, params.body),
   };
 }
 
@@ -664,7 +712,6 @@ export class DiscordBot {
       headline,
       preview,
       markdown,
-      artifactFileName,
       trigger,
     }) => {
       const channel = await this.fetchTextChannel(channelId);
@@ -673,17 +720,9 @@ export class DiscordBot {
       }
 
       await this.safeSend(channel, {
-        content: [
-          headline,
-          trigger === "scheduled" ? "Nightly brief delivered." : "Daily brief preview.",
-          preview,
-          "Full brief attached as a Markdown file.",
-        ].join("\n\n"),
-        files: [
-          new AttachmentBuilder(Buffer.from(markdown, "utf8"), {
-            name: artifactFileName,
-          }),
-        ],
+        content: markdown.trim() || [headline, trigger === "scheduled" ? "Nightly brief delivered." : "Daily brief preview.", preview]
+          .filter(Boolean)
+          .join("\n\n"),
       });
     });
   }
@@ -897,7 +936,7 @@ export class DiscordBot {
 
         await this.safeSend(
           channel,
-          this.buildPlanningQuestionsMessage(workstream.name, event.instruction, event.formattedMarkdown, event.renderedPlan)
+          this.buildPlanningQuestionsMessage(workstream.name, event.instruction, event.renderedPlan)
         );
       });
     });
@@ -924,7 +963,6 @@ export class DiscordBot {
           this.buildPlanGeneratedMessage(
             workstream.name,
             event.instruction,
-            event.formattedMarkdown,
             event.renderedPlan,
             event.finalExecutionPrompt,
           )
@@ -1027,36 +1065,12 @@ export class DiscordBot {
         },
       });
 
+      const renderedContent = result.attachment?.content ?? result.reply;
       if (this.config.assistant.discord.replyInThread) {
-        await message.reply({
-          ...(result.attachment
-            ? {
-                content: `${result.reply}\n\nFull result attached as a Markdown file.`,
-                files: [
-                  new AttachmentBuilder(Buffer.from(result.attachment.content, "utf8"), {
-                    name: result.attachment.name,
-                  }),
-                ],
-              }
-            : {
-                content: result.reply,
-              }),
-          allowedMentions: { repliedUser: false },
-        });
+        await this.replyWithChunks(message, renderedContent, { allowedMentions: { repliedUser: false } });
       } else {
         await this.safeSend(message.channel as SendableChannel, {
-          ...(result.attachment
-            ? {
-                content: `${result.reply}\n\nFull result attached as a Markdown file.`,
-                files: [
-                  new AttachmentBuilder(Buffer.from(result.attachment.content, "utf8"), {
-                    name: result.attachment.name,
-                  }),
-                ],
-              }
-            : {
-                content: result.reply,
-              }),
+          content: renderedContent,
         });
       }
     } catch (error) {
@@ -1260,14 +1274,7 @@ export class DiscordBot {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const report = await this.dailyBrief.generateReport();
-    await interaction.editReply({
-      content: [report.headline, report.preview, `Artifact: \`${report.artifactPath}\``].join("\n\n"),
-      files: [
-        new AttachmentBuilder(Buffer.from(report.markdown, "utf8"), {
-          name: report.artifactFileName,
-        }),
-      ],
-    });
+    await this.editReplyWithChunks(interaction, report.markdown.trim() || [report.headline, report.preview].join("\n\n"));
   }
 
   private async handleAssistantCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1319,7 +1326,8 @@ export class DiscordBot {
       | "planning"
       | null;
     const agenda = this.assistant!.getAgenda(context ?? undefined);
-    await interaction.editReply(
+    await this.editReplyWithChunks(
+      interaction,
       buildAttachedTextReply({
         headerLines: [buildAgendaSummary(agenda)],
         body: renderAgendaMarkdown(agenda),
@@ -1343,7 +1351,8 @@ export class DiscordBot {
     const summary = inbox.length === 0
       ? "Your assistant inbox is clear."
       : `Your assistant inbox has ${inbox.length} item${inbox.length === 1 ? "" : "s"} waiting for triage.`;
-    await interaction.editReply(
+    await this.editReplyWithChunks(
+      interaction,
       buildAttachedTextReply({
         headerLines: [summary],
         body,
@@ -1371,7 +1380,8 @@ export class DiscordBot {
     const summary = results.length === 0
       ? `I couldn't find anything matching "${query}".`
       : `I found ${results.length} result${results.length === 1 ? "" : "s"} for "${query}".`;
-    await interaction.editReply(
+    await this.editReplyWithChunks(
+      interaction,
       buildAttachedTextReply({
         headerLines: [summary],
         body,
@@ -1622,13 +1632,19 @@ export class DiscordBot {
         return;
       }
 
-      await interaction.editReply(this.buildWorkstreamStatusReply(this.formatWorkstream(workstream)));
+      await this.editReplyWithChunks(
+        interaction,
+        this.buildWorkstreamStatusReply(this.formatWorkstream(workstream))
+      );
       return;
     }
 
     const current = this.orchestrator.getChannelWorkstream(interaction.channelId);
     if (current) {
-      await interaction.editReply(this.buildWorkstreamStatusReply(this.formatWorkstream(current)));
+      await this.editReplyWithChunks(
+        interaction,
+        this.buildWorkstreamStatusReply(this.formatWorkstream(current))
+      );
       return;
     }
 
@@ -1647,7 +1663,7 @@ export class DiscordBot {
       lines.push(`- \`${workstream.id}\` ${workstream.name} [${suffix}]`);
     }
 
-    await interaction.editReply(this.buildWorkstreamStatusReply(lines.join("\n")));
+    await this.editReplyWithChunks(interaction, this.buildWorkstreamStatusReply(lines.join("\n")));
   }
 
   private async handleDispatch(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -2218,6 +2234,24 @@ export class DiscordBot {
     options: string | MessageCreateOptions
   ): Promise<void> {
     try {
+      if (typeof options === "string") {
+        for (const chunk of splitDiscordMessageContent(options)) {
+          await channel.send(chunk);
+        }
+        return;
+      }
+
+      if (typeof options.content === "string" && !options.files && !options.embeds && !options.components) {
+        const chunks = splitDiscordMessageContent(options.content);
+        for (const chunk of chunks) {
+          await channel.send({
+            ...options,
+            content: chunk,
+          });
+        }
+        return;
+      }
+
       await channel.send(options);
     } catch (error) {
       if (isDiscordApiError(error, 50001)) {
@@ -2237,6 +2271,59 @@ export class DiscordBot {
     }
   }
 
+  private async replyWithChunks(
+    message: Message,
+    content: string,
+    options?: Omit<MessageCreateOptions, "content">
+  ): Promise<void> {
+    const chunks = splitDiscordMessageContent(content);
+    await message.reply({
+      ...(options ?? {}),
+      content: chunks[0] ?? "",
+    });
+
+    for (const chunk of chunks.slice(1)) {
+      await this.safeSend(message.channel as SendableChannel, {
+        content: chunk,
+      });
+    }
+  }
+
+  private async editReplyWithChunks(
+    interaction: ChatInputCommandInteraction,
+    options: string | InteractionEditReplyOptions
+  ): Promise<void> {
+    if (typeof options === "string") {
+      const chunks = splitDiscordMessageContent(options);
+      await interaction.editReply(chunks[0] ?? "");
+      for (const chunk of chunks.slice(1)) {
+        await interaction.followUp({
+          content: chunk,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      return;
+    }
+
+    if (typeof options.content !== "string" || options.files || options.embeds || options.components) {
+      await interaction.editReply(options);
+      return;
+    }
+
+    const chunks = splitDiscordMessageContent(options.content);
+    await interaction.editReply({
+      ...options,
+      content: chunks[0] ?? "",
+    });
+
+    for (const chunk of chunks.slice(1)) {
+      await interaction.followUp({
+        content: chunk,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  }
+
   private buildTurnCompletedMessage(
     heading: string,
     turnId: string,
@@ -2252,36 +2339,7 @@ export class DiscordBot {
         ? [{ title: "Details", lines: normalizedOutput.split(/\r?\n/).map((line) => line || " ") }]
         : [],
     });
-    const shouldAttachOutput = normalizedOutput.length > DISCORD_INLINE_RESULT_LIMIT;
-
-    if (shouldAttachOutput) {
-      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
-        name: `maverick-turn-${turnId}.md`,
-      });
-
-      return {
-        content: [
-          heading,
-          `Turn ID: \`${turnId}\``,
-          summary ? `Summary:\n${truncate(summary, 1200)}` : null,
-          "Full result attached as a Markdown file.",
-        ]
-          .filter(Boolean)
-          .join("\n"),
-        files: [attachment],
-      };
-    }
-
-    return {
-      content: [
-        heading,
-        `Turn ID: \`${turnId}\``,
-        normalizedOutput ? `Result:\n${truncate(normalizedOutput, 1600)}` : null,
-        !normalizedOutput && summary ? `Summary:\n${truncate(summary, 1600)}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    };
+    return { content: fullBody };
   }
 
   private buildBriefGeneratedMessage(
@@ -2296,29 +2354,7 @@ export class DiscordBot {
       facts: [{ label: "Generated", value: generatedAt }],
       sections: [{ title: "Details", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
     });
-    if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
-      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
-        name: `maverick-brief-${generatedAt.replace(/[:]/g, "-")}.md`,
-      });
-
-      return {
-        content: [
-          "Claude generated a Maverick brief.",
-          `Generated: ${generatedAt}`,
-          `Summary: ${truncate(summary, 1200)}`,
-          "Full brief attached as a Markdown file.",
-        ].join("\n"),
-        files: [attachment],
-      };
-    }
-
-    return {
-      content: [
-        "Claude generated a Maverick brief.",
-        `Generated: ${generatedAt}`,
-        trimmed,
-      ].join("\n"),
-    };
+    return { content: fullBody };
   }
 
   private buildReviewCompletedMessage(
@@ -2333,30 +2369,7 @@ export class DiscordBot {
       facts: [{ label: "Workstream", value: `\`${workstreamId}\`` }],
       sections: [{ title: "Findings", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
     });
-    if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
-      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
-        name: `claude-review-${workstreamId}.md`,
-      });
-
-      return {
-        content: [
-          "Claude completed a post-turn review.",
-          `Workstream: \`${workstreamId}\``,
-          `Severity: \`${severity}\``,
-          "Full review attached as a Markdown file.",
-        ].join("\n"),
-        files: [attachment],
-      };
-    }
-
-    return {
-      content: [
-        "Claude completed a post-turn review.",
-        `Workstream: \`${workstreamId}\``,
-        `Severity: \`${severity}\``,
-        trimmed,
-      ].join("\n"),
-    };
+    return { content: fullBody };
   }
 
   private buildReviewCommandCompletedMessage(
@@ -2367,33 +2380,13 @@ export class DiscordBot {
     findings: string,
   ): MessageCreateOptions {
     const trimmed = findings.trim();
-    const headerLines = [
-      `Review for \`${workstreamName}\` completed.`,
-      `Workstream: \`${workstreamId}\``,
-      `Reviewer: \`${reviewer}\``,
-      `Severity: \`${severity}\``,
-    ];
     const fullBody = renderMarkdownDocument({
       title: `Review - ${workstreamName}`,
       summary: [`Reviewer: \`${reviewer}\``, `Severity: \`${severity}\``],
       facts: [{ label: "Workstream", value: `\`${workstreamId}\`` }],
       sections: [{ title: "Findings", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
     });
-
-    if (shouldAttachReplyPreview(headerLines, trimmed, 1500)) {
-      return {
-        content: [...headerLines, "Full review attached as a Markdown file."].join("\n"),
-        files: [
-          new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
-            name: `review-${workstreamId}.md`,
-          }),
-        ],
-      };
-    }
-
-    return {
-      content: [...headerLines, trimmed].filter(Boolean).join("\n"),
-    };
+    return { content: fullBody };
   }
 
   private buildVerificationCompletedMessage(
@@ -2409,46 +2402,14 @@ export class DiscordBot {
       facts: [{ label: "Workstream", value: `\`${workstreamId}\`` }],
       sections: [{ title: "Evidence", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
     });
-    if (trimmed.length > DISCORD_INLINE_RESULT_LIMIT) {
-      const attachment = new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
-        name: `verification-${workstreamId}.md`,
-      });
-
-      return {
-        content: [
-          "Claude completed verification.",
-          `Workstream: \`${workstreamId}\``,
-          `Status: \`${status}\``,
-          `Recommendation: \`${recommendation}\``,
-          "Full verification report attached as a Markdown file.",
-        ].join("\n"),
-        files: [attachment],
-      };
-    }
-
-    return {
-      content: [
-        "Claude completed verification.",
-        `Workstream: \`${workstreamId}\``,
-        `Status: \`${status}\``,
-        `Recommendation: \`${recommendation}\``,
-        trimmed,
-      ].join("\n"),
-    };
+    return { content: fullBody };
   }
 
   private buildPlanningQuestionsMessage(
     workstreamName: string,
     instruction: string,
-    formattedMarkdown: string,
     renderedPlan: string,
   ): MessageCreateOptions {
-    const headerLines = [
-      `Planning for \`${workstreamName}\` is waiting on operator input.`,
-      `Instruction: ${truncate(instruction, 500)}`,
-      "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
-    ];
-
     const fullBody = renderMarkdownDocument({
       title: `Planning Questions - ${workstreamName}`,
       summary: ["Planning is waiting on operator input."],
@@ -2460,37 +2421,15 @@ export class DiscordBot {
       }],
       sections: [{ title: "Details", lines: renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
     });
-    if (!shouldAttachReplyPreview(headerLines, formattedMarkdown, 1400)) {
-      return {
-        content: [...headerLines, formattedMarkdown].join("\n"),
-      };
-    }
-
-    return {
-      content: [...headerLines, "Full planning context attached as a Markdown file."].join("\n"),
-      files: [
-        new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
-          name: "planning-questions.md",
-        }),
-      ],
-    };
+    return { content: fullBody };
   }
 
   private buildPlanGeneratedMessage(
     workstreamName: string,
     instruction: string,
-    formattedMarkdown: string,
     renderedPlan: string,
     finalExecutionPrompt: string | null,
   ): MessageCreateOptions {
-    const headerLines = [
-      `Planning for \`${workstreamName}\` is ready.`,
-      `Instruction: ${truncate(instruction, 500)}`,
-      finalExecutionPrompt
-        ? "Dispatch with the same instruction to reuse the stored final Codex execution prompt."
-        : "A structured plan was stored, but no final execution prompt is ready yet.",
-    ];
-
     const fullBody = renderMarkdownDocument({
       title: `Planning Ready - ${workstreamName}`,
       summary: [
@@ -2508,45 +2447,7 @@ export class DiscordBot {
       }],
       sections: [{ title: "Details", lines: renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
     });
-    if (!shouldAttachReplyPreview(headerLines, formattedMarkdown, 1400)) {
-      return {
-        content: [...headerLines, formattedMarkdown].join("\n"),
-      };
-    }
-
-    return {
-      content: [...headerLines, "Full planning context attached as a Markdown file."].join("\n"),
-      files: [
-        new AttachmentBuilder(Buffer.from(fullBody, "utf8"), {
-          name: "planning-ready.md",
-        }),
-      ],
-    };
-  }
-
-  private buildInlineOrAttachedReply(params: {
-    headerLines: string[];
-    previewBody: string;
-    previewLimit?: number;
-    fullBody: string;
-    attachmentName: string;
-    attachmentNotice: string;
-  }): InteractionEditReplyOptions {
-    const previewLimit = params.previewLimit ?? 1500;
-    const inlinePreview = truncate(params.previewBody, previewLimit);
-    const inlineContent = [...params.headerLines, inlinePreview].filter(Boolean).join("\n");
-    if (!shouldAttachReplyPreview(params.headerLines, params.previewBody, previewLimit)) {
-      return { content: inlineContent };
-    }
-
-    return {
-      content: [...params.headerLines, params.attachmentNotice].filter(Boolean).join("\n"),
-      files: [
-        new AttachmentBuilder(Buffer.from(params.fullBody, "utf8"), {
-          name: params.attachmentName,
-        }),
-      ],
-    };
+    return { content: fullBody };
   }
 
   private appendStatusFooter(
