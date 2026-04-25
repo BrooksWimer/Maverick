@@ -2459,19 +2459,20 @@ export class DiscordBot {
       return options;
     }
 
-    const footerLines = [
-      `Health: \`${snapshot.health}\``,
-      snapshot.latestReport ? `Latest report: ${snapshot.latestReport.headline}` : null,
-      `Next action: ${snapshot.nextAction}`,
+    const baseContent = typeof options.content === "string" ? options.content : "";
+    const footerSection = [
+      "## Workstream Health",
+      `- Health: \`${snapshot.health}\``,
+      snapshot.latestReport ? `- Latest report: ${snapshot.latestReport.headline}` : null,
+      `- Next action: ${snapshot.nextAction}`,
     ]
       .filter((line): line is string => Boolean(line))
       .join("\n");
 
-    const baseContent = typeof options.content === "string" ? options.content : "";
-    const combined = [baseContent, footerLines].filter(Boolean).join("\n\n");
+    const combined = [baseContent, footerSection].filter(Boolean).join("\n\n");
     return {
       ...options,
-      content: truncate(combined, 1900),
+      content: combined,
     };
   }
 
