@@ -519,6 +519,14 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .addStringOption((option) =>
           option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
         )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("repost-plan")
+        .setDescription("Repost the stored planning output without rerunning Claude")
+        .addStringOption((option) =>
+          option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+        )
     );
 
   const project = new SlashCommandBuilder()
@@ -1263,6 +1271,10 @@ export class DiscordBot {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await this.handleAnswerPlan(interaction);
         return;
+      case "repost-plan":
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await this.handleRepostPlan(interaction);
+        return;
       default:
         await interaction.reply({
           content: `Unsupported workstream subcommand: ${subcommand}`,
@@ -1889,6 +1901,50 @@ export class DiscordBot {
         await this.orchestrator.provideDecisionAnswers(workstream.id, parsed.answers, interaction.user.id);
       },
     });
+  }
+
+  private async handleRepostPlan(interaction: ChatInputCommandInteraction): Promise<void> {
+    const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
+    const planningContext = this.orchestrator.getPlanningContext(workstream.id);
+    if (!planningContext) {
+      await interaction.editReply(
+        `Workstream \`${workstream.name}\` has no stored planning context to repost. Run \`/workstream plan\` first.`
+      );
+      return;
+    }
+
+    const channel = await this.resolveAsyncCommandChannel(workstream, interaction.channelId);
+    if (!channel) {
+      await interaction.editReply("I could not find a Discord channel to repost the stored plan into.");
+      return;
+    }
+
+    const renderedPlan = workstream.plan?.trim() || "No stored rendered plan summary.";
+    const formattedMarkdown = planningContext.explanation?.markdown?.trim() || renderedPlan;
+    const instruction =
+      planningContext.originalInstruction.trim() ||
+      workstream.current_goal?.trim() ||
+      workstream.description?.trim() ||
+      workstream.name;
+
+    for (const message of buildPlanNotificationMessages({
+      workstreamName: workstream.name,
+      instruction,
+      renderedPlan,
+      formattedMarkdown,
+      finalExecutionPrompt: planningContext.finalExecutionPrompt,
+      needsAnswers: planningContext.pendingQuestions.length > 0,
+    })) {
+      await this.safeSend(channel, message);
+    }
+
+    await interaction.editReply(
+      [
+        `Reposted the stored planning output for \`${workstream.name}\`.`,
+        `Workstream: \`${workstream.id}\``,
+        "No Claude planning work was rerun.",
+      ].join("\n")
+    );
   }
 
   private async startAsyncWorkstreamCommand(

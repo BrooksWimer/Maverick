@@ -168,6 +168,28 @@
       "name": "Work",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Work",
       "maxConcurrentWorkstreams": 2,
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
       "metadata": {
         "description": "Private work-note workspace for job progress, project notes, acceptance criteria, and active learning",
         "note_workspace": "work",
