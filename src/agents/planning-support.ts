@@ -16,7 +16,7 @@ import type {
 } from "./types.js";
 import { parseGoalFrameResult, parseIntakeResult, renderGoalFrameMarkdown, renderIntakeMarkdown } from "./goal-framing-support.js";
 import { renderModelingMarkdown } from "./modeling-support.js";
-import { renderOperatorFeedbackMarkdown } from "./operator-feedback-support.js";
+import { coerceOperatorFeedbackResult, renderOperatorFeedbackMarkdown } from "./operator-feedback-support.js";
 import { renderTestDesignMarkdown } from "./test-design-support.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -72,6 +72,72 @@ function summarizeRawOutput(output: string): string {
   }
 
   return `${trimmed.slice(0, 397)}...`;
+}
+
+function isFallbackPlanningResult(result: PlanningResult): boolean {
+  return (
+    result.currentStateSummary === "Planning returned unstructured output. Review the stored raw plan text before dispatch."
+    && result.requiredAnswers.length === 0
+    && result.importantDecisions.length === 0
+    && result.steps.length === 0
+    && result.risks.length === 0
+    && result.dependencies.length === 0
+    && result.testStrategy.length === 0
+    && result.rollbackPlan.length === 0
+  );
+}
+
+function synthesizePendingQuestionsFromFeedback(
+  feedbackRequest: OperatorFeedbackResult | null,
+): PendingPlanningDecision[] {
+  if (!feedbackRequest) {
+    return [];
+  }
+
+  return feedbackRequest.questions.map((question) => ({
+    id: question.questionId,
+    question: question.prompt,
+    whyItMatters: question.whyItMatters || "Maverick needs this answer before dispatch is safe.",
+    options: question.options,
+    kind: question.label.toLowerCase().includes("decision") ? "important-decision" : "required-answer",
+  }));
+}
+
+function synthesizePendingQuestionsFromIntake(intake: IntakeResult | null): PendingPlanningDecision[] {
+  const clarificationQuestions = intake?.clarificationQuestions ?? [];
+  if (clarificationQuestions.length === 0) {
+    return [];
+  }
+
+  return clarificationQuestions.map((question, index) => ({
+    id: `clarification-${index + 1}`,
+    question,
+    whyItMatters: "The intake phase marked this as unresolved before Maverick can dispatch safely.",
+    options: [],
+    kind: "required-answer",
+  }));
+}
+
+function buildPendingQuestions(params: {
+  result: PlanningResult;
+  intake?: IntakeResult | null;
+  feedbackRequest?: OperatorFeedbackResult | null;
+}): PendingPlanningDecision[] {
+  const structuredQuestions = collectPendingPlanningQuestions(params.result);
+  if (structuredQuestions.length > 0) {
+    return structuredQuestions;
+  }
+
+  if (!isFallbackPlanningResult(params.result)) {
+    return [];
+  }
+
+  const feedbackQuestions = synthesizePendingQuestionsFromFeedback(params.feedbackRequest ?? null);
+  if (feedbackQuestions.length > 0) {
+    return feedbackQuestions;
+  }
+
+  return synthesizePendingQuestionsFromIntake(params.intake ?? null);
 }
 
 function normalizePlanStep(value: unknown, index: number): PlanStep | null {
@@ -157,11 +223,9 @@ function normalizeResultFromStructured(
 }
 
 function fallbackPlanningResult(rawOutput: string): PlanningResult {
-  const summary = summarizeRawOutput(rawOutput);
-
   return {
     currentStateSummary: "Planning returned unstructured output. Review the stored raw plan text before dispatch.",
-    recommendedNextSlice: summary,
+    recommendedNextSlice: "Review the raw planning output and answer any pending planning questions before dispatch.",
     requiredAnswers: [],
     importantDecisions: [],
     draftExecutionPrompt: "",
@@ -358,10 +422,16 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
       return null;
     }
 
+    const originalInstruction = asTrimmedString(parsed.originalInstruction);
     const rawAgentOutput = asTrimmedString(parsed.rawAgentOutput);
     const resultValue = isRecord(parsed.result) ? parsed.result : {};
     const result = normalizeResultFromStructured(resultValue, rawAgentOutput);
-    const pendingQuestions = Array.isArray(parsed.pendingQuestions)
+    const intake = normalizeIntake(parsed.intake, originalInstruction);
+    const goalFrame = normalizeGoalFrame(parsed.goalFrame, intake, originalInstruction);
+    const modeling = normalizeModeling(parsed.modeling);
+    const testDesign = normalizeTestDesign(parsed.testDesign);
+    let feedbackRequest = normalizeFeedbackRequest(parsed.feedbackRequest);
+    const pendingQuestions = Array.isArray(parsed.pendingQuestions) && parsed.pendingQuestions.length > 0
       ? parsed.pendingQuestions
           .map((entry, index) => {
             const normalized = normalizeDecision(entry, "pending-question", index);
@@ -373,7 +443,11 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
             return { ...normalized, kind } satisfies PendingPlanningDecision;
           })
           .filter((entry): entry is PendingPlanningDecision => entry !== null)
-      : collectPendingPlanningQuestions(result);
+      : buildPendingQuestions({ result, intake, feedbackRequest });
+
+    if (!feedbackRequest && pendingQuestions.length > 0) {
+      feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
+    }
 
     const answersSource = isRecord(parsed.answers) ? parsed.answers : {};
     const answers = Object.fromEntries(
@@ -385,12 +459,6 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
     const createdAt = asTrimmedString(parsed.createdAt) || new Date().toISOString();
     const updatedAt = asTrimmedString(parsed.updatedAt) || createdAt;
     const finalExecutionPrompt = asTrimmedString(parsed.finalExecutionPrompt) || null;
-    const originalInstruction = asTrimmedString(parsed.originalInstruction);
-    const intake = normalizeIntake(parsed.intake, originalInstruction);
-    const goalFrame = normalizeGoalFrame(parsed.goalFrame, intake, originalInstruction);
-    const modeling = normalizeModeling(parsed.modeling);
-    const testDesign = normalizeTestDesign(parsed.testDesign);
-    const feedbackRequest = normalizeFeedbackRequest(parsed.feedbackRequest);
     const explanation = normalizeExplanation(parsed.explanation);
     const status =
       pendingQuestions.length > 0
@@ -444,10 +512,18 @@ export function buildPlanningContextRecord(params: {
 }): PlanningContextRecord {
   const now = params.now ?? new Date().toISOString();
   const answers = params.answers ?? params.previous?.answers ?? {};
-  const pendingQuestions = collectPendingPlanningQuestions(params.result).filter((question) => {
+  const pendingQuestions = buildPendingQuestions({
+    result: params.result,
+    intake: params.intake ?? params.previous?.intake ?? null,
+    feedbackRequest: params.feedbackRequest ?? params.previous?.feedbackRequest ?? null,
+  }).filter((question) => {
     const existingAnswer = answers[question.id];
     return !existingAnswer || !existingAnswer.answer.trim();
   });
+  const feedbackRequest =
+    params.feedbackRequest
+    ?? params.previous?.feedbackRequest
+    ?? (pendingQuestions.length > 0 ? coerceOperatorFeedbackResult(null, pendingQuestions) : null);
   const finalExecutionPrompt = params.result.finalExecutionPrompt.trim() || null;
   const status =
     pendingQuestions.length > 0
@@ -464,7 +540,7 @@ export function buildPlanningContextRecord(params: {
     goalFrame: params.goalFrame ?? params.previous?.goalFrame ?? null,
     modeling: params.modeling ?? params.previous?.modeling ?? null,
     testDesign: params.testDesign ?? params.previous?.testDesign ?? null,
-    feedbackRequest: params.feedbackRequest ?? params.previous?.feedbackRequest ?? null,
+    feedbackRequest,
     explanation: params.explanation ?? params.previous?.explanation ?? null,
     result: params.result,
     pendingQuestions,
@@ -552,6 +628,10 @@ export function renderPlanningSummary(context: PlanningContextRecord): string {
         })
         .join("\n")
     : "None captured.";
+  const rawPlanningOutputSection = context.rawAgentOutput
+    ? ["", "Raw planning output:", context.rawAgentOutput]
+    : [];
+  const isFallback = isFallbackPlanningResult(context.result);
 
   return [
     "Structured intake:",
@@ -580,23 +660,28 @@ export function renderPlanningSummary(context: PlanningContextRecord): string {
     "",
     "Pending planning questions:",
     pendingQuestions,
-    "",
-    "Implementation steps:",
-    steps,
-    "",
-    "Risks:",
-    context.result.risks.length > 0 ? context.result.risks.map((risk) => `- ${risk}`).join("\n") : "None recorded.",
-    "",
-    "Dependencies:",
-    context.result.dependencies.length > 0
-      ? context.result.dependencies.map((dependency) => `- ${dependency}`).join("\n")
-      : "None recorded.",
-    "",
-    "Test strategy:",
-    context.result.testStrategy || "None recorded.",
-    "",
-    "Rollback plan:",
-    context.result.rollbackPlan || "None recorded.",
+    ...rawPlanningOutputSection,
+    ...(isFallback
+      ? []
+      : [
+          "",
+          "Implementation steps:",
+          steps,
+          "",
+          "Risks:",
+          context.result.risks.length > 0 ? context.result.risks.map((risk) => `- ${risk}`).join("\n") : "None recorded.",
+          "",
+          "Dependencies:",
+          context.result.dependencies.length > 0
+            ? context.result.dependencies.map((dependency) => `- ${dependency}`).join("\n")
+            : "None recorded.",
+          "",
+          "Test strategy:",
+          context.result.testStrategy || "None recorded.",
+          "",
+          "Rollback plan:",
+          context.result.rollbackPlan || "None recorded.",
+        ]),
     "",
     context.finalExecutionPrompt
       ? "Final Codex execution prompt:\n" + context.finalExecutionPrompt

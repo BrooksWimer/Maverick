@@ -59,7 +59,7 @@ describe("parsePlanningResult", () => {
     const result = parsePlanningResult(null, "Inspect src/orchestrator/orchestrator.ts and update the planning flow.");
 
     expect(result.currentStateSummary).toContain("unstructured output");
-    expect(result.recommendedNextSlice).toContain("Inspect src/orchestrator");
+    expect(result.recommendedNextSlice).toContain("Review the raw planning output");
     expect(result.requiredAnswers).toEqual([]);
   });
 });
@@ -278,5 +278,106 @@ describe("planning context records", () => {
     expect(parsed?.testDesign?.testCases[0]?.name).toContain("round-trip");
     expect(parsed?.feedbackRequest?.questions[0]?.questionId).toBe("scope-choice");
     expect(parsed?.explanation?.headline).toBe("Planning ready");
+  });
+
+  it("synthesizes pending questions from intake clarification questions when planning falls back", () => {
+    const context = buildPlanningContextRecord({
+      originalInstruction: "Audit the repo and prepare a plan.",
+      rawAgentOutput: [
+        "Audit complete.",
+        "",
+        "Still needs your answers before executing the rest:",
+        "1. Timing",
+        "2. Replacement email",
+      ].join("\n"),
+      intake: {
+        request: "Audit the repo and prepare a plan.",
+        scope: "Audit first, then plan updates.",
+        outOfScope: "",
+        acceptanceCriteria: [],
+        risks: [],
+        complexity: "large",
+        recommendation: "needs-clarification",
+        clarificationQuestions: [
+          "What email address should replace bwimer@bu.edu?",
+          "Do you want the quick-win fixes committed now or bundled with the larger content update?",
+        ],
+      },
+      result: parsePlanningResult(null, "Unstructured planning summary."),
+    });
+
+    expect(context.status).toBe("needs-answers");
+    expect(context.pendingQuestions).toHaveLength(2);
+    expect(context.feedbackRequest?.questions).toHaveLength(2);
+    expect(context.feedbackRequest?.suggestedReplyFormat).toContain("clarification-1:");
+  });
+
+  it("re-hydrates synthesized pending questions when stored context had none persisted", () => {
+    const stored = JSON.stringify({
+      schemaVersion: 4,
+      originalInstruction: "Audit the repo and prepare a plan.",
+      intake: {
+        request: "Audit the repo and prepare a plan.",
+        scope: "Audit first, then plan updates.",
+        outOfScope: "",
+        acceptanceCriteria: [],
+        risks: [],
+        complexity: "large",
+        recommendation: "needs-clarification",
+        clarificationQuestions: [
+          "What email address should replace bwimer@bu.edu?",
+        ],
+      },
+      result: {
+        currentStateSummary: "Planning returned unstructured output. Review the stored raw plan text before dispatch.",
+        recommendedNextSlice: "Review the raw planning output and answer any pending planning questions before dispatch.",
+        requiredAnswers: [],
+        importantDecisions: [],
+        draftExecutionPrompt: "",
+        finalExecutionPrompt: "",
+        remainingUnknowns: [],
+        steps: [],
+        risks: [],
+        dependencies: [],
+        estimatedTurns: 1,
+        testStrategy: "",
+        rollbackPlan: "",
+      },
+      pendingQuestions: [],
+      rawAgentOutput: "Audit complete.",
+      createdAt: "2026-04-25T21:16:19.000Z",
+      updatedAt: "2026-04-25T21:53:30.000Z",
+    });
+
+    const parsed = parsePlanningContextRecord(stored);
+
+    expect(parsed?.pendingQuestions).toHaveLength(1);
+    expect(parsed?.feedbackRequest?.questions[0]?.questionId).toBe("clarification-1");
+    expect(parsed?.status).toBe("needs-answers");
+  });
+
+  it("includes the full raw planning output and skips empty structured sections on fallback", () => {
+    const context = buildPlanningContextRecord({
+      originalInstruction: "Audit the repo and prepare a plan.",
+      rawAgentOutput: "Full freeform planning output.\n- Stale bio\n- Dead email",
+      intake: {
+        request: "Audit the repo and prepare a plan.",
+        scope: "Audit first, then plan updates.",
+        outOfScope: "",
+        acceptanceCriteria: [],
+        risks: [],
+        complexity: "large",
+        recommendation: "needs-clarification",
+        clarificationQuestions: ["What email address should replace bwimer@bu.edu?"],
+      },
+      result: parsePlanningResult(null, "Full freeform planning output.\n- Stale bio\n- Dead email"),
+    });
+
+    const rendered = renderPlanningSummary(context);
+
+    expect(rendered).toContain("Raw planning output:");
+    expect(rendered).toContain("Full freeform planning output.");
+    expect(rendered).not.toContain("Implementation steps:");
+    expect(rendered).not.toContain("Risks:\nNone recorded.");
   });
 });
