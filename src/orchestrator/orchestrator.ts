@@ -102,6 +102,29 @@ type GeneratePlanOptions = {
 };
 
 type VerificationRunTrigger = "manual" | "auto";
+type PlanningRoutingAgent =
+  | "intake"
+  | "goal-framing"
+  | "modeling"
+  | "test-design"
+  | "planning"
+  | "operator-feedback"
+  | "response-formatting"
+  | "epic-context";
+
+const PLANNING_AGENT_ROUTE_KEYS = {
+  intake: "intake",
+  "goal-framing": "goalFraming",
+  modeling: "modeling",
+  "test-design": "testDesign",
+  planning: "planning",
+  "operator-feedback": "operatorFeedback",
+  "response-formatting": "responseFormatting",
+  "epic-context": "epicContext",
+} as const satisfies Record<
+  PlanningRoutingAgent,
+  keyof NonNullable<NonNullable<ProjectConfig["claudePlanning"]>["routing"]>["agents"]
+>;
 
 const SAFE_COMMAND_PATTERNS = [
   /\bgo\s+test\b/i,
@@ -974,18 +997,39 @@ export class Orchestrator {
     }
     const previousContext = options.resumeExisting ? storedContext : null;
     const effectiveInstruction = previousContext?.originalInstruction ?? instruction;
-    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, planningConfig.model);
+    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(
+      workstream,
+      this.resolvePlanningAgentModel(project, "epic-context"),
+    );
     this.beginActiveOperation(workstreamId, "planning");
     try {
       const intake =
         previousContext?.intake ??
-        await this.runPlanningIntake(workstream, effectiveInstruction, planningConfig.model, epicContextAnalysis);
+        await this.runPlanningIntake(
+          workstream,
+          effectiveInstruction,
+          this.resolvePlanningAgentModel(project, "intake"),
+          epicContextAnalysis,
+        );
       const goalFrame =
         previousContext?.goalFrame ??
-        await this.runPlanningGoalFrame(workstream, effectiveInstruction, intake, planningConfig.model, epicContextAnalysis);
+        await this.runPlanningGoalFrame(
+          workstream,
+          effectiveInstruction,
+          intake,
+          this.resolvePlanningAgentModel(project, "goal-framing"),
+          epicContextAnalysis,
+        );
       const modeling =
         previousContext?.modeling ??
-        await this.runPlanningModeling(workstream, effectiveInstruction, intake, goalFrame, planningConfig.model, epicContextAnalysis);
+        await this.runPlanningModeling(
+          workstream,
+          effectiveInstruction,
+          intake,
+          goalFrame,
+          this.resolvePlanningAgentModel(project, "modeling"),
+          epicContextAnalysis,
+        );
       const testDesign =
         previousContext?.testDesign ??
         await this.runPlanningTestDesign(
@@ -994,7 +1038,7 @@ export class Orchestrator {
           intake,
           goalFrame,
           modeling,
-          planningConfig.model,
+          this.resolvePlanningAgentModel(project, "test-design"),
           epicContextAnalysis,
         );
       const agentResult = await runAgent(
@@ -1013,7 +1057,7 @@ export class Orchestrator {
         ),
         {
           threadId: previousContext?.planningThreadId ?? undefined,
-          model: planningConfig.model,
+          model: this.resolvePlanningAgentModel(project, "planning"),
           maxTurns: 6,
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
@@ -1040,7 +1084,7 @@ export class Orchestrator {
         workstream,
         effectiveInstruction,
         basePlanningContext,
-        planningConfig.model,
+        this.resolvePlanningAgentModel(project, "operator-feedback"),
         epicContextAnalysis,
       );
       const explanation = await this.runPlanningExplanation(
@@ -1048,7 +1092,7 @@ export class Orchestrator {
         effectiveInstruction,
         basePlanningContext,
         feedbackRequest,
-        planningConfig.model,
+        this.resolvePlanningAgentModel(project, "response-formatting"),
         epicContextAnalysis,
       );
       const planningContext = buildPlanningContextRecord({
@@ -1138,17 +1182,25 @@ export class Orchestrator {
       }
 
       const adapter = await this.getUtilityClaudeAdapter();
-      const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, planningConfig.model);
+      const epicContextAnalysis = await this.getAgentEpicContextAnalysis(
+        workstream,
+        this.resolvePlanningAgentModel(project, "epic-context"),
+      );
       const intake =
         existingContext.intake ??
-        await this.runPlanningIntake(workstream, existingContext.originalInstruction, planningConfig.model, epicContextAnalysis);
+        await this.runPlanningIntake(
+          workstream,
+          existingContext.originalInstruction,
+          this.resolvePlanningAgentModel(project, "intake"),
+          epicContextAnalysis,
+        );
       const goalFrame =
         existingContext.goalFrame ??
         await this.runPlanningGoalFrame(
           workstream,
           existingContext.originalInstruction,
           intake,
-          planningConfig.model,
+          this.resolvePlanningAgentModel(project, "goal-framing"),
           epicContextAnalysis,
         );
       const modeling =
@@ -1158,7 +1210,7 @@ export class Orchestrator {
           existingContext.originalInstruction,
           intake,
           goalFrame,
-          planningConfig.model,
+          this.resolvePlanningAgentModel(project, "modeling"),
           epicContextAnalysis,
         );
       const testDesign =
@@ -1169,7 +1221,7 @@ export class Orchestrator {
           intake,
           goalFrame,
           modeling,
-          planningConfig.model,
+          this.resolvePlanningAgentModel(project, "test-design"),
           epicContextAnalysis,
         );
       const agentResult = await runAgent(
@@ -1188,7 +1240,7 @@ export class Orchestrator {
         ),
         {
           threadId: existingContext.planningThreadId ?? undefined,
-          model: planningConfig.model,
+          model: this.resolvePlanningAgentModel(project, "planning"),
           maxTurns: 6,
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
@@ -1216,7 +1268,7 @@ export class Orchestrator {
         workstream,
         existingContext.originalInstruction,
         basePlanningContext,
-        planningConfig.model,
+        this.resolvePlanningAgentModel(project, "operator-feedback"),
         epicContextAnalysis,
       );
       const explanation = await this.runPlanningExplanation(
@@ -1224,7 +1276,7 @@ export class Orchestrator {
         existingContext.originalInstruction,
         basePlanningContext,
         feedbackRequest,
-        planningConfig.model,
+        this.resolvePlanningAgentModel(project, "response-formatting"),
         epicContextAnalysis,
       );
       const planningContext = buildPlanningContextRecord({
@@ -2365,6 +2417,17 @@ export class Orchestrator {
     this.utilityClaudeAdapter = createAdapter(configured);
     await this.utilityClaudeAdapter.initialize();
     return this.utilityClaudeAdapter;
+  }
+
+  private resolvePlanningAgentModel(project: ProjectConfig, agent: PlanningRoutingAgent): string | undefined {
+    const planningConfig = project.claudePlanning;
+    const routeKey = PLANNING_AGENT_ROUTE_KEYS[agent];
+    const profile = planningConfig?.routing?.agents[routeKey];
+    if (profile) {
+      return planningConfig?.routing?.profiles[profile];
+    }
+
+    return planningConfig?.model;
   }
 
   private async getAgentEpicContextAnalysis(

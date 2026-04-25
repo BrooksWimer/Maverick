@@ -110,6 +110,24 @@ function testDesignOutput(payload: Record<string, unknown>, summary: string): Tu
   return planningOutput(payload, summary);
 }
 
+const planningRouting = {
+  profiles: {
+    cheap: "haiku",
+    default: "sonnet",
+    deep: "sonnet",
+  },
+  agents: {
+    intake: "cheap",
+    goalFraming: "cheap",
+    modeling: "default",
+    testDesign: "cheap",
+    planning: "deep",
+    operatorFeedback: "cheap",
+    responseFormatting: "cheap",
+    epicContext: "default",
+  },
+} as const;
+
 describe("Orchestrator planning agent flow", () => {
   let tempDir: string;
   let repoPath: string;
@@ -163,6 +181,7 @@ describe("Orchestrator planning agent flow", () => {
   });
 
   it("stores planning context, resumes with answers, and dispatches the final prompt", async () => {
+    config.projects[0]!.claudePlanning!.routing = planningRouting;
     orchestrator = new Orchestrator(config);
     await orchestrator.initialize();
     const instruction = "Implement the corrected decision-gated planning migration.";
@@ -383,6 +402,15 @@ describe("Orchestrator planning agent flow", () => {
 
     expect(dispatchAdapter.turnRequests[0]?.instruction).toBe(resumedPlan.finalExecutionPrompt);
     expect(utilityAdapter.turnRequests).toHaveLength(9);
+    expect(utilityAdapter.turnRequests[0]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[1]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[2]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[3]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[4]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[5]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[6]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[7]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[8]?.model).toBe("haiku");
     expect(utilityAdapter.turnRequests[4]?.instruction).toContain("Structured Intake");
     expect(utilityAdapter.turnRequests[4]?.instruction).toContain("Goal Frame");
     expect(utilityAdapter.turnRequests[4]?.instruction).toContain("System Model");
@@ -594,5 +622,6 @@ describe("Orchestrator planning agent flow", () => {
     expect(utilityAdapter.turnRequests[10]?.instruction).not.toContain("Resume the stored planning flow");
     expect(utilityAdapter.turnRequests[12]?.threadId).toBe(utilityAdapter.turnRequests[10]?.threadId);
     expect(utilityAdapter.turnRequests[12]?.instruction).toContain("Resume the stored planning flow");
+    expect(new Set(utilityAdapter.turnRequests.map((request) => request.model))).toEqual(new Set(["sonnet"]));
   });
 });

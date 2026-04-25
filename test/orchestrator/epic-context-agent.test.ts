@@ -83,6 +83,24 @@ function agentOutput(payload: Record<string, unknown>, summary: string): TurnRes
   };
 }
 
+const planningRouting = {
+  profiles: {
+    cheap: "haiku",
+    default: "sonnet",
+    deep: "sonnet",
+  },
+  agents: {
+    intake: "cheap",
+    goalFraming: "cheap",
+    modeling: "default",
+    testDesign: "cheap",
+    planning: "deep",
+    operatorFeedback: "cheap",
+    responseFormatting: "cheap",
+    epicContext: "default",
+  },
+} as const;
+
 describe("Orchestrator epic-context agent integration", () => {
   let tempDir: string;
   let repoPath: string;
@@ -145,6 +163,7 @@ describe("Orchestrator epic-context agent integration", () => {
   });
 
   it("feeds dynamic epic context into the planning agent", async () => {
+    config.projects[0]!.claudePlanning!.routing = planningRouting;
     orchestrator = new Orchestrator(config);
     await orchestrator.initialize();
 
@@ -250,6 +269,12 @@ describe("Orchestrator epic-context agent integration", () => {
     );
 
     expect(utilityAdapter.turnRequests).toHaveLength(7);
+    expect(utilityAdapter.turnRequests[0]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[1]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[3]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[4]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[5]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[6]?.model).toBe("haiku");
     expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Summarize the current durable and operational context");
     expect(utilityAdapter.turnRequests[5]?.instruction).toContain("Epic Context Analysis");
     expect(utilityAdapter.turnRequests[5]?.instruction).toContain("Do not overfit to Xfinity-only selectors.");

@@ -62,6 +62,23 @@ describe("control-plane.shared.json", () => {
     const maverick = config.projects.find((project) => project.id === "maverick");
     expect(maverick).toBeDefined();
     expect(maverick?.claudePlanning?.enabled).toBe(true);
+    expect(maverick?.claudePlanning?.routing).toEqual(expect.objectContaining({
+      profiles: expect.objectContaining({
+        cheap: "haiku",
+        default: "sonnet",
+        deep: "sonnet",
+      }),
+      agents: expect.objectContaining({
+        intake: "cheap",
+        goalFraming: "cheap",
+        modeling: "default",
+        testDesign: "cheap",
+        planning: "deep",
+        operatorFeedback: "cheap",
+        responseFormatting: "cheap",
+        epicContext: "default",
+      }),
+    }));
     expect(maverick?.claudeVerification).toEqual(expect.objectContaining({
       enabled: true,
       autoAfterTurn: true,

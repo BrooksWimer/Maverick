@@ -52,7 +52,24 @@
       "claudePlanning": {
         "enabled": true,
         "autoOnPlanningState": false,
-        "model": "sonnet"
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
       },
       "claudeVerification": {
         "enabled": true,
@@ -111,7 +128,24 @@
       "claudePlanning": {
         "enabled": true,
         "autoOnPlanningState": false,
-        "model": "sonnet"
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
       },
       "metadata": {
         "description": "First onboarded project for orchestrator validation"
@@ -129,7 +163,24 @@
       "claudePlanning": {
         "enabled": true,
         "autoOnPlanningState": false,
-        "model": "sonnet"
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
       },
       "remoteHosts": [
         {

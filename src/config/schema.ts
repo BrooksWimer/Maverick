@@ -125,6 +125,41 @@ export const EpicBranchSchema = z.object({
   ),
 });
 
+export const PlanningModelProfileNameSchema = z.enum(["cheap", "default", "deep"]);
+
+export const PlanningAgentRoutingSchema = z.object({
+  intake: PlanningModelProfileNameSchema.default("cheap"),
+  goalFraming: PlanningModelProfileNameSchema.default("cheap"),
+  modeling: PlanningModelProfileNameSchema.default("default"),
+  testDesign: PlanningModelProfileNameSchema.default("cheap"),
+  planning: PlanningModelProfileNameSchema.default("deep"),
+  operatorFeedback: PlanningModelProfileNameSchema.default("cheap"),
+  responseFormatting: PlanningModelProfileNameSchema.default("cheap"),
+  epicContext: PlanningModelProfileNameSchema.default("default"),
+}).default({
+  intake: "cheap",
+  goalFraming: "cheap",
+  modeling: "default",
+  testDesign: "cheap",
+  planning: "deep",
+  operatorFeedback: "cheap",
+  responseFormatting: "cheap",
+  epicContext: "default",
+});
+
+export const PlanningModelRoutingConfigSchema = z.object({
+  profiles: z.object({
+    cheap: z.string().default("haiku"),
+    default: z.string().default("sonnet"),
+    deep: z.string().default("sonnet"),
+  }).default({
+    cheap: "haiku",
+    default: "sonnet",
+    deep: "sonnet",
+  }),
+  agents: PlanningAgentRoutingSchema,
+});
+
 export const ProjectSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   name: z.string(),
@@ -159,6 +194,7 @@ export const ProjectSchema = z.object({
     enabled: z.boolean().default(false),
     autoOnPlanningState: z.boolean().default(false),
     model: z.string().optional(),
+    routing: PlanningModelRoutingConfigSchema.optional(),
   }).optional(),
   metadata: z.record(z.string()).optional().describe("Arbitrary key-value pairs for project-specific config"),
 });
@@ -459,6 +495,9 @@ export type AssistantCalendarConfig = z.infer<typeof AssistantCalendarConfigSche
 export type AssistantReminderConfig = z.infer<typeof AssistantReminderConfigSchema>;
 export type AssistantModelProfileName = z.infer<typeof AssistantModelProfileNameSchema>;
 export type AssistantModelRoutingConfig = z.infer<typeof AssistantModelRoutingConfigSchema>;
+export type PlanningModelProfileName = z.infer<typeof PlanningModelProfileNameSchema>;
+export type PlanningAgentRoutingConfig = z.infer<typeof PlanningAgentRoutingSchema>;
+export type PlanningModelRoutingConfig = z.infer<typeof PlanningModelRoutingConfigSchema>;
 export type AssistantDriveConfig = z.infer<typeof AssistantDriveConfigSchema>;
 export type DailyBriefConfig = z.infer<typeof DailyBriefConfigSchema>;
 export type BriefConfig = z.infer<typeof BriefConfigSchema>;
