@@ -125,6 +125,38 @@ describe("buildPlanNotificationMessages", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]?.content).toContain("Planning Questions - Portfolio Refresh");
   });
+
+  it("adds guided answer buttons and visible question ids for pending planning questions", () => {
+    const messages = buildPlanNotificationMessages({
+      workstreamId: "5cd5405d-c8b1-424b-9dee-73e61e51efef",
+      workstreamName: "Portfolio Refresh",
+      instruction: "Update the portfolio and resume.",
+      renderedPlan: "## Full Plan\n\n- Waiting on answers",
+      formattedMarkdown: "## Quick Take\n\n- Waiting on answers",
+      finalExecutionPrompt: null,
+      needsAnswers: true,
+      questions: [
+        {
+          id: "open-question-1",
+          question: "What is the current employer?",
+          whyItMatters: "The bio needs current employment status.",
+          options: [],
+          kind: "required-answer",
+        },
+        {
+          id: "open-question-2",
+          question: "What email address should replace the old one?",
+          whyItMatters: "The contact section needs a current address.",
+          options: [],
+          kind: "required-answer",
+        },
+      ],
+    });
+
+    expect(messages[0]?.content).toContain("`open-question-1`");
+    expect(messages[0]?.content).toContain("Use the buttons below");
+    expect(messages[0]?.components).toHaveLength(1);
+  });
 });
 
 describe("parsePlanningAnswerInput", () => {

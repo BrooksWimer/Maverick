@@ -12,9 +12,13 @@ import {
   Message,
   MessageCreateOptions,
   MessageFlags,
+  ModalBuilder,
+  ModalSubmitInteraction,
   REST,
   Routes,
   SlashCommandBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   type RESTPostAPIApplicationCommandsJSONBody,
   type TextBasedChannel,
 } from "discord.js";
@@ -30,6 +34,7 @@ import type { AssistantAttachment } from "../assistant/types.js";
 import { buildAgendaSummary, renderAgendaMarkdown, renderInboxMarkdown, renderSearchMarkdown } from "../assistant/render.js";
 import { renderWorkstreamStatusSnapshot } from "../orchestrator/status.js";
 import { renderMarkdownDocument } from "../markdown/presentation.js";
+import type { PendingPlanningDecision } from "../agents/types.js";
 
 const log = createLogger("discord");
 
@@ -40,6 +45,9 @@ type DiscordBotOptions = {
 };
 
 const APPROVAL_PREFIX = "approval";
+const PLANNING_ANSWER_PREFIX = "planning-answer";
+const PLANNING_ANSWER_MODAL_PREFIX = "planning-answer-modal";
+const PLANNING_QUESTIONS_PER_MODAL = 5;
 
 type SendableChannel = TextBasedChannel & {
   send: (options: string | MessageCreateOptions) => Promise<unknown>;
@@ -156,6 +164,49 @@ function mergeRenderedReply(headerLines: string[], body: string): string {
   return [...trimmedHeaders, trimmedBody].filter(Boolean).join("\n\n");
 }
 
+function renderPlanningQuestionLines(questions: PendingPlanningDecision[]): string[] {
+  if (questions.length === 0) {
+    return [];
+  }
+
+  return questions.flatMap((question, index) => [
+    `${index + 1}. \`${question.id}\` - ${question.question}`,
+    `Why it matters: ${question.whyItMatters}`,
+    question.options && question.options.length > 0 ? `Options: ${question.options.join(" | ")}` : "",
+    "",
+  ]).filter((line) => line.length > 0);
+}
+
+function planningQuestionPageCount(questions: PendingPlanningDecision[]): number {
+  return Math.ceil(questions.length / PLANNING_QUESTIONS_PER_MODAL);
+}
+
+function buildPlanningAnswerButtonRows(
+  workstreamId: string,
+  questions: PendingPlanningDecision[],
+): ActionRowBuilder<ButtonBuilder>[] {
+  const pageCount = planningQuestionPageCount(questions);
+  if (pageCount === 0) {
+    return [];
+  }
+
+  const buttons = Array.from({ length: pageCount }, (_, pageIndex) => {
+    const start = pageIndex * PLANNING_QUESTIONS_PER_MODAL + 1;
+    const end = Math.min(start + PLANNING_QUESTIONS_PER_MODAL - 1, questions.length);
+    return new ButtonBuilder()
+      .setCustomId(`${PLANNING_ANSWER_PREFIX}:page:${workstreamId}:${pageIndex}`)
+      .setLabel(pageCount === 1 ? "Answer Questions" : `Answer ${start}-${end}`)
+      .setStyle(ButtonStyle.Primary);
+  });
+
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+  for (let index = 0; index < buttons.length; index += 5) {
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(index, index + 5)));
+  }
+
+  return rows;
+}
+
 export function buildAttachedTextReply(params: {
   headerLines: string[];
   body: string;
@@ -176,19 +227,31 @@ function buildPlanningQuestionsNotificationMessage(params: {
   workstreamName: string;
   instruction: string;
   renderedPlan: string;
+  workstreamId?: string;
+  questions?: PendingPlanningDecision[];
 }): MessageCreateOptions {
+  const questions = params.questions ?? [];
+  const components =
+    params.workstreamId && questions.length > 0
+      ? buildPlanningAnswerButtonRows(params.workstreamId, questions)
+      : undefined;
   const fullBody = renderMarkdownDocument({
     title: `Planning Questions - ${params.workstreamName}`,
     summary: ["Planning is waiting on operator input."],
     facts: [{ label: "Instruction", value: truncate(params.instruction, 500) }],
     callouts: [{
-      label: "Reply Format",
-      body: "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
+      label: questions.length > 0 ? "Answer Flow" : "Reply Format",
+      body: questions.length > 0
+        ? "Use the buttons below for guided input, or respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`."
+        : "Respond with `/workstream answer-plan` using one line per answer: `question-id: your answer`.",
       tone: "warning",
     }],
-    sections: [{ title: "Details", lines: params.renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
+    sections: [
+      questions.length > 0 ? { title: "Questions", lines: renderPlanningQuestionLines(questions) } : null,
+      { title: "Details", lines: params.renderedPlan.split(/\r?\n/).map((line) => line || " ") },
+    ].filter((section): section is { title: string; lines: string[] } => section !== null),
   });
-  return { content: fullBody };
+  return { content: fullBody, components };
 }
 
 function buildPlanGeneratedNotificationMessage(params: {
@@ -235,12 +298,14 @@ function buildFormattedPlanningSummaryMessage(params: {
 }
 
 export function buildPlanNotificationMessages(params: {
+  workstreamId?: string;
   workstreamName: string;
   instruction: string;
   renderedPlan: string;
   formattedMarkdown: string;
   finalExecutionPrompt: string | null;
   needsAnswers: boolean;
+  questions?: PendingPlanningDecision[];
 }): MessageCreateOptions[] {
   const messages: MessageCreateOptions[] = [
     params.needsAnswers
@@ -248,6 +313,8 @@ export function buildPlanNotificationMessages(params: {
         workstreamName: params.workstreamName,
         instruction: params.instruction,
         renderedPlan: params.renderedPlan,
+        workstreamId: params.workstreamId,
+        questions: params.questions,
       })
       : buildPlanGeneratedNotificationMessage({
         workstreamName: params.workstreamName,
@@ -778,6 +845,7 @@ function subcommandBuilder(config: OrchestratorConfig) {
 export class DiscordBot {
   private readonly client: Client;
   private readonly commands: RESTPostAPIApplicationCommandsJSONBody[];
+  private readonly planningAnswerDrafts = new Map<string, Record<string, string>>();
 
   constructor(
     private readonly orchestrator: Orchestrator,
@@ -1043,12 +1111,14 @@ export class DiscordBot {
         }
 
         for (const message of buildPlanNotificationMessages({
+          workstreamId: workstream.id,
           workstreamName: workstream.name,
           instruction: event.instruction,
           renderedPlan: event.renderedPlan,
           formattedMarkdown: event.formattedMarkdown,
           finalExecutionPrompt: null,
           needsAnswers: true,
+          questions: event.questions,
         })) {
           await this.safeSend(channel, message);
         }
@@ -1073,6 +1143,7 @@ export class DiscordBot {
         }
 
         for (const message of buildPlanNotificationMessages({
+          workstreamId: workstream.id,
           workstreamName: workstream.name,
           instruction: event.instruction,
           renderedPlan: event.renderedPlan,
@@ -1118,6 +1189,11 @@ export class DiscordBot {
 
       if (interaction.isButton()) {
         await this.handleButton(interaction);
+        return;
+      }
+
+      if (interaction.isModalSubmit()) {
+        await this.handleModalSubmit(interaction);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1928,12 +2004,14 @@ export class DiscordBot {
       workstream.name;
 
     for (const message of buildPlanNotificationMessages({
+      workstreamId: workstream.id,
       workstreamName: workstream.name,
       instruction,
       renderedPlan,
       formattedMarkdown,
       finalExecutionPrompt: planningContext.finalExecutionPrompt,
       needsAnswers: planningContext.pendingQuestions.length > 0,
+      questions: planningContext.pendingQuestions,
     })) {
       await this.safeSend(channel, message);
     }
@@ -2046,6 +2124,11 @@ export class DiscordBot {
   }
 
   private async handleButton(interaction: ButtonInteraction): Promise<void> {
+    if (interaction.customId.startsWith(`${PLANNING_ANSWER_PREFIX}:`)) {
+      await this.handlePlanningAnswerButton(interaction);
+      return;
+    }
+
     const [prefix, action, approvalId] = interaction.customId.split(":");
     if (prefix !== APPROVAL_PREFIX || !approvalId) {
       return;
@@ -2058,6 +2141,177 @@ export class DiscordBot {
     await interaction.update({
       content: `${originalContent}\n\nResolved by <@${interaction.user.id}>: \`${approved ? "approved" : "denied"}\``,
       components: [],
+    });
+  }
+
+  private async handleModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (interaction.customId.startsWith(`${PLANNING_ANSWER_MODAL_PREFIX}:`)) {
+      await this.handlePlanningAnswerModalSubmit(interaction);
+    }
+  }
+
+  private planningAnswerDraftKey(workstreamId: string, userId: string): string {
+    return `${workstreamId}:${userId}`;
+  }
+
+  private pendingPlanningQuestions(workstream: WorkstreamRow): PendingPlanningDecision[] {
+    return this.orchestrator.getPlanningContext(workstream.id)?.pendingQuestions ?? [];
+  }
+
+  private buildPlanningAnswerModal(
+    workstream: WorkstreamRow,
+    userId: string,
+    pageIndex: number,
+    questions: PendingPlanningDecision[],
+  ): ModalBuilder {
+    const pageCount = planningQuestionPageCount(questions);
+    const startIndex = pageIndex * PLANNING_QUESTIONS_PER_MODAL;
+    const pageQuestions = questions.slice(startIndex, startIndex + PLANNING_QUESTIONS_PER_MODAL);
+    const draft = this.planningAnswerDrafts.get(this.planningAnswerDraftKey(workstream.id, userId)) ?? {};
+    const contextAnswers = this.orchestrator.getPlanningContext(workstream.id)?.answers ?? {};
+    const modal = new ModalBuilder()
+      .setCustomId(`${PLANNING_ANSWER_MODAL_PREFIX}:${workstream.id}:${pageIndex}`)
+      .setTitle(pageCount === 1 ? "Planning Answers" : `Planning Answers ${pageIndex + 1}/${pageCount}`);
+
+    const rows = pageQuestions.map((question, localIndex) => {
+      const displayIndex = startIndex + localIndex + 1;
+      const input = new TextInputBuilder()
+        .setCustomId(`q-${displayIndex - 1}`)
+        .setLabel(truncate(`Q${displayIndex}: ${question.question}`, 45))
+        .setPlaceholder(truncate(question.question, 100))
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true);
+      const existingAnswer = draft[question.id] ?? contextAnswers[question.id]?.answer;
+      if (existingAnswer) {
+        input.setValue(truncate(existingAnswer, 4000));
+      }
+      return new ActionRowBuilder<TextInputBuilder>().addComponents(input);
+    });
+
+    modal.addComponents(...rows);
+    return modal;
+  }
+
+  private async handlePlanningAnswerButton(interaction: ButtonInteraction): Promise<void> {
+    const [, action, workstreamId, pageRaw] = interaction.customId.split(":");
+    if (action !== "page" || !workstreamId) {
+      await interaction.reply({
+        content: "That planning answer action is not recognized.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const workstream = this.orchestrator.getWorkstream(workstreamId);
+    if (!workstream) {
+      await interaction.reply({
+        content: `Workstream not found: \`${workstreamId}\`.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const questions = this.pendingPlanningQuestions(workstream);
+    if (questions.length === 0) {
+      await interaction.reply({
+        content: `Workstream \`${workstream.name}\` has no pending planning questions right now.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const pageIndex = Number.parseInt(pageRaw ?? "0", 10);
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= planningQuestionPageCount(questions)) {
+      await interaction.reply({
+        content: "That planning answer page is no longer available.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.showModal(this.buildPlanningAnswerModal(workstream, interaction.user.id, pageIndex, questions));
+  }
+
+  private async handlePlanningAnswerModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    const [, workstreamId, pageRaw] = interaction.customId.split(":");
+    const workstream = workstreamId ? this.orchestrator.getWorkstream(workstreamId) : null;
+    if (!workstream) {
+      await interaction.reply({
+        content: `Workstream not found: \`${workstreamId ?? "unknown"}\`.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const questions = this.pendingPlanningQuestions(workstream);
+    if (questions.length === 0) {
+      await interaction.reply({
+        content: `Workstream \`${workstream.name}\` has no pending planning questions right now.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const pageIndex = Number.parseInt(pageRaw ?? "0", 10);
+    const startIndex = pageIndex * PLANNING_QUESTIONS_PER_MODAL;
+    const pageQuestions = questions.slice(startIndex, startIndex + PLANNING_QUESTIONS_PER_MODAL);
+    const draftKey = this.planningAnswerDraftKey(workstream.id, interaction.user.id);
+    const draft = { ...(this.planningAnswerDrafts.get(draftKey) ?? {}) };
+
+    for (let localIndex = 0; localIndex < pageQuestions.length; localIndex += 1) {
+      const question = pageQuestions[localIndex];
+      if (!question) {
+        continue;
+      }
+      const fieldId = `q-${startIndex + localIndex}`;
+      const value = interaction.fields.getTextInputValue(fieldId).trim();
+      if (value) {
+        draft[question.id] = value;
+      }
+    }
+
+    this.planningAnswerDrafts.set(draftKey, draft);
+    const unanswered = questions.filter((question) => !draft[question.id]?.trim());
+    if (unanswered.length > 0) {
+      const rows = buildPlanningAnswerButtonRows(workstream.id, questions);
+      const recordedOnPage = pageQuestions.filter((question) => draft[question.id]?.trim()).length;
+      await interaction.reply({
+        content: [
+          `Recorded ${recordedOnPage} answer(s) for \`${workstream.name}\`.`,
+          `${unanswered.length} planning question${unanswered.length === 1 ? "" : "s"} still need an answer.`,
+          `Remaining: ${unanswered.map((question) => `\`${question.id}\``).join(", ")}`,
+          "Use the button(s) below to keep going.",
+        ].join("\n"),
+        components: rows,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    this.planningAnswerDrafts.delete(draftKey);
+    await interaction.reply({
+      content: [
+        `Recorded all ${questions.length} planning answer${questions.length === 1 ? "" : "s"} for \`${workstream.name}\`.`,
+        "Maverick is resuming planning in the background.",
+      ].join("\n"),
+      flags: MessageFlags.Ephemeral,
+    });
+
+    const requestedChannelId = interaction.channelId ?? workstream.discord_channel_id ?? "";
+    this.runBackgroundTask("planning.answer-modal", async () => {
+      const channel = requestedChannelId
+        ? await this.resolveAsyncCommandChannel(workstream, requestedChannelId)
+        : await this.resolveNotificationChannel(workstream, "notifications");
+
+      if (channel) {
+        await this.safeSend(channel, this.buildAsyncCommandStartedMessage(
+          workstream,
+          "answer-plan",
+          "Merging planning answers and resuming Claude planning in the background.",
+        ));
+      }
+
+      await this.orchestrator.provideDecisionAnswers(workstream.id, draft, interaction.user.id);
     });
   }
 
@@ -2404,12 +2658,14 @@ export class DiscordBot {
         return;
       }
 
-      if (typeof options.content === "string" && !options.files && !options.embeds && !options.components) {
+      if (typeof options.content === "string" && !options.files && !options.embeds) {
         const chunks = splitDiscordMessageContent(options.content);
-        for (const chunk of chunks) {
+        for (const [index, chunk] of chunks.entries()) {
+          const isLastChunk = index === chunks.length - 1;
           await channel.send({
             ...options,
             content: chunk,
+            components: isLastChunk ? options.components : [],
           });
         }
         return;

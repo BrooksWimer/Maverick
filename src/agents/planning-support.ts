@@ -118,9 +118,25 @@ function synthesizePendingQuestionsFromIntake(intake: IntakeResult | null): Pend
   }));
 }
 
+function synthesizePendingQuestionsFromModeling(modeling: ModelingResult | null): PendingPlanningDecision[] {
+  const openQuestions = modeling?.openQuestions ?? [];
+  if (openQuestions.length === 0) {
+    return [];
+  }
+
+  return openQuestions.map((question, index) => ({
+    id: `open-question-${index + 1}`,
+    question,
+    whyItMatters: "The system model marked this as unresolved before Maverick can dispatch safely.",
+    options: [],
+    kind: "required-answer",
+  }));
+}
+
 function buildPendingQuestions(params: {
   result: PlanningResult;
   intake?: IntakeResult | null;
+  modeling?: ModelingResult | null;
   feedbackRequest?: OperatorFeedbackResult | null;
 }): PendingPlanningDecision[] {
   const structuredQuestions = collectPendingPlanningQuestions(params.result);
@@ -133,8 +149,17 @@ function buildPendingQuestions(params: {
   }
 
   const feedbackQuestions = synthesizePendingQuestionsFromFeedback(params.feedbackRequest ?? null);
+  const modelingQuestions = synthesizePendingQuestionsFromModeling(params.modeling ?? null);
+  if (modelingQuestions.length > feedbackQuestions.length) {
+    return modelingQuestions;
+  }
+
   if (feedbackQuestions.length > 0) {
     return feedbackQuestions;
+  }
+
+  if (modelingQuestions.length > 0) {
+    return modelingQuestions;
   }
 
   return synthesizePendingQuestionsFromIntake(params.intake ?? null);
@@ -431,7 +456,7 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
     const modeling = normalizeModeling(parsed.modeling);
     const testDesign = normalizeTestDesign(parsed.testDesign);
     let feedbackRequest = normalizeFeedbackRequest(parsed.feedbackRequest);
-    const pendingQuestions = Array.isArray(parsed.pendingQuestions) && parsed.pendingQuestions.length > 0
+    const parsedPendingQuestions = Array.isArray(parsed.pendingQuestions) && parsed.pendingQuestions.length > 0
       ? parsed.pendingQuestions
           .map((entry, index) => {
             const normalized = normalizeDecision(entry, "pending-question", index);
@@ -443,7 +468,14 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
             return { ...normalized, kind } satisfies PendingPlanningDecision;
           })
           .filter((entry): entry is PendingPlanningDecision => entry !== null)
-      : buildPendingQuestions({ result, intake, feedbackRequest });
+      : [];
+    const synthesizedPendingQuestions = buildPendingQuestions({ result, intake, modeling, feedbackRequest });
+    const pendingQuestions =
+      isFallbackPlanningResult(result) && synthesizedPendingQuestions.length > parsedPendingQuestions.length
+        ? synthesizedPendingQuestions
+        : parsedPendingQuestions.length > 0
+          ? parsedPendingQuestions
+          : synthesizedPendingQuestions;
 
     if (!feedbackRequest && pendingQuestions.length > 0) {
       feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
@@ -515,6 +547,7 @@ export function buildPlanningContextRecord(params: {
   const pendingQuestions = buildPendingQuestions({
     result: params.result,
     intake: params.intake ?? params.previous?.intake ?? null,
+    modeling: params.modeling ?? params.previous?.modeling ?? null,
     feedbackRequest: params.feedbackRequest ?? params.previous?.feedbackRequest ?? null,
   }).filter((question) => {
     const existingAnswer = answers[question.id];

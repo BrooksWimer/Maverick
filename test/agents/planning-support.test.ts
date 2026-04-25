@@ -312,6 +312,45 @@ describe("planning context records", () => {
     expect(context.feedbackRequest?.suggestedReplyFormat).toContain("clarification-1:");
   });
 
+  it("prefers granular system-model open questions when fallback planning has broad intake questions", () => {
+    const context = buildPlanningContextRecord({
+      originalInstruction: "Audit the portfolio and prepare update questions.",
+      rawAgentOutput: "Unstructured portfolio planning summary.",
+      intake: {
+        request: "Audit the portfolio and prepare update questions.",
+        scope: "Audit first, then plan updates.",
+        outOfScope: "",
+        acceptanceCriteria: [],
+        risks: [],
+        complexity: "large",
+        recommendation: "needs-clarification",
+        clarificationQuestions: [
+          "What new job and project content should be added?",
+          "Should quick wins be bundled or committed separately?",
+        ],
+      },
+      modeling: {
+        systemSummary: "Portfolio site audit.",
+        mermaid: "",
+        keyEntities: [],
+        criticalFlows: [],
+        openQuestions: [
+          "What is the current employer, title, and start date?",
+          "What email address should replace the stale contact email?",
+          "What should happen with the non-functional contact form?",
+        ],
+      },
+      result: parsePlanningResult(null, "Unstructured portfolio planning summary."),
+    });
+
+    expect(context.pendingQuestions.map((question) => question.id)).toEqual([
+      "open-question-1",
+      "open-question-2",
+      "open-question-3",
+    ]);
+    expect(context.feedbackRequest?.suggestedReplyFormat).toContain("open-question-1:");
+  });
+
   it("re-hydrates synthesized pending questions when stored context had none persisted", () => {
     const stored = JSON.stringify({
       schemaVersion: 4,
