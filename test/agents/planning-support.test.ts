@@ -62,6 +62,48 @@ describe("parsePlanningResult", () => {
     expect(result.recommendedNextSlice).toContain("Review the raw planning output");
     expect(result.requiredAnswers).toEqual([]);
   });
+
+  it("extracts structured planning JSON from a fenced raw Claude response", () => {
+    const result = parsePlanningResult(
+      null,
+      [
+        "The plan is ready.",
+        "```json",
+        JSON.stringify({
+          currentStateSummary: "Portfolio plan is almost ready.",
+          recommendedNextSlice: "Answer the two remaining decisions.",
+          requiredAnswers: [
+            {
+              id: "syncsonic-intent",
+              question: "Update the existing SyncSonic page or create a new one?",
+              whyItMatters: "The page shape changes.",
+            },
+          ],
+          importantDecisions: [
+            {
+              id: "repo-read-access",
+              question: "Grant read access to related repos?",
+              whyItMatters: "Project copy needs repo research.",
+            },
+          ],
+          draftExecutionPrompt: "Update the portfolio.",
+          finalExecutionPrompt: "",
+          remainingUnknowns: [],
+          steps: [],
+          risks: [],
+          dependencies: [],
+          estimatedTurns: 2,
+          testStrategy: "Open the static site.",
+          rollbackPlan: "git revert HEAD",
+        }),
+        "```",
+      ].join("\n"),
+    );
+
+    expect(result.currentStateSummary).toContain("almost ready");
+    expect(result.requiredAnswers[0]?.id).toBe("syncsonic-intent");
+    expect(result.importantDecisions[0]?.id).toBe("repo-read-access");
+  });
 });
 
 describe("planning context records", () => {
@@ -523,6 +565,76 @@ describe("planning context records", () => {
       "open-question-1",
       "open-question-2",
     ]);
+  });
+
+  it("re-hydrates structured questions from stored raw JSON and filters already answered questions", () => {
+    const rawAgentOutput = [
+      "Plan follows.",
+      "```json",
+      JSON.stringify({
+        currentStateSummary: "Portfolio plan is almost ready.",
+        recommendedNextSlice: "Answer remaining decisions.",
+        requiredAnswers: [
+          {
+            id: "syncsonic-intent",
+            question: "Update the existing SyncSonic page or create a new one?",
+            whyItMatters: "The page shape changes.",
+          },
+        ],
+        importantDecisions: [
+          {
+            id: "repo-read-access",
+            question: "Grant read access to related repos?",
+            whyItMatters: "Project copy needs repo research.",
+          },
+        ],
+        draftExecutionPrompt: "Update the portfolio.",
+        finalExecutionPrompt: "",
+        remainingUnknowns: [],
+        steps: [],
+        risks: [],
+        dependencies: [],
+        estimatedTurns: 2,
+        testStrategy: "Open the static site.",
+        rollbackPlan: "git revert HEAD",
+      }),
+      "```",
+    ].join("\n");
+    const stored = JSON.stringify({
+      schemaVersion: 4,
+      originalInstruction: "Update the portfolio.",
+      rawAgentOutput,
+      result: {
+        currentStateSummary: "Planning returned unstructured output. Review the stored raw plan text before dispatch.",
+        recommendedNextSlice: "Review the raw planning output and answer any pending planning questions before dispatch.",
+        requiredAnswers: [],
+        importantDecisions: [],
+        draftExecutionPrompt: "",
+        finalExecutionPrompt: "",
+        remainingUnknowns: [],
+        steps: [],
+        risks: [],
+        dependencies: [],
+        estimatedTurns: 1,
+        testStrategy: "",
+        rollbackPlan: "",
+      },
+      pendingQuestions: [],
+      answers: {
+        "syncsonic-intent": {
+          questionId: "syncsonic-intent",
+          answer: "Update the existing page.",
+          answeredAt: "2026-04-26T00:00:00.000Z",
+          answeredBy: "operator",
+        },
+      },
+    });
+
+    const parsed = parsePlanningContextRecord(stored);
+
+    expect(parsed?.result.currentStateSummary).toContain("almost ready");
+    expect(parsed?.pendingQuestions.map((question) => question.id)).toEqual(["repo-read-access"]);
+    expect(parsed?.feedbackRequest?.questions.map((question) => question.questionId)).toEqual(["repo-read-access"]);
   });
 
   it("includes the full raw planning output and skips empty structured sections on fallback", () => {

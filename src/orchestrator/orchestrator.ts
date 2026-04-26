@@ -10,7 +10,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   BriefCollector,
@@ -265,6 +265,13 @@ function collectContextStrings(value: unknown): string[] {
   }
 
   return [];
+}
+
+function splitMetadataList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(/[,;|\n]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 type ActiveOperationKind = ActiveOperationSnapshot["kind"];
@@ -2430,6 +2437,49 @@ export class Orchestrator {
     return planningConfig?.model;
   }
 
+  private resolveRelatedPlanningProjects(project: ProjectConfig): ProjectConfig[] {
+    const relatedIds = new Set([
+      ...splitMetadataList(project.metadata?.featured_projects),
+      ...splitMetadataList(project.metadata?.related_projects),
+      ...splitMetadataList(project.metadata?.planning_related_projects),
+    ]);
+
+    relatedIds.delete(project.id);
+    return [...relatedIds]
+      .map((projectId) => this.config.projects.find((candidate) => candidate.id === projectId))
+      .filter((candidate): candidate is ProjectConfig => Boolean(candidate));
+  }
+
+  private buildPlanningAddDirs(project: ProjectConfig, cwd: string): string[] {
+    const candidates = [
+      cwd,
+      project.repoPath,
+      ...this.resolveRelatedPlanningProjects(project).map((relatedProject) => relatedProject.repoPath),
+      ...splitMetadataList(project.metadata?.planning_extra_dirs),
+    ];
+
+    return [...new Set(candidates.map((candidate) => resolve(candidate)))]
+      .filter((candidate) => existsSync(candidate));
+  }
+
+  private renderRelatedPlanningProjects(project: ProjectConfig): string {
+    const relatedProjects = this.resolveRelatedPlanningProjects(project);
+    if (relatedProjects.length === 0 && !project.metadata) {
+      return "No related planning projects configured.";
+    }
+
+    const lines = [
+      `Current project: ${project.id} (${project.name}) at ${project.repoPath}`,
+      project.metadata ? `Current project metadata: ${JSON.stringify(project.metadata)}` : null,
+      ...relatedProjects.map((relatedProject) => [
+        `Related project: ${relatedProject.id} (${relatedProject.name}) at ${relatedProject.repoPath}`,
+        relatedProject.metadata ? `Metadata: ${JSON.stringify(relatedProject.metadata)}` : null,
+      ].filter((line): line is string => Boolean(line)).join("\n")),
+    ];
+
+    return lines.filter((line): line is string => Boolean(line)).join("\n\n");
+  }
+
   private async getAgentEpicContextAnalysis(
     workstream: WorkstreamRow,
     model?: string,
@@ -2471,7 +2521,7 @@ export class Orchestrator {
         workstreamState: workstream.state,
         instruction: `Summarize the current durable and operational context for epic ${workstream.epic_id}.`,
         cwd,
-        addDirs: [cwd],
+        addDirs: this.buildPlanningAddDirs(project, cwd),
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
@@ -2521,7 +2571,7 @@ export class Orchestrator {
           `Operator instruction: ${instruction}`,
         ].join("\n"),
         cwd,
-        addDirs: [cwd],
+        addDirs: this.buildPlanningAddDirs(project, cwd),
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
@@ -2530,6 +2580,7 @@ export class Orchestrator {
           "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
           "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
         },
       },
       {
@@ -2572,7 +2623,7 @@ export class Orchestrator {
           `Operator instruction: ${instruction}`,
         ].join("\n"),
         cwd,
-        addDirs: [cwd],
+        addDirs: this.buildPlanningAddDirs(project, cwd),
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
@@ -2580,6 +2631,7 @@ export class Orchestrator {
           "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
           "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
         },
       },
       {
@@ -2623,7 +2675,7 @@ export class Orchestrator {
           `Operator instruction: ${instruction}`,
         ].join("\n"),
         cwd,
-        addDirs: [cwd],
+        addDirs: this.buildPlanningAddDirs(project, cwd),
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
@@ -2632,6 +2684,7 @@ export class Orchestrator {
           "Directory Tree": this.buildDirectoryTree(cwd),
           "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
         },
       },
       {
@@ -2675,7 +2728,7 @@ export class Orchestrator {
           `Operator instruction: ${instruction}`,
         ].join("\n"),
         cwd,
-        addDirs: [cwd],
+        addDirs: this.buildPlanningAddDirs(project, cwd),
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
@@ -2684,6 +2737,7 @@ export class Orchestrator {
           "System Model": renderModelingMarkdown(modeling),
           "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
         },
       },
       {
@@ -2729,7 +2783,7 @@ export class Orchestrator {
           `Operator instruction: ${instruction}`,
         ].join("\n"),
         cwd,
-        addDirs: [cwd],
+        addDirs: this.buildPlanningAddDirs(project, cwd),
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
@@ -2740,6 +2794,7 @@ export class Orchestrator {
           "Pending Planning Questions": JSON.stringify(planningContext.pendingQuestions, null, 2),
           "Recommended Next Slice": planningContext.result.recommendedNextSlice,
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
         },
       },
       {
@@ -2782,7 +2837,7 @@ export class Orchestrator {
           `Operator instruction: ${instruction}`,
         ].join("\n"),
         cwd,
-        addDirs: [cwd],
+        addDirs: this.buildPlanningAddDirs(project, cwd),
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
@@ -2849,7 +2904,7 @@ export class Orchestrator {
             `Operator instruction: ${instruction}`,
           ].join("\n"),
       cwd,
-      addDirs: [cwd],
+      addDirs: this.buildPlanningAddDirs(project, cwd),
       epicCharter: this.getEpicCharterContext(workstream),
       agentsMd: this.readAgentsMd(project),
       extra: {
@@ -2864,6 +2919,7 @@ export class Orchestrator {
         "Previous Planning Context": previousContext ? JSON.stringify(previousContext, null, 2) : "None.",
         "Operator Answers": serializePlanningAnswers(answers ?? previousContext?.answers ?? {}),
         "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
+        "Related Configured Projects": this.renderRelatedPlanningProjects(project),
       },
     };
   }

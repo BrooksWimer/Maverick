@@ -74,6 +74,67 @@ function summarizeRawOutput(output: string): string {
   return `${trimmed.slice(0, 397)}...`;
 }
 
+function tryParseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractStructuredObjectFromRawOutput(rawOutput: string): Record<string, unknown> | null {
+  const fencedJsonBlocks = rawOutput.matchAll(/```(?:json|JSON)\s*([\s\S]*?)```/g);
+  for (const match of fencedJsonBlocks) {
+    const parsed = tryParseJsonObject(match[1]?.trim() ?? "");
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  const summaryKeyIndex = rawOutput.indexOf('"currentStateSummary"');
+  if (summaryKeyIndex < 0) {
+    return null;
+  }
+
+  const startIndex = rawOutput.lastIndexOf("{", summaryKeyIndex);
+  if (startIndex < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = startIndex; index < rawOutput.length; index += 1) {
+    const char = rawOutput[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return tryParseJsonObject(rawOutput.slice(startIndex, index + 1));
+      }
+    }
+  }
+
+  return null;
+}
+
 function isFallbackPlanningResult(result: PlanningResult): boolean {
   return (
     result.currentStateSummary === "Planning returned unstructured output. Review the stored raw plan text before dispatch."
@@ -431,11 +492,12 @@ export function parsePlanningResult(
   structured: Record<string, unknown> | null,
   rawOutput: string,
 ): PlanningResult {
-  if (!structured) {
+  const structuredOutput = structured ?? extractStructuredObjectFromRawOutput(rawOutput);
+  if (!structuredOutput) {
     return fallbackPlanningResult(rawOutput);
   }
 
-  return normalizeResultFromStructured(structured, rawOutput);
+  return normalizeResultFromStructured(structuredOutput, rawOutput);
 }
 
 export function collectPendingPlanningQuestions(result: PlanningResult): PendingPlanningDecision[] {
@@ -465,12 +527,21 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
     const originalInstruction = asTrimmedString(parsed.originalInstruction);
     const rawAgentOutput = asTrimmedString(parsed.rawAgentOutput);
     const resultValue = isRecord(parsed.result) ? parsed.result : {};
-    const result = normalizeResultFromStructured(resultValue, rawAgentOutput);
+    let result = normalizeResultFromStructured(resultValue, rawAgentOutput);
+    if (isFallbackPlanningResult(result)) {
+      result = parsePlanningResult(null, rawAgentOutput);
+    }
     const intake = normalizeIntake(parsed.intake, originalInstruction);
     const goalFrame = normalizeGoalFrame(parsed.goalFrame, intake, originalInstruction);
     const modeling = normalizeModeling(parsed.modeling);
     const testDesign = normalizeTestDesign(parsed.testDesign);
     let feedbackRequest = normalizeFeedbackRequest(parsed.feedbackRequest);
+    const answersSource = isRecord(parsed.answers) ? parsed.answers : {};
+    const answers = Object.fromEntries(
+      Object.entries(answersSource)
+        .map(([questionId, answerValue]) => [questionId, normalizeAnswer(answerValue, questionId)] as const)
+        .filter((entry): entry is readonly [string, PlanningAnswer] => entry[1] !== null)
+    );
     const parsedPendingQuestions = Array.isArray(parsed.pendingQuestions) && parsed.pendingQuestions.length > 0
       ? parsed.pendingQuestions
           .map((entry, index) => {
@@ -485,23 +556,21 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
           .filter((entry): entry is PendingPlanningDecision => entry !== null)
       : [];
     const synthesizedPendingQuestions = buildPendingQuestions({ result, intake, modeling, feedbackRequest });
-    const pendingQuestions =
-      isFallbackPlanningResult(result) && synthesizedPendingQuestions.length > parsedPendingQuestions.length
+    const pendingQuestions = (isFallbackPlanningResult(result) && synthesizedPendingQuestions.length > parsedPendingQuestions.length
         ? synthesizedPendingQuestions
         : parsedPendingQuestions.length > 0
           ? parsedPendingQuestions
-          : synthesizedPendingQuestions;
+          : synthesizedPendingQuestions
+    ).filter((question) => {
+      const existingAnswer = answers[question.id];
+      return !existingAnswer || !existingAnswer.answer.trim();
+    });
 
-    if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
+    if (pendingQuestions.length === 0 && isFallbackPlanningResult(result)) {
+      feedbackRequest = null;
+    } else if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
       feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
     }
-
-    const answersSource = isRecord(parsed.answers) ? parsed.answers : {};
-    const answers = Object.fromEntries(
-      Object.entries(answersSource)
-        .map(([questionId, answerValue]) => [questionId, normalizeAnswer(answerValue, questionId)] as const)
-        .filter((entry): entry is readonly [string, PlanningAnswer] => entry[1] !== null)
-    );
 
     const createdAt = asTrimmedString(parsed.createdAt) || new Date().toISOString();
     const updatedAt = asTrimmedString(parsed.updatedAt) || createdAt;
@@ -572,7 +641,9 @@ export function buildPlanningContextRecord(params: {
     params.feedbackRequest
     ?? params.previous?.feedbackRequest
     ?? (pendingQuestions.length > 0 ? coerceOperatorFeedbackResult(null, pendingQuestions) : null);
-  if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
+  if (pendingQuestions.length === 0 && isFallbackPlanningResult(params.result)) {
+    feedbackRequest = null;
+  } else if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
     feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
   }
   const finalExecutionPrompt = params.result.finalExecutionPrompt.trim() || null;

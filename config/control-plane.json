@@ -160,7 +160,8 @@
       "metadata": {
         "description": "Portfolio website and resume refresh workspace for presenting recent projects, work experience, and proof artifacts",
         "primary_focus": "portfolio-resume",
-        "featured_projects": "netwise,maverick"
+        "featured_projects": "maverick,netwise,syncsonic",
+        "project_naming": "For portfolio content, use Astra as the public-facing project name for the configured netwise project. Netwise, Sentry, and Astra refer to the same local project lineage; the active repo is C:\\Users\\wimer\\Desktop\\Sentry\\netwise."
       }
     },
     {
