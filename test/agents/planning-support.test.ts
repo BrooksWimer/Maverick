@@ -351,6 +351,61 @@ describe("planning context records", () => {
     expect(context.feedbackRequest?.suggestedReplyFormat).toContain("open-question-1:");
   });
 
+  it("replaces stale feedback when building fallback context with more granular open questions", () => {
+    const context = buildPlanningContextRecord({
+      originalInstruction: "Audit the portfolio and prepare update questions.",
+      rawAgentOutput: "Unstructured portfolio planning summary.",
+      intake: {
+        request: "Audit the portfolio and prepare update questions.",
+        scope: "Audit first, then plan updates.",
+        outOfScope: "",
+        acceptanceCriteria: [],
+        risks: [],
+        complexity: "large",
+        recommendation: "needs-clarification",
+        clarificationQuestions: [
+          "What new projects should be added?",
+          "Should the resume PDF be replaced?",
+        ],
+      },
+      modeling: {
+        systemSummary: "Portfolio site audit.",
+        mermaid: "",
+        keyEntities: [],
+        criticalFlows: [],
+        openQuestions: [
+          "What is the current employer, title, and start date?",
+          "What email address should replace the stale contact email?",
+          "What should happen with the non-functional contact form?",
+        ],
+      },
+      feedbackRequest: {
+        headline: "Old two-question summary",
+        questions: [
+          {
+            questionId: "clarification-1",
+            label: "Old question",
+            prompt: "What new projects should be added?",
+            whyItMatters: "Old feedback question.",
+            options: [],
+          },
+        ],
+      },
+      result: parsePlanningResult(null, "Unstructured portfolio planning summary."),
+    });
+
+    expect(context.pendingQuestions.map((question) => question.id)).toEqual([
+      "open-question-1",
+      "open-question-2",
+      "open-question-3",
+    ]);
+    expect(context.feedbackRequest?.questions.map((question) => question.questionId)).toEqual([
+      "open-question-1",
+      "open-question-2",
+      "open-question-3",
+    ]);
+  });
+
   it("re-hydrates synthesized pending questions when stored context had none persisted", () => {
     const stored = JSON.stringify({
       schemaVersion: 4,
@@ -493,5 +548,39 @@ describe("planning context records", () => {
     expect(rendered).toContain("Full freeform planning output.");
     expect(rendered).not.toContain("Implementation steps:");
     expect(rendered).not.toContain("Risks:\nNone recorded.");
+  });
+
+  it("can render an answer-focused planning summary without stale agent transcript sections", () => {
+    const context = buildPlanningContextRecord({
+      originalInstruction: "Audit the repo and prepare a plan.",
+      rawAgentOutput: "Before approving, answer old-question-1.",
+      intake: {
+        request: "Audit the repo and prepare a plan.",
+        scope: "Audit first, then plan updates.",
+        outOfScope: "",
+        acceptanceCriteria: [],
+        risks: [],
+        complexity: "large",
+        recommendation: "needs-clarification",
+        clarificationQuestions: ["What email address should replace bwimer@bu.edu?"],
+      },
+      explanation: {
+        headline: "Old formatted summary",
+        markdown: "Answer clarification-2 and clarification-4.",
+      },
+      result: parsePlanningResult(null, "Before approving, answer old-question-1."),
+    });
+
+    const rendered = renderPlanningSummary(context, {
+      includeAgentSections: false,
+      includeRawOutput: false,
+    });
+
+    expect(rendered).toContain("Pending planning questions:");
+    expect(rendered).toContain("clarification-1");
+    expect(rendered).not.toContain("Operator feedback request:");
+    expect(rendered).not.toContain("Discord explanation:");
+    expect(rendered).not.toContain("Raw planning output:");
+    expect(rendered).not.toContain("clarification-2");
   });
 });

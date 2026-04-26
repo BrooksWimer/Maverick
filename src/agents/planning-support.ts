@@ -103,6 +103,21 @@ function synthesizePendingQuestionsFromFeedback(
   }));
 }
 
+function feedbackMatchesPendingQuestions(
+  feedbackRequest: OperatorFeedbackResult | null,
+  pendingQuestions: PendingPlanningDecision[],
+): boolean {
+  if (pendingQuestions.length === 0) {
+    return true;
+  }
+
+  const feedbackQuestionIds = new Set(feedbackRequest?.questions.map((question) => question.questionId) ?? []);
+  return (
+    pendingQuestions.every((question) => feedbackQuestionIds.has(question.id)) &&
+    feedbackQuestionIds.size === pendingQuestions.length
+  );
+}
+
 function synthesizePendingQuestionsFromIntake(intake: IntakeResult | null): PendingPlanningDecision[] {
   const clarificationQuestions = intake?.clarificationQuestions ?? [];
   if (clarificationQuestions.length === 0) {
@@ -477,13 +492,7 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
           ? parsedPendingQuestions
           : synthesizedPendingQuestions;
 
-    const feedbackQuestionIds = new Set(feedbackRequest?.questions.map((question) => question.questionId) ?? []);
-    const feedbackMatchesPending =
-      pendingQuestions.length > 0 &&
-      pendingQuestions.every((question) => feedbackQuestionIds.has(question.id)) &&
-      feedbackQuestionIds.size === pendingQuestions.length;
-
-    if (pendingQuestions.length > 0 && (!feedbackRequest || !feedbackMatchesPending)) {
+    if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
       feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
     }
 
@@ -559,10 +568,13 @@ export function buildPlanningContextRecord(params: {
     const existingAnswer = answers[question.id];
     return !existingAnswer || !existingAnswer.answer.trim();
   });
-  const feedbackRequest =
+  let feedbackRequest =
     params.feedbackRequest
     ?? params.previous?.feedbackRequest
     ?? (pendingQuestions.length > 0 ? coerceOperatorFeedbackResult(null, pendingQuestions) : null);
+  if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
+    feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
+  }
   const finalExecutionPrompt = params.result.finalExecutionPrompt.trim() || null;
   const status =
     pendingQuestions.length > 0
@@ -633,7 +645,15 @@ export function mergePlanningAnswers(
   return { mergedAnswers, appliedIds, unknownIds };
 }
 
-export function renderPlanningSummary(context: PlanningContextRecord): string {
+export function renderPlanningSummary(
+  context: PlanningContextRecord,
+  options?: {
+    includeAgentSections?: boolean;
+    includeRawOutput?: boolean;
+  },
+): string {
+  const includeAgentSections = options?.includeAgentSections ?? true;
+  const includeRawOutput = options?.includeRawOutput ?? true;
   const intakeSummary = context.intake ? renderIntakeMarkdown(context.intake) : "None recorded.";
   const goalFrameSummary = context.goalFrame ? renderGoalFrameMarkdown(context.goalFrame) : "None recorded.";
   const modelingSummary = context.modeling ? renderModelingMarkdown(context.modeling) : "None recorded.";
@@ -667,10 +687,20 @@ export function renderPlanningSummary(context: PlanningContextRecord): string {
         })
         .join("\n")
     : "None captured.";
-  const rawPlanningOutputSection = context.rawAgentOutput
+  const rawPlanningOutputSection = includeRawOutput && context.rawAgentOutput
     ? ["", "Raw planning output:", context.rawAgentOutput]
     : [];
   const isFallback = isFallbackPlanningResult(context.result);
+  const agentSections = includeAgentSections
+    ? [
+        "",
+        "Operator feedback request:",
+        feedbackSummary,
+        "",
+        "Discord explanation:",
+        explanationSummary,
+      ]
+    : [];
 
   return [
     "Structured intake:",
@@ -684,12 +714,7 @@ export function renderPlanningSummary(context: PlanningContextRecord): string {
     "",
     "Test design:",
     testDesignSummary,
-    "",
-    "Operator feedback request:",
-    feedbackSummary,
-    "",
-    "Discord explanation:",
-    explanationSummary,
+    ...agentSections,
     "",
     "Current state summary:",
     context.result.currentStateSummary || "None recorded.",

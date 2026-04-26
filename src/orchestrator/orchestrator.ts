@@ -2874,9 +2874,12 @@ export class Orchestrator {
     planningContext: PlanningContextRecord,
     trigger: PlanningRunTrigger,
   ): string {
-    const renderedPlan = renderPlanningSummary(planningContext);
-    const formattedMarkdown = planningContext.explanation?.markdown ?? renderedPlan;
     const needsAnswers = planningContext.pendingQuestions.length > 0;
+    const renderedPlan = renderPlanningSummary(planningContext, {
+      includeAgentSections: !needsAnswers,
+      includeRawOutput: !needsAnswers,
+    });
+    const formattedMarkdown = planningContext.explanation?.markdown ?? renderedPlan;
     const summary =
       planningContext.status === "needs-answers"
         ? `Planning is waiting on ${planningContext.pendingQuestions.length} operator answer${planningContext.pendingQuestions.length === 1 ? "" : "s"}.`

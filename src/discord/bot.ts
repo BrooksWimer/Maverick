@@ -2000,7 +2000,11 @@ export class DiscordBot {
       return;
     }
 
-    const renderedPlan = renderPlanningSummary(planningContext);
+    const needsAnswers = planningContext.pendingQuestions.length > 0;
+    const renderedPlan = renderPlanningSummary(planningContext, {
+      includeAgentSections: !needsAnswers,
+      includeRawOutput: !needsAnswers,
+    });
     const formattedMarkdown = planningContext.explanation?.markdown?.trim() || renderedPlan;
     const instruction =
       planningContext.originalInstruction.trim() ||
@@ -2015,7 +2019,7 @@ export class DiscordBot {
       renderedPlan,
       formattedMarkdown,
       finalExecutionPrompt: planningContext.finalExecutionPrompt,
-      needsAnswers: planningContext.pendingQuestions.length > 0,
+      needsAnswers,
       questions: planningContext.pendingQuestions,
     })) {
       await this.safeSend(channel, message);
