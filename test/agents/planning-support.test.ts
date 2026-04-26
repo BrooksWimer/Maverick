@@ -395,6 +395,81 @@ describe("planning context records", () => {
     expect(parsed?.status).toBe("needs-answers");
   });
 
+  it("replaces stale feedback questions when fallback re-hydration finds more current open questions", () => {
+    const stored = JSON.stringify({
+      schemaVersion: 4,
+      originalInstruction: "Audit the portfolio and prepare a plan.",
+      intake: {
+        request: "Audit the portfolio and prepare a plan.",
+        scope: "Audit first, then plan updates.",
+        outOfScope: "",
+        acceptanceCriteria: [],
+        risks: [],
+        complexity: "large",
+        recommendation: "needs-clarification",
+        clarificationQuestions: ["What new projects should be added?"],
+      },
+      modeling: {
+        systemSummary: "Portfolio site audit.",
+        mermaid: "",
+        keyEntities: [],
+        criticalFlows: [],
+        openQuestions: [
+          "What is the current employer?",
+          "What email should replace the stale contact email?",
+        ],
+      },
+      feedbackRequest: {
+        headline: "Old two-question summary",
+        questions: [
+          {
+            questionId: "clarification-1",
+            label: "Old question",
+            prompt: "What new projects should be added?",
+            whyItMatters: "Old feedback question.",
+            options: [],
+          },
+        ],
+      },
+      result: {
+        currentStateSummary: "Planning returned unstructured output. Review the stored raw plan text before dispatch.",
+        recommendedNextSlice: "Review the raw planning output and answer any pending planning questions before dispatch.",
+        requiredAnswers: [],
+        importantDecisions: [],
+        draftExecutionPrompt: "",
+        finalExecutionPrompt: "",
+        remainingUnknowns: [],
+        steps: [],
+        risks: [],
+        dependencies: [],
+        estimatedTurns: 1,
+        testStrategy: "",
+        rollbackPlan: "",
+      },
+      pendingQuestions: [
+        {
+          id: "clarification-1",
+          question: "What new projects should be added?",
+          whyItMatters: "Old broad question.",
+          options: [],
+          kind: "required-answer",
+        },
+      ],
+      rawAgentOutput: "Audit complete.",
+    });
+
+    const parsed = parsePlanningContextRecord(stored);
+
+    expect(parsed?.pendingQuestions.map((question) => question.id)).toEqual([
+      "open-question-1",
+      "open-question-2",
+    ]);
+    expect(parsed?.feedbackRequest?.questions.map((question) => question.questionId)).toEqual([
+      "open-question-1",
+      "open-question-2",
+    ]);
+  });
+
   it("includes the full raw planning output and skips empty structured sections on fallback", () => {
     const context = buildPlanningContextRecord({
       originalInstruction: "Audit the repo and prepare a plan.",

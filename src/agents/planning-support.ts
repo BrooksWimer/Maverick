@@ -477,7 +477,13 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
           ? parsedPendingQuestions
           : synthesizedPendingQuestions;
 
-    if (!feedbackRequest && pendingQuestions.length > 0) {
+    const feedbackQuestionIds = new Set(feedbackRequest?.questions.map((question) => question.questionId) ?? []);
+    const feedbackMatchesPending =
+      pendingQuestions.length > 0 &&
+      pendingQuestions.every((question) => feedbackQuestionIds.has(question.id)) &&
+      feedbackQuestionIds.size === pendingQuestions.length;
+
+    if (pendingQuestions.length > 0 && (!feedbackRequest || !feedbackMatchesPending)) {
       feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
     }
 

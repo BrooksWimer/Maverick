@@ -157,6 +157,37 @@ describe("buildPlanNotificationMessages", () => {
     expect(messages[0]?.content).toContain("Use the buttons below");
     expect(messages[0]?.components).toHaveLength(1);
   });
+
+  it("skips stale formatted summaries that do not match the current pending question ids", () => {
+    const messages = buildPlanNotificationMessages({
+      workstreamId: "5cd5405d-c8b1-424b-9dee-73e61e51efef",
+      workstreamName: "Portfolio Refresh",
+      instruction: "Update the portfolio and resume.",
+      renderedPlan: "Pending planning questions:\n1. open-question-1\n2. open-question-2",
+      formattedMarkdown: "## Old Summary\n\n1. `clarification-2`\n2. `clarification-4`",
+      finalExecutionPrompt: null,
+      needsAnswers: true,
+      questions: [
+        {
+          id: "open-question-1",
+          question: "What is the current employer?",
+          whyItMatters: "The bio needs current employment status.",
+          options: [],
+          kind: "required-answer",
+        },
+        {
+          id: "open-question-2",
+          question: "What email address should replace the old one?",
+          whyItMatters: "The contact section needs a current address.",
+          options: [],
+          kind: "required-answer",
+        },
+      ],
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.content).not.toContain("Old Summary");
+  });
 });
 
 describe("parsePlanningAnswerInput", () => {

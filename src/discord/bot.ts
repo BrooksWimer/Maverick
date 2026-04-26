@@ -35,6 +35,7 @@ import { buildAgendaSummary, renderAgendaMarkdown, renderInboxMarkdown, renderSe
 import { renderWorkstreamStatusSnapshot } from "../orchestrator/status.js";
 import { renderMarkdownDocument } from "../markdown/presentation.js";
 import type { PendingPlanningDecision } from "../agents/types.js";
+import { renderPlanningSummary } from "../agents/planning-support.js";
 
 const log = createLogger("discord");
 
@@ -307,6 +308,10 @@ export function buildPlanNotificationMessages(params: {
   needsAnswers: boolean;
   questions?: PendingPlanningDecision[];
 }): MessageCreateOptions[] {
+  const questionIds = new Set((params.questions ?? []).map((question) => question.id));
+  const formattedMarkdownIsCurrent =
+    questionIds.size === 0 ||
+    [...questionIds].every((questionId) => params.formattedMarkdown.includes(questionId));
   const messages: MessageCreateOptions[] = [
     params.needsAnswers
       ? buildPlanningQuestionsNotificationMessage({
@@ -326,7 +331,7 @@ export function buildPlanNotificationMessages(params: {
 
   const trimmedRenderedPlan = params.renderedPlan.trim();
   const trimmedFormattedMarkdown = params.formattedMarkdown.trim();
-  if (trimmedFormattedMarkdown && trimmedFormattedMarkdown !== trimmedRenderedPlan) {
+  if (trimmedFormattedMarkdown && trimmedFormattedMarkdown !== trimmedRenderedPlan && formattedMarkdownIsCurrent) {
     messages.push(
       buildFormattedPlanningSummaryMessage({
         workstreamName: params.workstreamName,
@@ -1995,7 +2000,7 @@ export class DiscordBot {
       return;
     }
 
-    const renderedPlan = workstream.plan?.trim() || "No stored rendered plan summary.";
+    const renderedPlan = renderPlanningSummary(planningContext);
     const formattedMarkdown = planningContext.explanation?.markdown?.trim() || renderedPlan;
     const instruction =
       planningContext.originalInstruction.trim() ||
