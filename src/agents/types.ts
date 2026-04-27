@@ -94,6 +94,9 @@ export interface AgentContext {
   /** Project repo path */
   repoPath: string;
 
+  /** Canonical project repo root for reference context */
+  canonicalRepoRoot?: string;
+
   /** Workstream ID (if bound to a workstream) */
   workstreamId?: string;
 
@@ -108,6 +111,18 @@ export interface AgentContext {
 
   /** Working directory for execution */
   cwd: string;
+
+  /** Execution workspace agents should treat as authoritative for writes */
+  executionWorkspace?: string;
+
+  /** Durable base branch selected for this workstream */
+  durableBaseBranch?: string | null;
+
+  /** Disposable branch selected for this workstream */
+  disposableBranch?: string | null;
+
+  /** Whether this workspace is a git worktree, notes workspace, or legacy root */
+  workspaceMode?: "worktree" | "legacy-root" | "notes";
 
   /** Additional directories to add to Claude's context */
   addDirs?: string[];

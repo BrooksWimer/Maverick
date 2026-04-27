@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS workstreams (
   current_goal        TEXT,
   cwd                 TEXT,            -- working directory (may be a worktree)
   branch              TEXT,            -- git branch associated with this workstream
+  base_branch         TEXT,            -- durable branch or ref the worktree was based on
 
   -- Codex binding
   codex_thread_id     TEXT,
@@ -33,6 +34,10 @@ CREATE TABLE IF NOT EXISTS workstreams (
   -- Discord binding
   discord_channel_id  TEXT,
   discord_thread_id   TEXT,
+  discord_parent_channel_id TEXT,
+
+  -- Workspace identity
+  workspace_mode      TEXT NOT NULL DEFAULT 'legacy-root',
 
   -- Status flags
   waiting_on_approval INTEGER NOT NULL DEFAULT 0,
@@ -52,6 +57,7 @@ CREATE TABLE IF NOT EXISTS workstreams (
 CREATE INDEX IF NOT EXISTS idx_workstreams_project ON workstreams(project_id);
 CREATE INDEX IF NOT EXISTS idx_workstreams_state ON workstreams(state);
 CREATE INDEX IF NOT EXISTS idx_workstreams_discord_channel ON workstreams(discord_channel_id);
+CREATE INDEX IF NOT EXISTS idx_workstreams_discord_thread ON workstreams(discord_thread_id);
 
 -- Turns: individual units of execution within a workstream
 CREATE TABLE IF NOT EXISTS turns (
@@ -139,6 +145,9 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
   source          TEXT NOT NULL,      -- sms, api
   direction       TEXT NOT NULL,      -- inbound, outbound
   contact         TEXT,
+  project_id      TEXT REFERENCES projects(id),
+  lane_id         TEXT,
+  thread_id       TEXT,
   body            TEXT NOT NULL,
   normalized_body TEXT NOT NULL,
   intent          TEXT,
@@ -149,6 +158,24 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
 
 CREATE INDEX IF NOT EXISTS idx_assistant_messages_contact ON assistant_messages(contact);
 CREATE INDEX IF NOT EXISTS idx_assistant_messages_created ON assistant_messages(created_at);
+
+-- Durable Discord thread bindings for project/lane routing and assistant ownership
+CREATE TABLE IF NOT EXISTS discord_thread_bindings (
+  thread_id          TEXT PRIMARY KEY,
+  parent_channel_id  TEXT NOT NULL,
+  project_id         TEXT NOT NULL REFERENCES projects(id),
+  epic_id            TEXT,
+  lane               TEXT,
+  base_branch        TEXT,
+  assistant_enabled  INTEGER NOT NULL DEFAULT 0,
+  owner_instance_id  TEXT,
+  source             TEXT NOT NULL DEFAULT 'manual',
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_discord_thread_bindings_project ON discord_thread_bindings(project_id);
+CREATE INDEX IF NOT EXISTS idx_discord_thread_bindings_parent ON discord_thread_bindings(parent_channel_id);
 
 -- Assistant notes captured from inbound messages
 CREATE TABLE IF NOT EXISTS assistant_notes (

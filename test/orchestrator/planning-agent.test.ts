@@ -400,7 +400,8 @@ describe("Orchestrator planning agent flow", () => {
     expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.nextAction).toContain("Verify the changes before moving to review");
     expect(artifacts.listByWorkstream(workstream.id).filter((artifact) => artifact.type === "operator-report")).toHaveLength(3);
 
-    expect(dispatchAdapter.turnRequests[0]?.instruction).toBe(resumedPlan.finalExecutionPrompt);
+    expect(dispatchAdapter.turnRequests[0]?.instruction).toContain("Execution workspace rules:");
+    expect(dispatchAdapter.turnRequests[0]?.instruction).toContain(resumedPlan.finalExecutionPrompt ?? "");
     expect(utilityAdapter.turnRequests).toHaveLength(9);
     expect(utilityAdapter.turnRequests[0]?.model).toBe("haiku");
     expect(utilityAdapter.turnRequests[1]?.model).toBe("haiku");

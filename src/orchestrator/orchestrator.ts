@@ -66,14 +66,20 @@ import type {
   WorkstreamStatusSnapshot,
 } from "./status.js";
 import { WorkstreamStateMachine } from "./state-machine.js";
-import { artifacts, projects, workstreams, turns, approvals, events as eventLog } from "../state/index.js";
-import type { ArtifactRow, TurnRow, WorkstreamRow } from "../state/index.js";
+import { artifacts, projects, workstreams, turns, approvals, discordThreadBindings, events as eventLog } from "../state/index.js";
+import type { ArtifactRow, DiscordThreadBindingRow, TurnRow, WorkstreamRow } from "../state/index.js";
 import { createAdapter, type ExecutionBackendAdapter } from "../codex/index.js";
 import type { ApprovalRequest, ExecutionThread, ReviewResult } from "../codex/types.js";
 import type { EscalationTier, OrchestratorConfig, ProjectConfig, RemoteHostConfig } from "../config/schema.js";
-import { ensureProjectBootstrap, ensureWorktreeBootstrap, type BootstrapStatus } from "../projects/bootstrap.js";
+import {
+  ensureProjectBootstrap,
+  inspectProjectBootstrap,
+  inspectWorktreeBootstrap,
+  type BootstrapStatus,
+} from "../projects/bootstrap.js";
 import { buildEpicCharterContext, requireEpicById, workstreamLaneForEpic } from "../projects/epics.js";
 import { provisionWorktree } from "../git/worktree.js";
+import { getRuntimeInstanceId } from "../runtime/identity.js";
 import type {
   ExplanationResult,
   GoalFrameResult,
@@ -284,6 +290,7 @@ type ActiveOperationState = {
 
 export class Orchestrator {
   private config: OrchestratorConfig;
+  private readonly instanceId: string;
   private adapters: Map<string, ExecutionBackendAdapter> = new Map();
   private stateMachines: Map<string, WorkstreamStateMachine> = new Map();
   private activeTurnByWorkstream = new Map<string, string>();
@@ -297,6 +304,7 @@ export class Orchestrator {
 
   constructor(config: OrchestratorConfig) {
     this.config = config;
+    this.instanceId = getRuntimeInstanceId();
   }
 
   // --- Lifecycle ---
@@ -307,17 +315,19 @@ export class Orchestrator {
     log.info("Initializing orchestrator");
 
     this.syncConfiguredProjects();
+    this.reconcileStoredWorkspaceMetadata();
 
     // Create execution adapters per project (or use default)
     for (const project of this.config.projects) {
-      const bootstrapStatus = ensureProjectBootstrap(project);
+      const bootstrapStatus = inspectProjectBootstrap(project);
       this.projectBootstrap.set(project.id, bootstrapStatus);
       log.info(
         {
           projectId: project.id,
           createdBootstrapFiles: bootstrapStatus.createdFiles.length,
+          missingBootstrapFiles: bootstrapStatus.missingFiles.length,
         },
-        "Project bootstrap ensured"
+        "Project bootstrap inspected"
       );
 
       const backendConfig = project.executionBackend ?? this.config.defaults.executionBackend;
@@ -386,6 +396,8 @@ export class Orchestrator {
     name: string;
     description?: string;
     discordChannelId?: string;
+    discordThreadId?: string;
+    discordParentChannelId?: string;
     baseBranch?: string;
     lane?: string;
     epicId?: string;
@@ -426,12 +438,33 @@ export class Orchestrator {
       projectId: params.projectId,
       workstreamId,
       name: params.name,
+      workspaceKind: project.workspaceKind,
       lane: resolvedLane,
       baseRef: resolvedBaseBranch,
     });
 
+    if (
+      project.workspaceKind === "git" &&
+      workspace.mode !== "worktree" &&
+      !this.shouldAllowLegacyRootWorkspace(project)
+    ) {
+      throw new Error(
+        `Project "${project.id}" is git-backed and must dispatch from a worktree. Maverick resolved workspace mode "${workspace.mode}" instead.`
+      );
+    }
+
     if (workspace.mode === "worktree") {
-      ensureWorktreeBootstrap(project, workspace.cwd);
+      const bootstrapStatus = inspectWorktreeBootstrap(project, workspace.cwd);
+      if (bootstrapStatus.missingFiles.length > 0) {
+        log.warn(
+          {
+            projectId: project.id,
+            workstreamId,
+            missingBootstrapFiles: bootstrapStatus.missingFiles.length,
+          },
+          "Worktree bootstrap is missing doctrine files; inspect with /maverick audit"
+        );
+      }
     }
 
     // Create execution thread
@@ -446,8 +479,12 @@ export class Orchestrator {
       description: params.description,
       cwd: workspace.cwd,
       branch: workspace.branch ?? undefined,
+      base_branch: resolvedBaseBranch,
+      workspace_mode: workspace.mode,
       execution_backend: adapter.name,
       discord_channel_id: params.discordChannelId,
+      discord_thread_id: params.discordThreadId,
+      discord_parent_channel_id: params.discordParentChannelId,
     });
 
     // Bind thread
@@ -552,7 +589,7 @@ export class Orchestrator {
       const result = await adapter.startTurn({
         threadId: dispatchWorkstream.codex_thread_id!,
         instruction: executionInstruction,
-        cwd: dispatchWorkstream.cwd ?? this.getProject(dispatchWorkstream.project_id).repoPath,
+        cwd: this.resolveExecutionWorkspace(dispatchWorkstream),
       });
 
       // Update turn
@@ -770,7 +807,7 @@ export class Orchestrator {
           ? await this.runClaudeReview(ws, effectiveTarget, latestTurn?.id ?? null)
           : await this.getAdapter(ws.project_id).startReview({
               threadId: ws.codex_thread_id!,
-              cwd: ws.cwd ?? this.getProject(ws.project_id).repoPath,
+              cwd: this.resolveExecutionWorkspace(ws),
               target: effectiveTarget,
             });
 
@@ -835,7 +872,7 @@ export class Orchestrator {
       workstream = this.tryTransitionState(workstream, "implementation-complete", { allowAutoPlan: false });
     }
 
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const previousContext = parseVerificationContextRecord(workstream.verification_context_json);
     const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
@@ -987,7 +1024,7 @@ export class Orchestrator {
       throw new Error(`Claude planning is disabled for project ${project.id}.`);
     }
 
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const storedContext = parsePlanningContextRecord(workstream.planning_context_json);
     if (options.resumeExisting && !storedContext) {
@@ -1494,6 +1531,7 @@ export class Orchestrator {
     return {
       project,
       bootstrap: this.projectBootstrap.get(projectId) ?? null,
+      threadBindings: this.listDiscordThreadBindings(projectId),
       workstreams: ws,
       activeCount: active.length,
       pendingApprovals: projectApprovals.length,
@@ -1507,16 +1545,169 @@ export class Orchestrator {
     return {
       status: this.initialized ? "ok" : "starting",
       initialized: this.initialized,
+      instanceId: this.instanceId,
       projects: this.config.projects.map((project) => ({
         id: project.id,
         name: project.name,
         repoPath: project.repoPath,
+        workspaceKind: project.workspaceKind,
         backend: this.adapters.get(project.id)?.name ?? "uninitialized",
         bootstrapCreatedFiles: this.projectBootstrap.get(project.id)?.createdFiles.length ?? 0,
+        bootstrapMissingFiles: this.projectBootstrap.get(project.id)?.missingFiles.length ?? 0,
       })),
       activeWorkstreams: workstreams.listActive().length,
       pendingApprovals: approvals.listPending().length,
       timestamp: new Date().toISOString(),
+    };
+  }
+
+  getAuditReport(scope: "git" | "discord" | "state" | "all" = "all") {
+    const includeGit = scope === "git" || scope === "all";
+    const includeDiscord = scope === "discord" || scope === "all";
+    const includeState = scope === "state" || scope === "all";
+    const allBindings = discordThreadBindings.list();
+    const allWorkstreams = workstreams.listActive();
+
+    return {
+      instanceId: this.instanceId,
+      scope,
+      generatedAt: new Date().toISOString(),
+      projects: this.config.projects.map((project) => {
+        const projectWorkstreams = workstreams.listByProject(project.id);
+        const projectBindings = allBindings.filter((binding) => binding.project_id === project.id);
+        const gitAudit = includeGit ? this.auditGitProject(project, projectWorkstreams) : null;
+
+        return {
+          id: project.id,
+          name: project.name,
+          repoPath: project.repoPath,
+          workspaceKind: project.workspaceKind,
+          defaultWorktreeBaseBranch: project.defaultWorktreeBaseBranch ?? null,
+          defaultLanes: project.defaultLanes.map((lane) => ({
+            id: lane.id,
+            baseBranch: lane.baseBranch,
+            ownerInstanceId: lane.ownerInstanceId ?? null,
+            assistantEnabled: lane.assistantEnabled,
+          })),
+          epicBranches: project.epicBranches.map((epic) => ({
+            id: epic.id,
+            branch: epic.branch,
+          })),
+          bootstrap: this.projectBootstrap.get(project.id) ?? null,
+          activeWorkstreams: includeState
+            ? projectWorkstreams
+                .filter((workstream) => workstream.state !== "done")
+                .map((workstream) => ({
+                  id: workstream.id,
+                  name: workstream.name,
+                  state: workstream.state,
+                  workspaceMode: workstream.workspace_mode,
+                  cwd: workstream.cwd,
+                  branch: workstream.branch,
+                  baseBranch: workstream.base_branch,
+                }))
+            : [],
+          threadBindings: includeDiscord
+            ? projectBindings.map((binding) => ({
+                threadId: binding.thread_id,
+                parentChannelId: binding.parent_channel_id,
+                epicId: binding.epic_id,
+                lane: binding.lane,
+                baseBranch: binding.base_branch,
+                assistantEnabled: Boolean(binding.assistant_enabled),
+                ownerInstanceId: binding.owner_instance_id,
+                source: binding.source,
+              }))
+            : [],
+          gitAudit,
+        };
+      }),
+      discord: includeDiscord
+        ? {
+            routes: this.config.discord.routes.map((route) => ({
+              projectId: route.projectId,
+              channelId: route.channelId,
+              purpose: route.purpose,
+              epicId: route.epicId ?? null,
+              lane: route.lane ?? null,
+              baseBranch: route.baseBranch ?? null,
+              assistantEnabled: route.assistantEnabled,
+              ownerInstanceId: route.ownerInstanceId ?? null,
+            })),
+            threadBindingCount: allBindings.length,
+          }
+        : null,
+      state: includeState
+        ? {
+            activeWorkstreamCount: allWorkstreams.length,
+            legacyRootWorkstreams: allWorkstreams
+              .filter((workstream) => workstream.workspace_mode === "legacy-root")
+              .map((workstream) => ({
+                id: workstream.id,
+                projectId: workstream.project_id,
+                name: workstream.name,
+                cwd: workstream.cwd,
+              })),
+          }
+        : null,
+    };
+  }
+
+  private auditGitProject(project: ProjectConfig, projectWorkstreams: WorkstreamRow[]) {
+    if (!this.isGitBackedProject(project)) {
+      return {
+        mode: "notes",
+      };
+    }
+
+    const branchOutput = this.readGitOutput(["branch", "--show-current"], project.repoPath).trim();
+    const statusOutput = this.readGitOutput(["status", "--short"], project.repoPath).trim();
+    const worktreeOutput = this.readGitOutput(["worktree", "list", "--porcelain"], project.repoPath);
+    const trackedWorktreePaths = new Set(
+      projectWorkstreams
+        .filter((workstream) => workstream.workspace_mode === "worktree" && workstream.cwd)
+        .map((workstream) => resolve(workstream.cwd!))
+    );
+    const registeredWorktrees = worktreeOutput.startsWith("Git command failed")
+      ? []
+      : worktreeOutput
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("worktree "))
+          .map((line) => resolve(line.slice("worktree ".length).trim()));
+
+    return {
+      mode: "git",
+      rootBranch: branchOutput.startsWith("Git command failed") ? null : branchOutput,
+      rootDirty: Boolean(statusOutput),
+      registeredWorktrees,
+      orphanedWorktrees: registeredWorktrees.filter((worktreePath) =>
+        worktreePath !== resolve(project.repoPath) && !trackedWorktreePaths.has(worktreePath)
+      ),
+      workstreamMismatches: projectWorkstreams
+        .filter((workstream) => workstream.workspace_mode === "worktree")
+        .flatMap((workstream) => {
+          const mismatches: string[] = [];
+          if (!workstream.cwd) {
+            mismatches.push("missing cwd");
+          } else if (!registeredWorktrees.includes(resolve(workstream.cwd))) {
+            mismatches.push("worktree not registered");
+          }
+
+          if (workstream.cwd && workstream.branch) {
+            const workspaceBranch = this.readGitOutput(["branch", "--show-current"], workstream.cwd).trim();
+            if (!workspaceBranch.startsWith("Git command failed") && workspaceBranch !== workstream.branch) {
+              mismatches.push(`branch mismatch (${workspaceBranch})`);
+            }
+          }
+
+          return mismatches.length > 0
+            ? [{
+                id: workstream.id,
+                name: workstream.name,
+                issues: mismatches,
+              }]
+            : [];
+        }),
     };
   }
 
@@ -1965,6 +2156,42 @@ export class Orchestrator {
     return null;
   }
 
+  getRuntimeInstanceId() {
+    return this.instanceId;
+  }
+
+  getDiscordThreadBinding(threadId: string) {
+    return discordThreadBindings.getByThreadId(threadId);
+  }
+
+  listDiscordThreadBindings(projectId?: string) {
+    return projectId ? discordThreadBindings.listByProject(projectId) : discordThreadBindings.list();
+  }
+
+  upsertDiscordThreadBinding(data: {
+    threadId: string;
+    parentChannelId: string;
+    projectId: string;
+    epicId?: string | null;
+    lane?: string | null;
+    baseBranch?: string | null;
+    assistantEnabled?: boolean;
+    ownerInstanceId?: string | null;
+    source?: string;
+  }): DiscordThreadBindingRow {
+    return discordThreadBindings.upsert({
+      thread_id: data.threadId,
+      parent_channel_id: data.parentChannelId,
+      project_id: data.projectId,
+      epic_id: data.epicId ?? null,
+      lane: data.lane ?? null,
+      base_branch: data.baseBranch ?? null,
+      assistant_enabled: data.assistantEnabled ?? false,
+      owner_instance_id: data.ownerInstanceId ?? null,
+      source: data.source ?? "manual",
+    });
+  }
+
   private computeHealth(
     workstream: WorkstreamRow,
     planningContext: PlanningContextRecord | null,
@@ -2184,7 +2411,12 @@ export class Orchestrator {
       workstream.current_goal === planningContext.originalInstruction &&
       workstream.current_goal === userInstruction
     ) {
-      return planningContext.finalExecutionPrompt;
+      const workspaceGuard = this.renderExecutionWorkspaceGuard(workstream);
+      return [
+        workspaceGuard,
+        "",
+        planningContext.finalExecutionPrompt,
+      ].join("\n");
     }
 
     if (!workstream.plan || workstream.current_goal !== userInstruction) {
@@ -2192,11 +2424,26 @@ export class Orchestrator {
     }
 
     return [
+      this.renderExecutionWorkspaceGuard(workstream),
+      "",
       "Approved implementation plan:",
       workstream.plan,
       "",
       "Execute the following instruction using the stored plan above as the primary guide:",
       baseInstruction,
+    ].join("\n");
+  }
+
+  private renderExecutionWorkspaceGuard(workstream: WorkstreamRow): string {
+    const project = this.getProject(workstream.project_id);
+    return [
+      "Execution workspace rules:",
+      `- Canonical repo root (reference-only): ${project.repoPath}`,
+      `- Execution workspace (write here): ${this.resolveExecutionWorkspace(workstream)}`,
+      `- Workspace mode: ${workstream.workspace_mode}`,
+      `- Durable base branch: ${workstream.base_branch ?? project.defaultWorktreeBaseBranch ?? "unknown"}`,
+      `- Disposable workstream branch: ${workstream.branch ?? "none"}`,
+      "- Do all edits, commands, and commits in the execution workspace. Do not write directly in the canonical repo root unless the workspace mode is notes.",
     ].join("\n");
   }
 
@@ -2211,7 +2458,7 @@ export class Orchestrator {
       throw new Error(`Claude review is disabled for project ${project.id}.`);
     }
 
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const latestTurn = turns.listByWorkstream(workstream.id).slice(-1)[0] ?? null;
     const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
     const verificationContext = parseVerificationContextRecord(workstream.verification_context_json);
@@ -2489,7 +2736,7 @@ export class Orchestrator {
     }
 
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const siblingWorkstreams = workstreams
       .listByProject(project.id)
       .filter((candidate) => candidate.epic_id === workstream.epic_id)
@@ -2550,7 +2797,7 @@ export class Orchestrator {
     epicContextAnalysis?: string | null,
   ): Promise<IntakeResult> {
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const recentTurns = turns.listByWorkstream(workstream.id).slice(-5).map((turn) => ({
       instruction: turn.instruction,
@@ -2607,7 +2854,7 @@ export class Orchestrator {
     epicContextAnalysis?: string | null,
   ): Promise<GoalFrameResult> {
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const agentResult = await runAgent(
       adapter,
@@ -2659,7 +2906,7 @@ export class Orchestrator {
     epicContextAnalysis?: string | null,
   ): Promise<ModelingResult> {
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const agentResult = await runAgent(
       adapter,
@@ -2712,7 +2959,7 @@ export class Orchestrator {
     epicContextAnalysis?: string | null,
   ): Promise<TestDesignResult> {
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const agentResult = await runAgent(
       adapter,
@@ -2767,7 +3014,7 @@ export class Orchestrator {
     }
 
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const agentResult = await runAgent(
       adapter,
@@ -2821,7 +3068,7 @@ export class Orchestrator {
     epicContextAnalysis?: string | null,
   ): Promise<ExplanationResult> {
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const agentResult = await runAgent(
       adapter,
@@ -2878,7 +3125,7 @@ export class Orchestrator {
     epicContextAnalysis?: string | null,
   ) {
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const recentTurns = turns.listByWorkstream(workstream.id).slice(-5).map((turn) => ({
       instruction: turn.instruction,
       status: turn.status,
@@ -2888,6 +3135,7 @@ export class Orchestrator {
     return {
       projectId: project.id,
       repoPath: project.repoPath,
+      canonicalRepoRoot: project.repoPath,
       workstreamId: workstream.id,
       workstreamName: workstream.name,
       workstreamState: workstream.state,
@@ -2904,6 +3152,10 @@ export class Orchestrator {
             `Operator instruction: ${instruction}`,
           ].join("\n"),
       cwd,
+      executionWorkspace: cwd,
+      durableBaseBranch: workstream.base_branch ?? project.defaultWorktreeBaseBranch ?? null,
+      disposableBranch: workstream.branch,
+      workspaceMode: workstream.workspace_mode as "worktree" | "legacy-root" | "notes",
       addDirs: this.buildPlanningAddDirs(project, cwd),
       epicCharter: this.getEpicCharterContext(workstream),
       agentsMd: this.readAgentsMd(project),
@@ -3096,7 +3348,7 @@ export class Orchestrator {
     epicContextAnalysis?: string | null,
   ) {
     const project = this.getProject(workstream.project_id);
-    const cwd = workstream.cwd ?? project.repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
     const adapter = await this.getUtilityClaudeAdapter();
     const agentResult = await runAgent(
       adapter,
@@ -3571,9 +3823,7 @@ export class Orchestrator {
 
     const rawCwd = request.context.cwd;
     const commandCwd = typeof rawCwd === "string" && rawCwd.length > 0 ? rawCwd : null;
-    const allowedRoots = [workstream.cwd, this.getProject(workstream.project_id).repoPath].filter(
-      (value): value is string => Boolean(value)
-    );
+    const allowedRoots = this.allowedWorkstreamRoots(workstream);
 
     if (!commandCwd || !allowedRoots.some((allowedRoot) => isPathWithinRoot(commandCwd, allowedRoot))) {
       return false;
@@ -3609,9 +3859,7 @@ export class Orchestrator {
       return false;
     }
 
-    const allowedRoots = [workstream.cwd, this.getProject(workstream.project_id).repoPath].filter(
-      (value): value is string => Boolean(value)
-    );
+    const allowedRoots = this.allowedWorkstreamRoots(workstream);
 
     return requestedPaths.every((candidatePath) =>
       allowedRoots.some((allowedRoot) => isPathWithinRoot(candidatePath, allowedRoot))
@@ -3663,8 +3911,149 @@ export class Orchestrator {
     }
   }
 
+  private reconcileStoredWorkspaceMetadata(): void {
+    const active = workstreams.listActive();
+    if (active.length === 0) {
+      return;
+    }
+
+    for (const workstream of active) {
+      const project = this.getProject(workstream.project_id);
+      const updates: Partial<WorkstreamRow> = {};
+
+      if (project.workspaceKind === "notes") {
+        if (workstream.workspace_mode !== "notes") {
+          updates.workspace_mode = "notes";
+        }
+      } else {
+        const registeredWorktrees = this.readRegisteredWorktreePaths(project.repoPath);
+        const normalizedRepoRoot = resolve(project.repoPath);
+        const normalizedWorkspace = workstream.cwd ? resolve(workstream.cwd) : null;
+        const isRegisteredWorktree =
+          normalizedWorkspace !== null &&
+          normalizedWorkspace !== normalizedRepoRoot &&
+          registeredWorktrees.has(normalizedWorkspace);
+
+        if (isRegisteredWorktree && workstream.workspace_mode !== "worktree") {
+          updates.workspace_mode = "worktree";
+        }
+
+        if (!workstream.base_branch) {
+          if (workstream.epic_id) {
+            const epic = project.epicBranches.find((candidate) => candidate.id === workstream.epic_id);
+            if (epic) {
+              updates.base_branch = epic.branch;
+            }
+          } else if (project.defaultWorktreeBaseBranch) {
+            updates.base_branch = project.defaultWorktreeBaseBranch;
+          }
+        }
+      }
+
+      if (Object.keys(updates).length > 0) {
+        workstreams.update(workstream.id, updates);
+        log.info(
+          {
+            workstreamId: workstream.id,
+            projectId: workstream.project_id,
+            updates,
+          },
+          "Reconciled stored workstream workspace metadata"
+        );
+      }
+    }
+  }
+
+  private readRegisteredWorktreePaths(repoPath: string): Set<string> {
+    const output = this.readGitOutput(["worktree", "list", "--porcelain"], repoPath);
+    if (output.startsWith("Git command failed")) {
+      return new Set<string>();
+    }
+
+    const worktreePaths = output
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => resolve(line.slice("worktree ".length).trim()));
+
+    return new Set(worktreePaths);
+  }
+
+  private isGitBackedProject(project: ProjectConfig): boolean {
+    return project.workspaceKind !== "notes";
+  }
+
+  private shouldAllowLegacyRootWorkspace(project: ProjectConfig): boolean {
+    const backend = project.executionBackend ?? this.config.defaults.executionBackend;
+    return backend.type === "mock";
+  }
+
+  private allowedWorkstreamRoots(workstream: WorkstreamRow, options?: { includeCanonicalRoot?: boolean }): string[] {
+    const project = this.getProject(workstream.project_id);
+    const roots = new Set<string>();
+
+    if (workstream.cwd) {
+      roots.add(resolve(workstream.cwd));
+    }
+
+    if (options?.includeCanonicalRoot || !this.isGitBackedProject(project)) {
+      roots.add(resolve(project.repoPath));
+    }
+
+    return [...roots];
+  }
+
+  private assertGitBackedExecutionWorkspace(workstream: WorkstreamRow): void {
+    const project = this.getProject(workstream.project_id);
+    if (!this.isGitBackedProject(project)) {
+      return;
+    }
+
+    if (this.shouldAllowLegacyRootWorkspace(project)) {
+      return;
+    }
+
+    if (workstream.workspace_mode !== "worktree") {
+      throw new Error(
+        `Workstream "${workstream.name}" is in workspace mode "${workstream.workspace_mode}" but git-backed projects must dispatch from a worktree.`
+      );
+    }
+
+    if (!workstream.cwd) {
+      throw new Error(`Workstream "${workstream.name}" has no execution workspace recorded.`);
+    }
+
+    if (resolve(workstream.cwd) === resolve(project.repoPath)) {
+      throw new Error(
+        `Workstream "${workstream.name}" points at the canonical repo root instead of a dedicated execution workspace.`
+      );
+    }
+
+    if (workstream.branch) {
+      const currentBranch = this.readGitOutput(["branch", "--show-current"], workstream.cwd).trim();
+      if (currentBranch && !currentBranch.startsWith("Git command failed") && currentBranch !== workstream.branch) {
+        throw new Error(
+          `Workstream "${workstream.name}" expected branch "${workstream.branch}" but execution workspace is on "${currentBranch}".`
+        );
+      }
+    }
+
+    const worktreeList = this.readGitOutput(["worktree", "list", "--porcelain"], project.repoPath);
+    if (!worktreeList.startsWith("Git command failed")) {
+      const normalizedWorkspace = resolve(workstream.cwd);
+      const registered = worktreeList
+        .split(/\r?\n/)
+        .some((line) => line.startsWith("worktree ") && resolve(line.slice("worktree ".length).trim()) === normalizedWorkspace);
+      if (!registered) {
+        throw new Error(
+          `Execution workspace "${workstream.cwd}" is not registered as a git worktree for project "${project.id}".`
+        );
+      }
+    }
+  }
+
   private async prepareWorkstreamForDispatch(workstream: WorkstreamRow): Promise<WorkstreamRow> {
     const dispatchWorkstream = await this.ensureDispatchThread(workstream);
+    this.assertGitBackedExecutionWorkspace(dispatchWorkstream);
     const adapter = this.getAdapter(dispatchWorkstream.project_id);
     const thread =
       dispatchWorkstream.codex_thread_id
@@ -3683,7 +4072,7 @@ export class Orchestrator {
 
   private async ensureDispatchThread(workstream: WorkstreamRow): Promise<WorkstreamRow> {
     const adapter = this.getAdapter(workstream.project_id);
-    const cwd = workstream.cwd ?? this.getProject(workstream.project_id).repoPath;
+    const cwd = this.resolveExecutionWorkspace(workstream);
 
     if (workstream.codex_thread_id) {
       const resumed = await adapter.resumeThread(workstream.codex_thread_id);
@@ -3804,6 +4193,10 @@ export class Orchestrator {
     const project = this.config.projects.find(p => p.id === projectId);
     if (!project) throw new Error(`Unknown project: ${projectId}`);
     return project;
+  }
+
+  private resolveExecutionWorkspace(workstream: WorkstreamRow): string {
+    return workstream.cwd ?? this.getProject(workstream.project_id).repoPath;
   }
 
   private getAdapter(projectId: string): ExecutionBackendAdapter {

@@ -50,6 +50,11 @@ export async function createHttpServer(
 
   // --- Workstreams ---
 
+  app.get("/api/maverick/audit", async (req) => {
+    const { scope } = req.query as { scope?: "git" | "discord" | "state" | "all" };
+    return orchestrator.getAuditReport(scope ?? "all");
+  });
+
   app.get("/api/workstreams", async () => {
     return orchestrator.listActiveWorkstreams();
   });

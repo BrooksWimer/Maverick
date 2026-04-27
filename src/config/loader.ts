@@ -63,6 +63,26 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     if (project.requireEpicForWorktree && project.epicBranches.length === 0) {
       throw new Error(`Project "${project.id}" requires epic selection but defines no epicBranches`);
     }
+
+    const seenLaneIds = new Set<string>();
+    for (const lane of project.defaultLanes) {
+      if (seenLaneIds.has(lane.id)) {
+        throw new Error(`Project "${project.id}" declares duplicate default lane "${lane.id}"`);
+      }
+      seenLaneIds.add(lane.id);
+    }
+
+    if (
+      project.workspaceKind === "git" &&
+      !project.requireEpicForWorktree &&
+      !project.defaultWorktreeBaseBranch &&
+      project.epicBranches.length === 0 &&
+      project.defaultLanes.length === 0
+    ) {
+      throw new Error(
+        `Project "${project.id}" must define defaultWorktreeBaseBranch or at least one defaultLane when workspaceKind is "git".`
+      );
+    }
   }
 
   // Validate discord route references
@@ -75,6 +95,12 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     if (route.epicId && !project.epicBranches.some((epic) => epic.id === route.epicId)) {
       throw new Error(
         `Discord route ${route.channelId} references unknown epic "${route.epicId}" for project "${route.projectId}"`
+      );
+    }
+
+    if (route.lane && !project.defaultLanes.some((lane) => lane.id === route.lane)) {
+      throw new Error(
+        `Discord route ${route.channelId} references unknown lane "${route.lane}" for project "${route.projectId}"`
       );
     }
   }

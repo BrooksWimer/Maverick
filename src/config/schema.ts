@@ -125,6 +125,18 @@ export const EpicBranchSchema = z.object({
   ),
 });
 
+export const WorkspaceKindSchema = z.enum(["git", "notes"]);
+
+export const DefaultLaneSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/).describe("Stable lane identifier, e.g. 'portfolio-resume'"),
+  baseBranch: z.string().min(1).describe("Durable base branch used for workstreams in this lane"),
+  description: z.string().optional().describe("Human-readable description of the lane"),
+  assistantEnabled: z.boolean().default(true).describe("Whether the ambient assistant should answer in this lane"),
+  ownerInstanceId: z.string().min(1).optional().describe(
+    "Optional Maverick runtime instance id that owns ambient assistant replies for this lane"
+  ),
+});
+
 export const PlanningModelProfileNameSchema = z.enum(["cheap", "default", "deep"]);
 
 export const PlanningAgentRoutingSchema = z.object({
@@ -164,6 +176,9 @@ export const ProjectSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   name: z.string(),
   repoPath: z.string().describe("Absolute path to the project repo root"),
+  workspaceKind: WorkspaceKindSchema.default("git").describe(
+    "Whether this project uses git worktrees for implementation or acts as a notes-only workspace"
+  ),
   workflow: WorkflowSchema.optional().describe("Override the default workflow for this project"),
   executionBackend: ExecutionBackendSchema.optional().describe("Override the default execution backend"),
   escalationRules: z.array(EscalationRuleSchema).optional(),
@@ -175,6 +190,9 @@ export const ProjectSchema = z.object({
   ),
   epicBranches: z.array(EpicBranchSchema).default([]).describe(
     "Long-lived epic branches that Maverick workstreams should merge back into"
+  ),
+  defaultLanes: z.array(DefaultLaneSchema).default([]).describe(
+    "Named non-epic routing lanes that map Discord threads to durable base branches"
   ),
   requireEpicForWorktree: z.boolean().default(false).describe(
     "When true, Maverick must resolve an epic branch via route or explicit selection before creating a worktree"
@@ -207,6 +225,18 @@ export const DiscordRouteSchema = z.object({
   purpose: z.enum(["workstreams", "notifications", "approvals", "logs"]).default("workstreams"),
   epicId: z.string().regex(/^[a-z0-9-]+$/).optional().describe(
     "Optional epic id that new workstreams in this route should branch from"
+  ),
+  lane: z.string().regex(/^[a-z0-9-]+$/).optional().describe(
+    "Optional default lane id that thread conversations under this route should resolve to"
+  ),
+  baseBranch: z.string().min(1).optional().describe(
+    "Optional default durable base branch for this route when it is not using an epic"
+  ),
+  assistantEnabled: z.boolean().default(false).describe(
+    "Whether ambient assistant chat is enabled for bound threads under this route"
+  ),
+  ownerInstanceId: z.string().min(1).optional().describe(
+    "Optional Maverick runtime instance id that owns ambient assistant replies for this route"
   ),
 });
 
@@ -482,6 +512,8 @@ export type RemoteHostConfig = z.infer<typeof RemoteHostSchema>;
 export type EpicCharterConfig = z.infer<typeof EpicCharterSchema>;
 export type EpicCharterDocConfig = z.infer<typeof EpicCharterDocSchema>;
 export type EpicBranchConfig = z.infer<typeof EpicBranchSchema>;
+export type DefaultLaneConfig = z.infer<typeof DefaultLaneSchema>;
+export type WorkspaceKind = z.infer<typeof WorkspaceKindSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowSchema>;
 export type StateTransition = z.infer<typeof StateTransitionSchema>;
 export type EscalationRule = z.infer<typeof EscalationRuleSchema>;

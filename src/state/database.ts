@@ -76,6 +76,19 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
   const schema = readFileSync(schemaPath, "utf-8");
   db.exec(schema);
   ensureColumn(db, "workstreams", "epic_id", "ALTER TABLE workstreams ADD COLUMN epic_id TEXT");
+  ensureColumn(db, "workstreams", "base_branch", "ALTER TABLE workstreams ADD COLUMN base_branch TEXT");
+  ensureColumn(
+    db,
+    "workstreams",
+    "discord_parent_channel_id",
+    "ALTER TABLE workstreams ADD COLUMN discord_parent_channel_id TEXT"
+  );
+  ensureColumn(
+    db,
+    "workstreams",
+    "workspace_mode",
+    "ALTER TABLE workstreams ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'legacy-root'"
+  );
   ensureColumn(db, "workstreams", "plan", "ALTER TABLE workstreams ADD COLUMN plan TEXT");
   ensureColumn(
     db,
@@ -90,6 +103,24 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
     "ALTER TABLE workstreams ADD COLUMN verification_context_json TEXT"
   );
   ensureColumn(db, "turns", "last_progress_at", "ALTER TABLE turns ADD COLUMN last_progress_at TEXT");
+  ensureColumn(
+    db,
+    "assistant_messages",
+    "project_id",
+    "ALTER TABLE assistant_messages ADD COLUMN project_id TEXT"
+  );
+  ensureColumn(
+    db,
+    "assistant_messages",
+    "lane_id",
+    "ALTER TABLE assistant_messages ADD COLUMN lane_id TEXT"
+  );
+  ensureColumn(
+    db,
+    "assistant_messages",
+    "thread_id",
+    "ALTER TABLE assistant_messages ADD COLUMN thread_id TEXT"
+  );
   ensureColumn(
     db,
     "assistant_notes",

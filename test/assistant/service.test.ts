@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantConfig } from "../../src/config/index.js";
 import { AssistantService } from "../../src/assistant/service.js";
-import { closeDatabase, initDatabase } from "../../src/state/index.js";
+import { closeDatabase, getDatabase, initDatabase } from "../../src/state/index.js";
 import type { WorkNotesConfig } from "../../src/assistant/types.js";
 
 const baseConfig: AssistantConfig = {
@@ -87,6 +87,33 @@ describe("AssistantService", () => {
     expect(result.intent).toBe("note");
     expect(service.listNotes()).toHaveLength(1);
     expect(service.listMessages()).toHaveLength(2);
+  });
+
+  it("tags inbound discord assistant messages with project, lane, and thread context", async () => {
+    const service = new AssistantService(baseConfig, {
+      now: () => new Date("2026-04-04T10:00:00-04:00"),
+    });
+    getDatabase().prepare(`
+      INSERT INTO projects (id, name, repo_path, config_json)
+      VALUES (?, ?, ?, ?)
+    `).run("portfolio-resume", "Portfolio & Resume", "C:/Users/wimer/Desktop/portfolio", "{}");
+
+    await service.processIncomingMessage({
+      source: "discord",
+      from: "user-123",
+      body: "Remember the portfolio lane needs a forum-thread assistant.",
+      metadata: {
+        channelId: "thread-123",
+        projectId: "portfolio-resume",
+        laneId: "portfolio-resume",
+        threadId: "thread-123",
+      },
+    });
+
+    const inbound = service.listMessages().find((message) => message.direction === "inbound");
+    expect(inbound?.project_id).toBe("portfolio-resume");
+    expect(inbound?.lane_id).toBe("portfolio-resume");
+    expect(inbound?.thread_id).toBe("thread-123");
   });
 
   it("turns actionable chat into inbox tasks", async () => {

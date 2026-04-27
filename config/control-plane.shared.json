@@ -42,7 +42,16 @@
     {
       "id": "maverick",
       "name": "Maverick",
+      "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "main",
+      "defaultLanes": [
+        {
+          "id": "self-updates",
+          "baseBranch": "main",
+          "description": "Maverick self-update and control-plane work",
+          "assistantEnabled": true
+        }
+      ],
       "maxConcurrentWorkstreams": 3,
       "claudeReview": {
         "enabled": true,
@@ -83,6 +92,8 @@
     {
       "id": "netwise",
       "name": "Netwise",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "master",
       "epicBranches": [
         {
           "id": "laptop-wifi-scanner",
@@ -154,6 +165,8 @@
     {
       "id": "syncsonic",
       "name": "SyncSonic",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "foundation/neutral-minimal",
       "maxConcurrentWorkstreams": 3,
       "claudeReview": {
         "enabled": true,
@@ -203,28 +216,39 @@
       {
         "projectId": "maverick",
         "channelId": "1491285608524681216",
-        "purpose": "workstreams"
+        "purpose": "workstreams",
+        "lane": "self-updates",
+        "assistantEnabled": true,
+        "ownerInstanceId": "windows"
       },
       {
         "projectId": "netwise",
         "channelId": "1490049872089452584",
-        "purpose": "workstreams"
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "windows"
       },
       {
         "projectId": "netwise",
         "channelId": "1490049953211482455",
-        "purpose": "workstreams"
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "windows"
       },
       {
         "projectId": "netwise",
         "channelId": "1490449866642690220",
         "purpose": "workstreams",
-        "epicId": "router-admin-ingestion"
+        "epicId": "router-admin-ingestion",
+        "assistantEnabled": true,
+        "ownerInstanceId": "windows"
       },
       {
         "projectId": "syncsonic",
         "channelId": "1490171093615513742",
-        "purpose": "workstreams"
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       }
     ],
     "defaultNotificationChannelId": null

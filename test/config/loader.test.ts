@@ -130,7 +130,8 @@ describe("loadConfig epic charters", () => {
         {
           id: "maverick",
           name: "Maverick",
-          repoPath: maverickRepoPath
+          repoPath: maverickRepoPath,
+          defaultWorktreeBaseBranch: "main"
         }
       ],
       discord: {
@@ -152,5 +153,59 @@ describe("loadConfig epic charters", () => {
       expect.objectContaining({ projectId: "netwise", channelId: "111" }),
       expect.objectContaining({ projectId: "maverick", channelId: "222" }),
     ]));
+  });
+
+  it("accepts default lanes and assistant ownership on discord routes", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "maverick-config-"));
+    tempDirs.push(tempDir);
+
+    const repoPath = join(tempDir, "work");
+    mkdirSync(repoPath, { recursive: true });
+
+    const configPath = join(tempDir, "control-plane.json");
+    writeFileSync(configPath, JSON.stringify({
+      version: 1,
+      defaults: {},
+      projects: [
+        {
+          id: "work",
+          name: "Work",
+          repoPath,
+          defaultLanes: [
+            {
+              id: "job-ops",
+              baseBranch: "main",
+              assistantEnabled: true,
+              ownerInstanceId: "windows",
+            },
+          ],
+        },
+      ],
+      discord: {
+        enabled: true,
+        routes: [
+          {
+            projectId: "work",
+            channelId: "333",
+            purpose: "workstreams",
+            lane: "job-ops",
+            assistantEnabled: true,
+            ownerInstanceId: "windows",
+          },
+        ],
+      },
+    }, null, 2));
+
+    const config = loadConfig(configPath);
+    expect(config.projects[0].defaultLanes[0]).toMatchObject({
+      id: "job-ops",
+      baseBranch: "main",
+      ownerInstanceId: "windows",
+    });
+    expect(config.discord.routes[0]).toMatchObject({
+      lane: "job-ops",
+      assistantEnabled: true,
+      ownerInstanceId: "windows",
+    });
   });
 });

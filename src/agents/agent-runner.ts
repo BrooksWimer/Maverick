@@ -100,7 +100,17 @@ function buildContextBlock(context: AgentContext): string {
 
   sections.push(`## Context`);
   sections.push(`- **Project**: ${context.projectId}`);
-  sections.push(`- **Repo**: ${context.repoPath}`);
+  sections.push(`- **Canonical Repo Root**: ${context.canonicalRepoRoot ?? context.repoPath}`);
+  sections.push(`- **Execution Workspace**: ${context.executionWorkspace ?? context.cwd}`);
+  if (context.workspaceMode) {
+    sections.push(`- **Workspace Mode**: ${context.workspaceMode}`);
+  }
+  if (context.durableBaseBranch) {
+    sections.push(`- **Durable Base Branch**: ${context.durableBaseBranch}`);
+  }
+  if (context.disposableBranch) {
+    sections.push(`- **Disposable Workstream Branch**: ${context.disposableBranch}`);
+  }
 
   if (context.workstreamId) {
     sections.push(`- **Workstream**: ${context.workstreamName ?? context.workstreamId}`);

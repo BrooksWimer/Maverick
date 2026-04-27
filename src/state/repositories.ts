@@ -26,10 +26,13 @@ export interface WorkstreamRow {
   current_goal: string | null;
   cwd: string | null;
   branch: string | null;
+  base_branch: string | null;
   codex_thread_id: string | null;
   execution_backend: string;
   discord_channel_id: string | null;
   discord_thread_id: string | null;
+  discord_parent_channel_id: string | null;
+  workspace_mode: string;
   waiting_on_approval: number;
   pending_decision: string | null;
   summary: string | null;
@@ -97,12 +100,29 @@ export interface AssistantMessageRow {
   source: string;
   direction: string;
   contact: string | null;
+  project_id: string | null;
+  lane_id: string | null;
+  thread_id: string | null;
   body: string;
   normalized_body: string;
   intent: string | null;
   status: string;
   metadata_json: string | null;
   created_at: string;
+}
+
+export interface DiscordThreadBindingRow {
+  thread_id: string;
+  parent_channel_id: string;
+  project_id: string;
+  epic_id: string | null;
+  lane: string | null;
+  base_branch: string | null;
+  assistant_enabled: number;
+  owner_instance_id: string | null;
+  source: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AssistantNoteRow {
@@ -228,14 +248,20 @@ export const workstreams = {
     description?: string;
     cwd?: string;
     branch?: string;
+    base_branch?: string;
+    workspace_mode?: string;
     execution_backend?: string;
     discord_channel_id?: string;
+    discord_thread_id?: string;
+    discord_parent_channel_id?: string;
   }): WorkstreamRow {
     const db = getDatabase();
     const id = data.id ?? randomUUID();
     db.prepare(`
-      INSERT INTO workstreams (id, project_id, epic_id, name, description, cwd, branch, execution_backend, discord_channel_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO workstreams (
+        id, project_id, epic_id, name, description, cwd, branch, base_branch, workspace_mode, execution_backend, discord_channel_id, discord_thread_id, discord_parent_channel_id
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.project_id,
@@ -244,8 +270,12 @@ export const workstreams = {
       data.description ?? null,
       data.cwd ?? null,
       data.branch ?? null,
+      data.base_branch ?? null,
+      data.workspace_mode ?? "legacy-root",
       data.execution_backend ?? "codex-app-server",
-      data.discord_channel_id ?? null
+      data.discord_channel_id ?? null,
+      data.discord_thread_id ?? null,
+      data.discord_parent_channel_id ?? null,
     );
     return workstreams.getById(id)!;
   },
@@ -269,13 +299,16 @@ export const workstreams = {
 
   listByDiscordChannel(channelId: string): WorkstreamRow[] {
     const db = getDatabase();
-    return db.prepare("SELECT * FROM workstreams WHERE discord_channel_id = ? ORDER BY last_activity_at DESC")
-      .all(channelId) as WorkstreamRow[];
+    return db.prepare(`
+      SELECT * FROM workstreams
+      WHERE discord_channel_id = ? OR discord_thread_id = ? OR discord_parent_channel_id = ?
+      ORDER BY last_activity_at DESC
+    `).all(channelId, channelId, channelId) as WorkstreamRow[];
   },
 
   update(id: string, fields: Partial<Pick<WorkstreamRow,
-    "state" | "current_goal" | "cwd" | "branch" | "codex_thread_id" |
-    "discord_channel_id" | "discord_thread_id" | "waiting_on_approval" |
+    "state" | "current_goal" | "cwd" | "branch" | "base_branch" | "codex_thread_id" |
+    "discord_channel_id" | "discord_thread_id" | "discord_parent_channel_id" | "workspace_mode" | "waiting_on_approval" |
     "pending_decision" | "summary" | "plan" | "planning_context_json" | "verification_context_json" | "completed_at"
   >>): WorkstreamRow | undefined {
     const db = getDatabase();
@@ -292,6 +325,90 @@ export const workstreams = {
     values.push(id);
     db.prepare(`UPDATE workstreams SET ${sets.join(", ")} WHERE id = ?`).run(...values);
     return workstreams.getById(id);
+  },
+};
+
+// --- Discord thread bindings ---
+
+export const discordThreadBindings = {
+  upsert(data: {
+    thread_id: string;
+    parent_channel_id: string;
+    project_id: string;
+    epic_id?: string | null;
+    lane?: string | null;
+    base_branch?: string | null;
+    assistant_enabled?: boolean;
+    owner_instance_id?: string | null;
+    source?: string;
+  }): DiscordThreadBindingRow {
+    const db = getDatabase();
+    db.prepare(`
+      INSERT INTO discord_thread_bindings (
+        thread_id, parent_channel_id, project_id, epic_id, lane, base_branch, assistant_enabled, owner_instance_id, source
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        parent_channel_id = excluded.parent_channel_id,
+        project_id = excluded.project_id,
+        epic_id = excluded.epic_id,
+        lane = excluded.lane,
+        base_branch = excluded.base_branch,
+        assistant_enabled = excluded.assistant_enabled,
+        owner_instance_id = excluded.owner_instance_id,
+        source = excluded.source,
+        updated_at = datetime('now')
+    `).run(
+      data.thread_id,
+      data.parent_channel_id,
+      data.project_id,
+      data.epic_id ?? null,
+      data.lane ?? null,
+      data.base_branch ?? null,
+      data.assistant_enabled ? 1 : 0,
+      data.owner_instance_id ?? null,
+      data.source ?? "manual",
+    );
+
+    return discordThreadBindings.getByThreadId(data.thread_id)!;
+  },
+
+  getByThreadId(threadId: string): DiscordThreadBindingRow | undefined {
+    const db = getDatabase();
+    return db.prepare("SELECT * FROM discord_thread_bindings WHERE thread_id = ?").get(threadId) as
+      | DiscordThreadBindingRow
+      | undefined;
+  },
+
+  listByProject(projectId: string): DiscordThreadBindingRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM discord_thread_bindings
+      WHERE project_id = ?
+      ORDER BY updated_at DESC, thread_id ASC
+    `).all(projectId) as DiscordThreadBindingRow[];
+  },
+
+  listByParentChannel(parentChannelId: string): DiscordThreadBindingRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM discord_thread_bindings
+      WHERE parent_channel_id = ?
+      ORDER BY updated_at DESC, thread_id ASC
+    `).all(parentChannelId) as DiscordThreadBindingRow[];
+  },
+
+  list(): DiscordThreadBindingRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM discord_thread_bindings
+      ORDER BY updated_at DESC, thread_id ASC
+    `).all() as DiscordThreadBindingRow[];
+  },
+
+  delete(threadId: string): void {
+    const db = getDatabase();
+    db.prepare("DELETE FROM discord_thread_bindings WHERE thread_id = ?").run(threadId);
   },
 };
 
@@ -539,6 +656,9 @@ export const assistantMessages = {
     source: string;
     direction: string;
     contact?: string | null;
+    project_id?: string | null;
+    lane_id?: string | null;
+    thread_id?: string | null;
     body: string;
     normalized_body: string;
     intent?: string | null;
@@ -548,13 +668,18 @@ export const assistantMessages = {
     const db = getDatabase();
     const id = data.id ?? randomUUID();
     db.prepare(`
-      INSERT INTO assistant_messages (id, source, direction, contact, body, normalized_body, intent, status, metadata_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO assistant_messages (
+        id, source, direction, contact, project_id, lane_id, thread_id, body, normalized_body, intent, status, metadata_json
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.source,
       data.direction,
       data.contact ?? null,
+      data.project_id ?? null,
+      data.lane_id ?? null,
+      data.thread_id ?? null,
       data.body,
       data.normalized_body,
       data.intent ?? null,

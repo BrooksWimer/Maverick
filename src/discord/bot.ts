@@ -27,7 +27,7 @@ import { eventBus } from "../orchestrator/event-bus.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantService } from "../assistant/index.js";
 import type { DailyBriefService } from "../daily-brief/index.js";
-import type { ApprovalRow, WorkstreamRow } from "../state/index.js";
+import type { ApprovalRow, DiscordThreadBindingRow, WorkstreamRow } from "../state/index.js";
 import type { DiscordRoute, EpicBranchConfig, OrchestratorConfig, ProjectConfig } from "../config/schema.js";
 import { workstreamLaneForEpic } from "../projects/epics.js";
 import type { AssistantAttachment } from "../assistant/types.js";
@@ -36,6 +36,7 @@ import { renderWorkstreamStatusSnapshot } from "../orchestrator/status.js";
 import { renderMarkdownDocument } from "../markdown/presentation.js";
 import type { PendingPlanningDecision } from "../agents/types.js";
 import { renderPlanningSummary } from "../agents/planning-support.js";
+import { getRuntimeInstanceId } from "../runtime/identity.js";
 
 const log = createLogger("discord");
 
@@ -67,6 +68,20 @@ type ResolvedEpic = {
   branch: string;
   lane: string;
   source: "route" | "explicit" | "default";
+};
+
+type ResolvedThreadContext = {
+  projectId: string;
+  route: DiscordRoute | null;
+  parentChannelId: string | null;
+  threadId: string | null;
+  lane: string | null;
+  baseBranch: string | null;
+  epicId: string | null;
+  assistantEnabled: boolean;
+  ownerInstanceId: string | null;
+  source: "route" | "thread-binding" | "thread-title";
+  binding: DiscordThreadBindingRow | null;
 };
 
 type WorkSmartGoalChoice = "none" | "business-context" | "engineering-learning" | "both";
@@ -502,12 +517,6 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .addStringOption((option) =>
           option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
         )
-        .addBooleanOption((option) =>
-          option
-            .setName("resume")
-            .setDescription("Resume the existing planning flow instead of starting a fresh one")
-            .setRequired(false)
-        )
     )
     .addSubcommand((subcommand) =>
       subcommand
@@ -576,6 +585,12 @@ function subcommandBuilder(config: OrchestratorConfig) {
         )
         .addStringOption((option) =>
           option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("resume")
+            .setDescription("Resume the existing planning flow instead of starting a fresh one")
+            .setRequired(false)
         )
     )
     .addSubcommand((subcommand) =>
@@ -835,6 +850,23 @@ function subcommandBuilder(config: OrchestratorConfig) {
       subcommand
         .setName("brief")
         .setDescription("Generate and post the nightly Claude brief")
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("audit")
+        .setDescription("Inspect Maverick git, Discord, and state routing health")
+        .addStringOption((option) =>
+          option
+            .setName("scope")
+            .setDescription("Which part of the control plane to inspect")
+            .setRequired(false)
+            .addChoices(
+              { name: "All", value: "all" },
+              { name: "Git", value: "git" },
+              { name: "Discord", value: "discord" },
+              { name: "State", value: "state" },
+            )
+        )
     );
 
   return [
@@ -850,6 +882,7 @@ function subcommandBuilder(config: OrchestratorConfig) {
 export class DiscordBot {
   private readonly client: Client;
   private readonly commands: RESTPostAPIApplicationCommandsJSONBody[];
+  private readonly instanceId = getRuntimeInstanceId();
   private readonly planningAnswerDrafts = new Map<string, Record<string, string>>();
 
   constructor(
@@ -1236,7 +1269,13 @@ export class DiscordBot {
       return;
     }
 
-    if (!this.isAssistantChannel(message.channelId)) {
+    const threadContext = this.resolveAssistantThreadContext(message);
+    const legacyAssistantChannel = this.isLegacyAssistantChannel(message.channelId);
+    if (!threadContext && !legacyAssistantChannel) {
+      return;
+    }
+
+    if (threadContext?.ownerInstanceId && threadContext.ownerInstanceId !== this.instanceId) {
       return;
     }
 
@@ -1258,6 +1297,13 @@ export class DiscordBot {
           guildId: message.guildId,
           messageId: message.id,
           username: message.author.username,
+          projectId: threadContext?.projectId ?? null,
+          laneId: threadContext?.lane ?? null,
+          threadId: threadContext?.threadId ?? null,
+          epicId: threadContext?.epicId ?? null,
+          ownerInstanceId: threadContext?.ownerInstanceId ?? null,
+          routeChannelId: threadContext?.route?.channelId ?? null,
+          parentChannelId: threadContext?.parentChannelId ?? null,
         },
       });
 
@@ -1378,8 +1424,10 @@ export class DiscordBot {
 
     const providedProjectId = interaction.options.getString("project");
     const route = this.resolveInteractionRoute(interaction);
+    const threadContext = this.resolveInteractionThreadContext(interaction);
     const projectId =
       providedProjectId ??
+      threadContext?.projectId ??
       route?.projectId ??
       (this.config.projects.length === 1 ? this.config.projects[0]?.id : null);
 
@@ -1393,7 +1441,11 @@ export class DiscordBot {
       `Project: \`${status.project.name}\` (\`${status.project.id}\`)`,
       `Repo: ${status.project.repoPath}`,
       status.bootstrap
-        ? `Bootstrap: ${status.bootstrap.createdFiles.length > 0 ? `installed ${status.bootstrap.createdFiles.length} file(s)` : "already present"}`
+        ? status.bootstrap.missingFiles.length > 0
+          ? `Bootstrap: missing ${status.bootstrap.missingFiles.length} file(s)`
+          : status.bootstrap.createdFiles.length > 0
+            ? `Bootstrap: installed ${status.bootstrap.createdFiles.length} file(s)`
+            : "Bootstrap: already present"
         : "Bootstrap: unavailable",
       `Active workstreams: ${status.activeCount}`,
       `Pending approvals: ${status.pendingApprovals}`,
@@ -1675,7 +1727,7 @@ export class DiscordBot {
 
   private async handleMaverickCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const subcommand = interaction.options.getSubcommand();
-    if (subcommand !== "brief") {
+    if (subcommand !== "brief" && subcommand !== "audit") {
       await interaction.reply({
         content: `Unsupported maverick subcommand: ${subcommand}`,
         flags: MessageFlags.Ephemeral,
@@ -1684,6 +1736,62 @@ export class DiscordBot {
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (subcommand === "audit") {
+      const scope = (interaction.options.getString("scope") ?? "all") as "git" | "discord" | "state" | "all";
+      const report = this.orchestrator.getAuditReport(scope);
+      const lines = [
+        `Instance: \`${report.instanceId}\``,
+        `Scope: \`${report.scope}\``,
+        `Projects: ${report.projects.length}`,
+        "",
+      ];
+
+      for (const project of report.projects) {
+        lines.push(`## ${project.name} (\`${project.id}\`)`);
+        lines.push(`- Workspace kind: \`${project.workspaceKind}\``);
+        lines.push(`- Repo: ${project.repoPath}`);
+        if (project.defaultWorktreeBaseBranch) {
+          lines.push(`- Default base branch: \`${project.defaultWorktreeBaseBranch}\``);
+        }
+        if (project.bootstrap) {
+          lines.push(
+            `- Bootstrap: missing ${project.bootstrap.missingFiles.length}, created ${project.bootstrap.createdFiles.length}`
+          );
+        }
+        if (project.activeWorkstreams.length > 0) {
+          lines.push(`- Active workstreams: ${project.activeWorkstreams.length}`);
+        }
+        if (project.threadBindings.length > 0) {
+          lines.push(`- Thread bindings: ${project.threadBindings.length}`);
+        }
+        if (project.gitAudit?.mode === "git") {
+          lines.push(`- Root branch: \`${project.gitAudit.rootBranch ?? "unknown"}\``);
+          lines.push(`- Root dirty: ${project.gitAudit.rootDirty ? "yes" : "no"}`);
+          if ((project.gitAudit.orphanedWorktrees?.length ?? 0) > 0) {
+            lines.push(`- Orphaned worktrees: ${project.gitAudit.orphanedWorktrees?.length ?? 0}`);
+          }
+          if ((project.gitAudit.workstreamMismatches?.length ?? 0) > 0) {
+            lines.push(`- Workstream mismatches: ${project.gitAudit.workstreamMismatches?.length ?? 0}`);
+          }
+        }
+        lines.push("");
+      }
+
+      if (report.discord) {
+        lines.push(`Discord routes: ${report.discord.routes.length}`);
+        lines.push(`Persisted thread bindings: ${report.discord.threadBindingCount}`);
+        lines.push("");
+      }
+
+      if (report.state) {
+        lines.push(`Active workstreams: ${report.state.activeWorkstreamCount}`);
+        lines.push(`Legacy-root workstreams: ${report.state.legacyRootWorkstreams.length}`);
+      }
+
+      await this.editReplyWithChunks(interaction, lines.join("\n"));
+      return;
+    }
+
     const result = await this.orchestrator.generateBrief({
       trigger: "manual",
       requestedBy: interaction.user.id,
@@ -1779,32 +1887,52 @@ export class DiscordBot {
     const name = interaction.options.getString("name", true);
     const description = interaction.options.getString("description") ?? undefined;
 
-    if (this.isAssistantChannel(interaction.channelId)) {
+    if (this.isLegacyAssistantChannel(interaction.channelId)) {
       throw new Error(
         "This channel is reserved for assistant chat. Start workstreams in the routed workstream channel instead."
       );
     }
 
     const route = this.resolveInteractionRoute(interaction);
+    const threadContext = this.resolveInteractionThreadContext(interaction);
     const explicitProjectId = interaction.options.getString("project");
     const explicitEpic = this.parseEpicChoice(interaction.options.getString("epic"));
     const projectId = this.resolveProjectId(
       interaction,
       explicitProjectId,
       explicitEpic?.projectId ?? null,
-      route?.projectId ?? null
+      threadContext?.projectId ?? route?.projectId ?? null
     );
-    const epic = this.resolveEpic(projectId, route, explicitEpic);
+    const epic = this.resolveEpic(projectId, route, explicitEpic, threadContext);
+    const binding = this.resolveWorkstreamChannelBinding(interaction);
 
     const workstream = await this.orchestrator.createWorkstream({
       projectId,
       name,
       description,
-      discordChannelId: interaction.channelId,
+      discordChannelId: binding.channelId,
+      discordThreadId: binding.threadId,
+      discordParentChannelId: binding.parentChannelId,
       baseBranch: epic?.branch,
       lane: epic?.lane,
       epicId: persistedEpicIdForResolvedEpic(epic),
     });
+
+    if (binding.threadId && binding.parentChannelId) {
+      const assistantEnabled = threadContext?.assistantEnabled ?? route?.assistantEnabled ?? false;
+      const ownerInstanceId = threadContext?.ownerInstanceId ?? route?.ownerInstanceId ?? this.instanceId;
+      this.orchestrator.upsertDiscordThreadBinding({
+        threadId: binding.threadId,
+        parentChannelId: binding.parentChannelId,
+        projectId,
+        epicId: persistedEpicIdForResolvedEpic(epic) ?? null,
+        lane: epic?.lane ?? threadContext?.lane ?? null,
+        baseBranch: epic?.branch ?? threadContext?.baseBranch ?? null,
+        assistantEnabled,
+        ownerInstanceId,
+        source: threadContext?.source ?? "manual",
+      });
+    }
 
     await interaction.editReply(
       [
@@ -1813,7 +1941,7 @@ export class DiscordBot {
         `Project: \`${projectId}\``,
         epic && epic.source !== "default" ? `Epic: \`${epic.id}\` (${epic.source})` : null,
         epic ? `Base branch: \`${epic.branch}\`${epic.source === "default" ? " (default)" : ""}` : null,
-        workstream.branch ? `Branch: \`${workstream.branch}\`` : "Branch: shared repository root",
+        workstream.branch ? `Branch: \`${workstream.branch}\`` : `Branch: \`${workstream.workspace_mode}\` workspace`,
         workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
         `Codex thread: \`${workstream.codex_thread_id}\``,
       ]
@@ -1867,8 +1995,15 @@ export class DiscordBot {
   }
 
   private async handleDispatch(interaction: ChatInputCommandInteraction): Promise<void> {
-    const instruction = interaction.options.getString("instruction", true);
+    const providedInstruction = interaction.options.getString("instruction", true);
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
+    const planningContext = this.orchestrator.getPlanningContext(workstream.id);
+    const normalizedInstruction = providedInstruction.trim().toLowerCase();
+    const instruction =
+      planningContext?.finalExecutionPrompt &&
+      ["resume", "dispatch", "stored plan", "use stored plan"].includes(normalizedInstruction)
+        ? planningContext.originalInstruction
+        : providedInstruction;
 
     await this.startAsyncWorkstreamCommand(interaction, workstream, "dispatch", {
       description: "Starting Codex implementation in the background.",
@@ -1952,13 +2087,17 @@ export class DiscordBot {
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
     const instruction = interaction.options.getString("instruction", true);
     const resume = interaction.options.getBoolean("resume") ?? false;
+    const planningContext = resume ? this.orchestrator.getPlanningContext(workstream.id) : null;
+    const effectiveInstruction = resume
+      ? planningContext?.originalInstruction ?? instruction
+      : instruction;
 
     await this.startAsyncWorkstreamCommand(interaction, workstream, "plan", {
       description: resume
         ? "Resuming Claude planning in the background."
         : "Running Claude planning in the background.",
       run: async () => {
-        await this.orchestrator.generatePlan(workstream.id, instruction, "manual", {
+        await this.orchestrator.generatePlan(workstream.id, effectiveInstruction, "manual", {
           resumeExisting: resume,
         });
       },
@@ -2377,6 +2516,25 @@ export class DiscordBot {
     throw new Error("No workstream could be inferred for this channel.");
   }
 
+  private resolveWorkstreamChannelBinding(
+    interaction: ChatInputCommandInteraction,
+  ): { channelId: string; threadId?: string; parentChannelId?: string } {
+    const route = this.resolveInteractionRoute(interaction);
+    const parentChannelId = this.parentChannelIdForInteraction(interaction);
+
+    if (parentChannelId && route?.channelId === parentChannelId) {
+      return {
+        channelId: parentChannelId,
+        threadId: interaction.channelId,
+        parentChannelId,
+      };
+    }
+
+    return {
+      channelId: interaction.channelId,
+    };
+  }
+
   private formatWorkstream(workstream: WorkstreamRow): string {
     const snapshot = this.orchestrator.getWorkstreamStatusSnapshot(workstream.id);
     if (!snapshot) {
@@ -2402,6 +2560,11 @@ export class DiscordBot {
   }
 
   private projectIdForChannel(channelId: string, parentChannelId?: string | null): string | null {
+    const threadContext = this.resolveThreadContext(channelId, parentChannelId);
+    if (threadContext) {
+      return threadContext.projectId;
+    }
+
     const route = this.routeForChannel(channelId, parentChannelId);
     return route?.projectId ?? null;
   }
@@ -2430,7 +2593,8 @@ export class DiscordBot {
   private resolveEpic(
     projectId: string,
     route: DiscordRoute | null,
-    explicitEpic: ParsedEpicChoice | null
+    explicitEpic: ParsedEpicChoice | null,
+    threadContext?: ResolvedThreadContext | null,
   ): ResolvedEpic | null {
     const project = this.getProjectConfig(projectId);
 
@@ -2440,7 +2604,10 @@ export class DiscordBot {
       );
     }
 
-    const epicId = explicitEpic?.epicId ?? (route?.projectId === projectId ? route.epicId : undefined);
+    const epicId =
+      explicitEpic?.epicId ??
+      (threadContext?.projectId === projectId ? threadContext.epicId ?? undefined : undefined) ??
+      (route?.projectId === projectId ? route.epicId : undefined);
     if (epicId) {
       const epic = project.epicBranches.find((candidate) => candidate.id === epicId);
       if (!epic) {
@@ -2452,6 +2619,15 @@ export class DiscordBot {
         branch: epic.branch,
         lane: workstreamLaneForEpic(epic),
         source: explicitEpic ? "explicit" : "route",
+      };
+    }
+
+    if (threadContext?.projectId === projectId && threadContext.baseBranch) {
+      return {
+        id: "default",
+        branch: threadContext.baseBranch,
+        lane: threadContext.lane ?? project.id,
+        source: "route",
       };
     }
 
@@ -2475,6 +2651,14 @@ export class DiscordBot {
 
   private resolveInteractionRoute(interaction: ChatInputCommandInteraction): DiscordRoute | null {
     return this.routeForChannel(interaction.channelId, this.parentChannelIdForInteraction(interaction));
+  }
+
+  private resolveInteractionThreadContext(interaction: ChatInputCommandInteraction): ResolvedThreadContext | null {
+    return this.resolveThreadContext(
+      interaction.channelId,
+      this.parentChannelIdForInteraction(interaction),
+      this.threadNameFromInteraction(interaction),
+    );
   }
 
   private parentChannelIdForInteraction(interaction: ChatInputCommandInteraction): string | null {
@@ -2506,10 +2690,222 @@ export class DiscordBot {
     return null;
   }
 
-  private isAssistantChannel(channelId: string): boolean {
+  private resolveAssistantThreadContext(message: Message): ResolvedThreadContext | null {
+    const parentChannelId = this.parentChannelIdForMessage(message);
+    const threadContext = this.resolveThreadContext(
+      message.channelId,
+      parentChannelId,
+      this.threadNameFromMessage(message),
+    );
+    if (!threadContext || !threadContext.assistantEnabled) {
+      return null;
+    }
+
+    return threadContext;
+  }
+
+  private isLegacyAssistantChannel(channelId: string): boolean {
     return this.config.assistant.enabled &&
       this.config.assistant.discord.enabled &&
       this.config.assistant.discord.channelIds.includes(channelId);
+  }
+
+  private parentChannelIdForMessage(message: Message): string | null {
+    const channel = message.channel;
+    if (
+      channel.type === ChannelType.PublicThread ||
+      channel.type === ChannelType.PrivateThread ||
+      channel.type === ChannelType.AnnouncementThread
+    ) {
+      return channel.parentId ?? null;
+    }
+
+    return null;
+  }
+
+  private threadNameFromInteraction(interaction: ChatInputCommandInteraction): string | null {
+    const channel = interaction.channel;
+    if (!channel || !("name" in channel) || typeof channel.name !== "string") {
+      return null;
+    }
+
+    return channel.name;
+  }
+
+  private threadNameFromMessage(message: Message): string | null {
+    const channel = message.channel;
+    if (!("name" in channel) || typeof channel.name !== "string") {
+      return null;
+    }
+
+    return channel.name;
+  }
+
+  private normalizeLaneIdCandidate(value: string | null | undefined): string | null {
+    if (!value) {
+      return null;
+    }
+
+    const normalized = value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  private resolveThreadContext(
+    channelId: string,
+    parentChannelId?: string | null,
+    threadName?: string | null,
+  ): ResolvedThreadContext | null {
+    if (!parentChannelId) {
+      return null;
+    }
+
+    const route = this.routeForChannel(channelId, parentChannelId);
+    if (!route || route.channelId !== parentChannelId) {
+      return null;
+    }
+
+    const existingBinding = this.orchestrator.getDiscordThreadBinding(channelId);
+    if (existingBinding) {
+      return {
+        projectId: existingBinding.project_id,
+        route,
+        parentChannelId,
+        threadId: channelId,
+        lane: existingBinding.lane,
+        baseBranch: existingBinding.base_branch,
+        epicId: existingBinding.epic_id,
+        assistantEnabled: Boolean(existingBinding.assistant_enabled),
+        ownerInstanceId: existingBinding.owner_instance_id,
+        source: "thread-binding",
+        binding: existingBinding,
+      };
+    }
+
+    const project = this.getProjectConfig(route.projectId);
+    const normalizedThreadName = this.normalizeLaneIdCandidate(threadName);
+
+    if (route.epicId) {
+      const epic = project.epicBranches.find((candidate) => candidate.id === route.epicId);
+      if (epic) {
+        return {
+          projectId: project.id,
+          route,
+          parentChannelId,
+          threadId: channelId,
+          lane: workstreamLaneForEpic(epic),
+          baseBranch: route.baseBranch ?? epic.branch,
+          epicId: epic.id,
+          assistantEnabled: route.assistantEnabled,
+          ownerInstanceId: route.ownerInstanceId ?? null,
+          source: "route",
+          binding: null,
+        };
+      }
+    }
+
+    if (route.lane) {
+      const lane = project.defaultLanes.find((candidate) => candidate.id === route.lane);
+      if (lane) {
+        return {
+          projectId: project.id,
+          route,
+          parentChannelId,
+          threadId: channelId,
+          lane: lane.id,
+          baseBranch: route.baseBranch ?? lane.baseBranch,
+          epicId: null,
+          assistantEnabled: route.assistantEnabled || lane.assistantEnabled,
+          ownerInstanceId: route.ownerInstanceId ?? lane.ownerInstanceId ?? null,
+          source: "route",
+          binding: null,
+        };
+      }
+    }
+
+    if (normalizedThreadName) {
+      const matchingLane = project.defaultLanes.find((candidate) => candidate.id === normalizedThreadName);
+      if (matchingLane) {
+        const binding = this.orchestrator.upsertDiscordThreadBinding({
+          threadId: channelId,
+          parentChannelId,
+          projectId: project.id,
+          epicId: null,
+          lane: matchingLane.id,
+          baseBranch: matchingLane.baseBranch,
+          assistantEnabled: route.assistantEnabled || matchingLane.assistantEnabled,
+          ownerInstanceId: route.ownerInstanceId ?? matchingLane.ownerInstanceId ?? this.instanceId,
+          source: "thread-title",
+        });
+
+        return {
+          projectId: binding.project_id,
+          route,
+          parentChannelId,
+          threadId: channelId,
+          lane: binding.lane,
+          baseBranch: binding.base_branch,
+          epicId: binding.epic_id,
+          assistantEnabled: Boolean(binding.assistant_enabled),
+          ownerInstanceId: binding.owner_instance_id,
+          source: "thread-title",
+          binding,
+        };
+      }
+
+      const matchingEpic = project.epicBranches.find((candidate) => {
+        return candidate.id === normalizedThreadName || this.normalizeLaneIdCandidate(workstreamLaneForEpic(candidate)) === normalizedThreadName;
+      });
+      if (matchingEpic) {
+        const binding = this.orchestrator.upsertDiscordThreadBinding({
+          threadId: channelId,
+          parentChannelId,
+          projectId: project.id,
+          epicId: matchingEpic.id,
+          lane: workstreamLaneForEpic(matchingEpic),
+          baseBranch: matchingEpic.branch,
+          assistantEnabled: route.assistantEnabled,
+          ownerInstanceId: route.ownerInstanceId ?? this.instanceId,
+          source: "thread-title",
+        });
+
+        return {
+          projectId: binding.project_id,
+          route,
+          parentChannelId,
+          threadId: channelId,
+          lane: binding.lane,
+          baseBranch: binding.base_branch,
+          epicId: binding.epic_id,
+          assistantEnabled: Boolean(binding.assistant_enabled),
+          ownerInstanceId: binding.owner_instance_id,
+          source: "thread-title",
+          binding,
+        };
+      }
+    }
+
+    if (project.defaultWorktreeBaseBranch) {
+      return {
+        projectId: project.id,
+        route,
+        parentChannelId,
+        threadId: channelId,
+        lane: project.id,
+        baseBranch: route.baseBranch ?? project.defaultWorktreeBaseBranch,
+        epicId: null,
+        assistantEnabled: route.assistantEnabled,
+        ownerInstanceId: route.ownerInstanceId ?? null,
+        source: "route",
+        binding: null,
+      };
+    }
+
+    return null;
   }
 
   private normalizeAssistantMessageContent(content: string): string {

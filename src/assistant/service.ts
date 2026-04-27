@@ -143,6 +143,9 @@ export class AssistantService {
       source: params.source,
       direction: "inbound",
       contact: params.from ?? null,
+      project_id: this.readProjectId(params.metadata),
+      lane_id: this.readLaneId(params.metadata),
+      thread_id: this.readThreadId(params.metadata),
       body: params.body,
       normalized_body: normalizedBody,
       metadata_json: metadataJson,
@@ -1306,6 +1309,18 @@ export class AssistantService {
 
   private readChannelId(metadata: Record<string, unknown> | undefined): string | null {
     return typeof metadata?.channelId === "string" ? metadata.channelId : null;
+  }
+
+  private readProjectId(metadata: Record<string, unknown> | undefined): string | null {
+    return typeof metadata?.projectId === "string" ? metadata.projectId : null;
+  }
+
+  private readLaneId(metadata: Record<string, unknown> | undefined): string | null {
+    return typeof metadata?.laneId === "string" ? metadata.laneId : null;
+  }
+
+  private readThreadId(metadata: Record<string, unknown> | undefined): string | null {
+    return typeof metadata?.threadId === "string" ? metadata.threadId : null;
   }
 
   private queueMirrorSync(reason: string): void {

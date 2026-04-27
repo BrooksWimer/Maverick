@@ -3,7 +3,16 @@
   "projects": [
     {
       "id": "maverick",
-      "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick"
+      "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
+      "defaultLanes": [
+        {
+          "id": "self-updates",
+          "baseBranch": "main",
+          "description": "Maverick self-updates and control-plane work",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        }
+      ]
     },
     {
       "id": "netwise",
@@ -12,6 +21,7 @@
     {
       "id": "syncsonic",
       "repoPath": "C:\\Users\\wimer\\Desktop\\SyncSonicPi",
+      "defaultWorktreeBaseBranch": "foundation/neutral-minimal",
       "epicBranches": [
         {
           "id": "pipewire-transport-stability",
@@ -124,6 +134,17 @@
       "id": "portfolio-resume",
       "name": "Portfolio & Resume",
       "repoPath": "C:\\Users\\wimer\\Desktop\\portfolio",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "master",
+      "defaultLanes": [
+        {
+          "id": "portfolio-resume",
+          "baseBranch": "master",
+          "description": "Portfolio and resume updates",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        }
+      ],
       "maxConcurrentWorkstreams": 2,
       "claudeReview": {
         "enabled": true,
@@ -168,6 +189,31 @@
       "id": "work",
       "name": "Work",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Work",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "main",
+      "defaultLanes": [
+        {
+          "id": "job-ops",
+          "baseBranch": "main",
+          "description": "Operational work notes and active tasks",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        },
+        {
+          "id": "business-context-deep-dives",
+          "baseBranch": "main",
+          "description": "Business context deep dives and supporting notes",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        },
+        {
+          "id": "engineering-learning",
+          "baseBranch": "main",
+          "description": "Independent engineering learning and study notes",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        }
+      ],
       "maxConcurrentWorkstreams": 2,
       "claudePlanning": {
         "enabled": true,
@@ -207,35 +253,48 @@
         "projectId": "syncsonic",
         "channelId": "1491257893012635648",
         "purpose": "workstreams",
-        "epicId": "pipewire-transport-stability"
+        "epicId": "pipewire-transport-stability",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "syncsonic",
         "channelId": "1491258451026907426",
         "purpose": "workstreams",
-        "epicId": "startup-mic-auto-alignment"
+        "epicId": "startup-mic-auto-alignment",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "syncsonic",
         "channelId": "1491258814475800637",
         "purpose": "workstreams",
-        "epicId": "runtime-ultrasonic-auto-alignment"
+        "epicId": "runtime-ultrasonic-auto-alignment",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "syncsonic",
         "channelId": "1491259320686346260",
         "purpose": "workstreams",
-        "epicId": "wifi-speakers-manual-alignment"
+        "epicId": "wifi-speakers-manual-alignment",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "portfolio-resume",
         "channelId": "1497643572831453264",
-        "purpose": "workstreams"
+        "purpose": "workstreams",
+        "lane": "portfolio-resume",
+        "assistantEnabled": true,
+        "ownerInstanceId": "windows"
       },
       {
         "projectId": "work",
         "channelId": "1490549869625081896",
-        "purpose": "workstreams"
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "windows"
       }
     ]
   },
@@ -244,7 +303,7 @@
   },
   "assistant": {
     "discord": {
-      "channelIds": ["1490188914861019197", "1490549869625081896"]
+      "channelIds": ["1490188914861019197"]
     }
   },
   "dailyBrief": {

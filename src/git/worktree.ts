@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 export type WorktreeProvisionResult = {
   cwd: string;
   branch: string | null;
-  mode: "worktree" | "shared-root";
+  mode: "worktree" | "legacy-root" | "notes";
 };
 
 type ExecResult = {
@@ -79,15 +79,24 @@ export async function provisionWorktree(params: {
   projectId: string;
   workstreamId: string;
   name: string;
+  workspaceKind?: "git" | "notes";
   lane?: string | null;
   baseRef?: string;
   generatedRoot?: string;
 }): Promise<WorktreeProvisionResult> {
+  if (params.workspaceKind === "notes") {
+    return {
+      cwd: params.repoPath,
+      branch: null,
+      mode: "notes",
+    };
+  }
+
   if (!(await isGitRepository(params.repoPath))) {
     return {
       cwd: params.repoPath,
       branch: null,
-      mode: "shared-root",
+      mode: "legacy-root",
     };
   }
 

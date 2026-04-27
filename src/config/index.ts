@@ -10,6 +10,8 @@ export {
   type EpicCharterConfig,
   type EpicCharterDocConfig,
   type EpicBranchConfig,
+  type DefaultLaneConfig,
+  type WorkspaceKind,
   type WorkflowConfig,
   type StateTransition,
   type EscalationRule,
