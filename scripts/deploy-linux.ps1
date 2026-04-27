@@ -89,8 +89,7 @@ $remoteCommand = @(
     "sudo -u maverick -H -- npm --prefix $RemoteAppDir ci --include=dev",
     "sudo -u maverick -H -- npm --prefix $RemoteAppDir run build",
     "sudo -- systemctl restart $ServiceName",
-    "sleep 3",
-    "curl --fail --silent http://127.0.0.1:3847/health"
+    "for i in {1..20}; do if curl --fail --silent http://127.0.0.1:3847/health; then break; fi; if [ ""`$i"" -eq 20 ]; then exit 1; fi; sleep 1; done"
 ) -join " && "
 
 try {
