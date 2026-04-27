@@ -6,9 +6,37 @@
       "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
       "defaultLanes": [
         {
-          "id": "self-updates",
+          "id": "control-plane",
           "baseBranch": "main",
-          "description": "Maverick self-updates and control-plane work",
+          "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        },
+        {
+          "id": "discord-routing",
+          "baseBranch": "main",
+          "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        },
+        {
+          "id": "assistant-infrastructure",
+          "baseBranch": "main",
+          "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        },
+        {
+          "id": "git-hygiene",
+          "baseBranch": "main",
+          "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        },
+        {
+          "id": "deployment-ops",
+          "baseBranch": "main",
+          "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
           "assistantEnabled": true,
           "ownerInstanceId": "windows"
         }
@@ -138,9 +166,16 @@
       "defaultWorktreeBaseBranch": "master",
       "defaultLanes": [
         {
-          "id": "portfolio-resume",
+          "id": "portfolio",
           "baseBranch": "master",
-          "description": "Portfolio and resume updates",
+          "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
+          "assistantEnabled": true,
+          "ownerInstanceId": "windows"
+        },
+        {
+          "id": "resume",
+          "baseBranch": "master",
+          "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
           "assistantEnabled": true,
           "ownerInstanceId": "windows"
         }
@@ -180,7 +215,7 @@
       },
       "metadata": {
         "description": "Portfolio website and resume refresh workspace for presenting recent projects, work experience, and proof artifacts",
-        "primary_focus": "portfolio-resume",
+        "primary_focus": "portfolio,resume",
         "featured_projects": "maverick,netwise,syncsonic",
         "project_naming": "For portfolio content, use Astra as the public-facing project name for the configured netwise project. Netwise, Sentry, and Astra refer to the same local project lineage; the active repo is C:\\Users\\wimer\\Desktop\\Sentry\\netwise."
       }
@@ -251,47 +286,21 @@
     "routes": [
       {
         "projectId": "syncsonic",
-        "channelId": "1491257893012635648",
+        "channelId": "1498137470699569262",
         "purpose": "workstreams",
-        "epicId": "pipewire-transport-stability",
-        "assistantEnabled": true,
-        "ownerInstanceId": "linux"
-      },
-      {
-        "projectId": "syncsonic",
-        "channelId": "1491258451026907426",
-        "purpose": "workstreams",
-        "epicId": "startup-mic-auto-alignment",
-        "assistantEnabled": true,
-        "ownerInstanceId": "linux"
-      },
-      {
-        "projectId": "syncsonic",
-        "channelId": "1491258814475800637",
-        "purpose": "workstreams",
-        "epicId": "runtime-ultrasonic-auto-alignment",
-        "assistantEnabled": true,
-        "ownerInstanceId": "linux"
-      },
-      {
-        "projectId": "syncsonic",
-        "channelId": "1491259320686346260",
-        "purpose": "workstreams",
-        "epicId": "wifi-speakers-manual-alignment",
         "assistantEnabled": true,
         "ownerInstanceId": "linux"
       },
       {
         "projectId": "portfolio-resume",
-        "channelId": "1497643572831453264",
+        "channelId": "1498138271493132369",
         "purpose": "workstreams",
-        "lane": "portfolio-resume",
         "assistantEnabled": true,
         "ownerInstanceId": "windows"
       },
       {
         "projectId": "work",
-        "channelId": "1490549869625081896",
+        "channelId": "1498139409680302180",
         "purpose": "workstreams",
         "assistantEnabled": true,
         "ownerInstanceId": "windows"

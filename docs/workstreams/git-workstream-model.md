@@ -33,6 +33,8 @@ This document defines the git and routing model Maverick should enforce across p
 - Thread = epic or default lane
 - Ambient assistant = attached to the thread
 - Workstream = disposable task branch created inside the thread's lane
+- The global Maverick Assistant channel is a plain text channel, not a git-backed forum.
+- The Maverick Self-Updates forum is the git-backed Maverick coding project.
 
 Thread bindings persist:
 
@@ -44,6 +46,28 @@ Thread bindings persist:
 - `assistant_enabled`
 - `owner_instance_id`
 - `source`
+
+## Current Channel Schema
+
+The configured forum parents are:
+
+- Maverick Self-Updates: `1498437201103421582`
+- Astra (`netwise`): `1498135799475081307`
+- SyncSonic: `1498137470699569262`
+- Portfolio & Resume: `1498138271493132369`
+- Work: `1498139409680302180`
+
+The global assistant text channel is:
+
+- Maverick Assistant: `1490188914861019197`
+
+The expected lane/thread names are:
+
+- Maverick Self-Updates: `control-plane`, `discord-routing`, `assistant-infrastructure`, `git-hygiene`, `deployment-ops`
+- Astra (`netwise`): `laptop-wifi-scanner`, `mobile-wifi-scanner`, `router-admin-ingestion`
+- SyncSonic: `pipewire-transport-stability`, `startup-mic-auto-alignment`, `runtime-ultrasonic-auto-alignment`, `wifi-speakers-manual-alignment`
+- Portfolio & Resume: `portfolio`, `resume`
+- Work: `job-ops`, `business-context-deep-dives`, `engineering-learning`
 
 ## Ownership Rules
 

@@ -18,8 +18,10 @@
     "routes": [
       {
         "projectId": "maverick",
-        "channelId": "1491285608524681216",
-        "purpose": "workstreams"
+        "channelId": "1498437201103421582",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "windows"
       }
     ]
   },

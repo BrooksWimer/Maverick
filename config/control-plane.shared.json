@@ -46,9 +46,33 @@
       "defaultWorktreeBaseBranch": "main",
       "defaultLanes": [
         {
-          "id": "self-updates",
+          "id": "control-plane",
           "baseBranch": "main",
-          "description": "Maverick self-update and control-plane work",
+          "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
+          "assistantEnabled": true
+        },
+        {
+          "id": "discord-routing",
+          "baseBranch": "main",
+          "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
+          "assistantEnabled": true
+        },
+        {
+          "id": "assistant-infrastructure",
+          "baseBranch": "main",
+          "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
+          "assistantEnabled": true
+        },
+        {
+          "id": "git-hygiene",
+          "baseBranch": "main",
+          "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
+          "assistantEnabled": true
+        },
+        {
+          "id": "deployment-ops",
+          "baseBranch": "main",
+          "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
           "assistantEnabled": true
         }
       ],
@@ -86,12 +110,12 @@
         "model": "sonnet"
       },
       "metadata": {
-        "description": "Personal assistant and control-plane home project with short-lived self-update workstreams routed through maverick-updates"
+        "description": "Maverick self-update coding project. The global Maverick Assistant text channel is a separate assistant surface and does not create self-update branches by default."
       }
     },
     {
       "id": "netwise",
-      "name": "Netwise",
+      "name": "Astra",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "master",
       "epicBranches": [
@@ -215,37 +239,21 @@
     "routes": [
       {
         "projectId": "maverick",
-        "channelId": "1491285608524681216",
-        "purpose": "workstreams",
-        "lane": "self-updates",
-        "assistantEnabled": true,
-        "ownerInstanceId": "windows"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490049872089452584",
+        "channelId": "1498437201103421582",
         "purpose": "workstreams",
         "assistantEnabled": true,
         "ownerInstanceId": "windows"
       },
       {
         "projectId": "netwise",
-        "channelId": "1490049953211482455",
+        "channelId": "1498135799475081307",
         "purpose": "workstreams",
-        "assistantEnabled": true,
-        "ownerInstanceId": "windows"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490449866642690220",
-        "purpose": "workstreams",
-        "epicId": "router-admin-ingestion",
         "assistantEnabled": true,
         "ownerInstanceId": "windows"
       },
       {
         "projectId": "syncsonic",
-        "channelId": "1490171093615513742",
+        "channelId": "1498137470699569262",
         "purpose": "workstreams",
         "assistantEnabled": true,
         "ownerInstanceId": "linux"
