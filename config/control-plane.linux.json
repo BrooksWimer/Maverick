@@ -12,6 +12,129 @@
     {
       "id": "syncsonic",
       "repoPath": "/srv/maverick/repos/syncsonic"
+    },
+    {
+      "id": "portfolio-resume",
+      "name": "Portfolio & Resume",
+      "repoPath": "/srv/maverick/repos/portfolio",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "master",
+      "defaultLanes": [
+        {
+          "id": "portfolio",
+          "baseBranch": "master",
+          "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "resume",
+          "baseBranch": "master",
+          "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        }
+      ],
+      "maxConcurrentWorkstreams": 2,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "claudeVerification": {
+        "enabled": true,
+        "autoAfterTurn": true,
+        "model": "sonnet"
+      },
+      "metadata": {
+        "description": "Portfolio website and resume refresh workspace for presenting recent projects, work experience, and proof artifacts",
+        "primary_focus": "portfolio,resume",
+        "featured_projects": "maverick,netwise,syncsonic",
+        "project_naming": "For portfolio content, use Astra as the public-facing project name for the configured netwise project. Netwise, Sentry, and Astra refer to the same local project lineage; the active repo is /srv/maverick/repos/netwise."
+      }
+    },
+    {
+      "id": "work",
+      "name": "Work",
+      "repoPath": "/srv/maverick/repos/work",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "main",
+      "defaultLanes": [
+        {
+          "id": "job-ops",
+          "baseBranch": "job-ops",
+          "description": "Operational work notes and active tasks",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "business-context-deep-dives",
+          "baseBranch": "business-context-deep-dives",
+          "description": "Business context deep dives and supporting notes",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "engineering-learning",
+          "baseBranch": "engineering-learning",
+          "description": "Independent engineering learning and study notes",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        }
+      ],
+      "maxConcurrentWorkstreams": 2,
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "metadata": {
+        "description": "Private work-note workspace for job progress, project notes, acceptance criteria, and active learning",
+        "note_workspace": "work",
+        "work_smart_goal_business_title": "Business Context Deep Dives",
+        "work_smart_goal_business_description": "Do a deep dive into facets of the business that come up through work to build stronger business understanding.",
+        "work_smart_goal_learning_title": "Independent Engineering Learning",
+        "work_smart_goal_learning_description": "Do independent software engineering reading, make notes on it, and keep track of active learning."
+      }
     }
   ],
   "discord": {
@@ -21,7 +144,21 @@
         "channelId": "1498437201103421582",
         "purpose": "workstreams",
         "assistantEnabled": true,
-        "ownerInstanceId": "windows"
+        "ownerInstanceId": "linux"
+      },
+      {
+        "projectId": "portfolio-resume",
+        "channelId": "1498138271493132369",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
+      },
+      {
+        "projectId": "work",
+        "channelId": "1498139409680302180",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       }
     ]
   },

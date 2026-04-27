@@ -49,31 +49,36 @@
           "id": "control-plane",
           "baseBranch": "main",
           "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
-          "assistantEnabled": true
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
         },
         {
           "id": "discord-routing",
           "baseBranch": "main",
           "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
-          "assistantEnabled": true
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
         },
         {
           "id": "assistant-infrastructure",
           "baseBranch": "main",
           "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
-          "assistantEnabled": true
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
         },
         {
           "id": "git-hygiene",
           "baseBranch": "main",
           "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
-          "assistantEnabled": true
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
         },
         {
           "id": "deployment-ops",
           "baseBranch": "main",
           "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
-          "assistantEnabled": true
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
         }
       ],
       "maxConcurrentWorkstreams": 3,
@@ -242,14 +247,14 @@
         "channelId": "1498437201103421582",
         "purpose": "workstreams",
         "assistantEnabled": true,
-        "ownerInstanceId": "windows"
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "netwise",
         "channelId": "1498135799475081307",
         "purpose": "workstreams",
         "assistantEnabled": true,
-        "ownerInstanceId": "windows"
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "syncsonic",

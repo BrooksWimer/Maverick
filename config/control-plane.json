@@ -10,35 +10,35 @@
           "baseBranch": "main",
           "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         },
         {
           "id": "discord-routing",
           "baseBranch": "main",
           "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         },
         {
           "id": "assistant-infrastructure",
           "baseBranch": "main",
           "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         },
         {
           "id": "git-hygiene",
           "baseBranch": "main",
           "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         },
         {
           "id": "deployment-ops",
           "baseBranch": "main",
           "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         }
       ]
     },
@@ -170,14 +170,14 @@
           "baseBranch": "master",
           "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         },
         {
           "id": "resume",
           "baseBranch": "master",
           "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         }
       ],
       "maxConcurrentWorkstreams": 2,
@@ -229,24 +229,24 @@
       "defaultLanes": [
         {
           "id": "job-ops",
-          "baseBranch": "main",
+          "baseBranch": "job-ops",
           "description": "Operational work notes and active tasks",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         },
         {
           "id": "business-context-deep-dives",
-          "baseBranch": "main",
+          "baseBranch": "business-context-deep-dives",
           "description": "Business context deep dives and supporting notes",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         },
         {
           "id": "engineering-learning",
-          "baseBranch": "main",
+          "baseBranch": "engineering-learning",
           "description": "Independent engineering learning and study notes",
           "assistantEnabled": true,
-          "ownerInstanceId": "windows"
+          "ownerInstanceId": "linux"
         }
       ],
       "maxConcurrentWorkstreams": 2,
@@ -296,14 +296,14 @@
         "channelId": "1498138271493132369",
         "purpose": "workstreams",
         "assistantEnabled": true,
-        "ownerInstanceId": "windows"
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "work",
         "channelId": "1498139409680302180",
         "purpose": "workstreams",
         "assistantEnabled": true,
-        "ownerInstanceId": "windows"
+        "ownerInstanceId": "linux"
       }
     ]
   },

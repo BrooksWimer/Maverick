@@ -69,6 +69,19 @@ The expected lane/thread names are:
 - Portfolio & Resume: `portfolio`, `resume`
 - Work: `job-ops`, `business-context-deep-dives`, `engineering-learning`
 
+Ambient assistant ownership is centralized on the Linux bot. Every project forum route and lane should set
+`owner_instance_id` / `ownerInstanceId` to `linux`; Windows may still run slash commands and local execution
+where appropriate, but it should not answer ordinary assistant chat.
+
+The Work project uses durable lane branches that match the forum thread names:
+
+- `job-ops`
+- `business-context-deep-dives`
+- `engineering-learning`
+
+New Work workstreams should branch from the matching durable lane branch and then use the normal disposable
+workstream branch naming convention.
+
 ## Ownership Rules
 
 - Only one bot instance owns ambient thread replies.
