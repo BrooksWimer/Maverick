@@ -23,6 +23,14 @@ export interface WorkstreamStateChangedEvent {
   trigger: string;
 }
 
+export interface WorkstreamFinishedEvent {
+  workstreamId: string;
+  projectId: string;
+  durableBranch: string;
+  workstreamBranch: string;
+  trigger: "manual" | "auto";
+}
+
 export interface TurnStartedEvent {
   workstreamId: string;
   turnId: string;
@@ -116,6 +124,7 @@ export interface VerificationCompletedEvent {
 export interface OrchestratorEvents {
   "workstream.created": (event: WorkstreamCreatedEvent) => void;
   "workstream.stateChanged": (event: WorkstreamStateChangedEvent) => void;
+  "workstream.finished": (event: WorkstreamFinishedEvent) => void;
   "turn.started": (event: TurnStartedEvent) => void;
   "turn.completed": (event: TurnCompletedEvent) => void;
   "turn.output": (event: TurnOutputEvent) => void;

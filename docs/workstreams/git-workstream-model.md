@@ -99,6 +99,31 @@ For `workspaceKind = "git"`:
 4. Planning must render both the canonical repo root and the execution workspace, with the workspace marked as authoritative.
 5. New workstreams must resolve a durable base branch explicitly. Do not silently fall back to ambiguous repo `HEAD`.
 
+## Lane Lifecycle
+
+Every git-backed project follows the same promotion path:
+
+```text
+disposable workstream branch -> durable thread/lane branch -> production branch
+```
+
+- `/workstream verify` only checks the disposable workstream branch. It never promotes to production.
+- `/workstream finish` requires passing verification, fast-forwards the durable lane branch to the disposable workstream branch, pushes the durable lane branch, and archives the workstream while preserving database history.
+- Auto-finish after passing auto-verification is allowed because it only updates the durable lane branch.
+- `/lane verify` checks whether the durable lane branch can fast-forward into production.
+- `/lane promote` is explicit, lane-scoped, and fast-forwards production to the durable lane branch. The durable lane branch remains alive for future work.
+
+Production branch defaults:
+
+- Maverick: `main`
+- Astra (`netwise`): `master`
+- SyncSonic: `foundation/neutral-minimal`
+- Portfolio & Resume: `master`
+- Work: `main`
+
+Durable branches are the configured lane `baseBranch` values or epic `branch` values. Workstream branches remain disposable
+`maverick/...` branches and should not be treated as long-lived project lanes.
+
 ## Notes Project Rules
 
 For `workspaceKind = "notes"`:

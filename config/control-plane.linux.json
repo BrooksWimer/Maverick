@@ -19,17 +19,18 @@
       "repoPath": "/srv/maverick/repos/portfolio",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "master",
+      "productionBranch": "master",
       "defaultLanes": [
         {
           "id": "portfolio",
-          "baseBranch": "master",
+          "baseBranch": "portfolio",
           "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "resume",
-          "baseBranch": "master",
+          "baseBranch": "resume",
           "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
@@ -81,6 +82,7 @@
       "repoPath": "/srv/maverick/repos/work",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "main",
+      "productionBranch": "main",
       "defaultLanes": [
         {
           "id": "job-ops",

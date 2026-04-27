@@ -44,38 +44,39 @@
       "name": "Maverick",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "main",
+      "productionBranch": "main",
       "defaultLanes": [
         {
           "id": "control-plane",
-          "baseBranch": "main",
+          "baseBranch": "control-plane",
           "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "discord-routing",
-          "baseBranch": "main",
+          "baseBranch": "discord-routing",
           "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "assistant-infrastructure",
-          "baseBranch": "main",
+          "baseBranch": "assistant-infrastructure",
           "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "git-hygiene",
-          "baseBranch": "main",
+          "baseBranch": "git-hygiene",
           "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "deployment-ops",
-          "baseBranch": "main",
+          "baseBranch": "deployment-ops",
           "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
@@ -123,6 +124,7 @@
       "name": "Astra",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "master",
+      "productionBranch": "master",
       "epicBranches": [
         {
           "id": "laptop-wifi-scanner",
@@ -196,6 +198,34 @@
       "name": "SyncSonic",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "foundation/neutral-minimal",
+      "productionBranch": "foundation/neutral-minimal",
+      "epicBranches": [
+        {
+          "id": "pipewire-transport-stability",
+          "branch": "epic/01-pipewire-transport-stability",
+          "workstreamPrefix": "pipewire-stability",
+          "description": "PipeWire delay-node transport and latency-application stability work"
+        },
+        {
+          "id": "startup-mic-auto-alignment",
+          "branch": "epic/02-startup-mic-auto-alignment",
+          "workstreamPrefix": "startup-mic",
+          "description": "Startup-only audible microphone calibration for end-to-end latency measurement"
+        },
+        {
+          "id": "runtime-ultrasonic-auto-alignment",
+          "branch": "epic/03-runtime-ultrasonic-auto-alignment",
+          "workstreamPrefix": "runtime-ultrasonic",
+          "description": "Runtime ultrasonic measurement and correction while playback is active"
+        },
+        {
+          "id": "wifi-speakers-manual-alignment",
+          "branch": "epic/04-wifi-speakers-manual-alignment",
+          "workstreamPrefix": "wifi-manual",
+          "description": "Wi-Fi speaker discovery, playback, and manual alignment before automation"
+        }
+      ],
+      "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 3,
       "claudeReview": {
         "enabled": true,

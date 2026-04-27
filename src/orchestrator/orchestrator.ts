@@ -79,6 +79,12 @@ import {
 } from "../projects/bootstrap.js";
 import { buildEpicCharterContext, requireEpicById, workstreamLaneForEpic } from "../projects/epics.js";
 import { provisionWorktree } from "../git/worktree.js";
+import {
+  finishWorkstreamBranch,
+  promoteLaneBranch,
+  verifyLanePromotion,
+  type GitLifecycleResult,
+} from "../git/lifecycle.js";
 import { getRuntimeInstanceId } from "../runtime/identity.js";
 import type {
   ExplanationResult,
@@ -108,6 +114,31 @@ type GeneratePlanOptions = {
 };
 
 type VerificationRunTrigger = "manual" | "auto";
+type WorkstreamFinishTrigger = "manual" | "auto";
+
+export interface LaneTarget {
+  projectId: string;
+  laneId: string;
+  durableBranch: string;
+  productionBranch: string;
+  source: "lane" | "epic";
+}
+
+export interface WorkstreamFinishResult {
+  workstreamId: string;
+  workstreamName: string;
+  projectId: string;
+  durableBranch: string;
+  workstreamBranch: string;
+  archived: boolean;
+  git: GitLifecycleResult;
+}
+
+export interface LaneLifecycleResult {
+  lane: LaneTarget;
+  git: GitLifecycleResult;
+}
+
 type PlanningRoutingAgent =
   | "intake"
   | "goal-framing"
@@ -773,6 +804,126 @@ export class Orchestrator {
     return workstreams.getById(workstreamId)!;
   }
 
+  async finishWorkstream(
+    workstreamId: string,
+    options?: {
+      trigger?: WorkstreamFinishTrigger;
+      finishedBy?: string;
+    },
+  ): Promise<WorkstreamFinishResult> {
+    const ws = workstreams.getById(workstreamId);
+    if (!ws) throw new Error(`Workstream not found: ${workstreamId}`);
+
+    const project = this.getProject(ws.project_id);
+    if (!this.isGitBackedProject(project)) {
+      throw new Error(`Project "${project.id}" is not git-backed; workstream finish is only available for git projects.`);
+    }
+
+    if (ws.workspace_mode !== "worktree") {
+      throw new Error(
+        `Workstream "${ws.name}" is in workspace mode "${ws.workspace_mode}". Finish requires a disposable git worktree.`
+      );
+    }
+
+    if (!ws.cwd || !ws.branch || !ws.base_branch) {
+      throw new Error(`Workstream "${ws.name}" is missing cwd, branch, or durable base branch metadata.`);
+    }
+
+    const verificationContext = parseVerificationContextRecord(ws.verification_context_json);
+    if (verificationContext?.result.status !== "pass") {
+      throw new Error(`Workstream "${ws.name}" cannot finish until verification has passed.`);
+    }
+
+    const target = this.resolveLaneTargetForWorkstream(ws);
+    const git = await finishWorkstreamBranch({
+      cwd: ws.cwd,
+      workstreamBranch: ws.branch,
+      durableBranch: target.durableBranch,
+    });
+
+    eventLog.emit({
+      workstream_id: ws.id,
+      project_id: ws.project_id,
+      event_type: git.status === "merged" ? "workstream.finishMerged" : "workstream.finishBlocked",
+      payload: {
+        trigger: options?.trigger ?? "manual",
+        finishedBy: options?.finishedBy ?? "system",
+        lane: target,
+        git,
+      },
+      source: "orchestrator",
+    });
+
+    if (git.status !== "merged") {
+      throw new Error(git.reason ?? `Workstream "${ws.name}" could not be merged into "${target.durableBranch}".`);
+    }
+
+    const archived = await this.archive(ws.id, options?.finishedBy ?? "finish");
+    eventBus.emit("workstream.finished", {
+      workstreamId: ws.id,
+      projectId: ws.project_id,
+      durableBranch: target.durableBranch,
+      workstreamBranch: ws.branch,
+      trigger: options?.trigger ?? "manual",
+    });
+
+    return {
+      workstreamId: ws.id,
+      workstreamName: ws.name,
+      projectId: ws.project_id,
+      durableBranch: target.durableBranch,
+      workstreamBranch: ws.branch,
+      archived: archived.state === "done",
+      git,
+    };
+  }
+
+  async verifyLane(projectId: string, laneId?: string | null): Promise<LaneLifecycleResult> {
+    const lane = this.resolveLaneTarget(projectId, laneId);
+    const project = this.getProject(projectId);
+    const git = await verifyLanePromotion({
+      repoPath: project.repoPath,
+      laneBranch: lane.durableBranch,
+      productionBranch: lane.productionBranch,
+    });
+
+    eventLog.emit({
+      project_id: projectId,
+      event_type: "lane.verifyCompleted",
+      payload: { lane, git },
+      source: "orchestrator",
+    });
+
+    return { lane, git };
+  }
+
+  async promoteLane(
+    projectId: string,
+    laneId?: string | null,
+    promotedBy = "system",
+  ): Promise<LaneLifecycleResult> {
+    const project = this.getProject(projectId);
+    if (!project.promoteRequiresExplicitCommand) {
+      log.warn({ projectId }, "Project allows non-explicit promotion, but promoteLane was invoked explicitly");
+    }
+
+    const lane = this.resolveLaneTarget(projectId, laneId);
+    const git = await promoteLaneBranch({
+      repoPath: project.repoPath,
+      laneBranch: lane.durableBranch,
+      productionBranch: lane.productionBranch,
+    });
+
+    eventLog.emit({
+      project_id: projectId,
+      event_type: git.status === "merged" ? "lane.productionPromoted" : "lane.promoteBlocked",
+      payload: { lane, git, promotedBy },
+      source: "orchestrator",
+    });
+
+    return { lane, git };
+  }
+
   async transitionState(workstreamId: string, trigger: string) {
     const ws = workstreams.getById(workstreamId);
     if (!ws) throw new Error(`Workstream not found: ${workstreamId}`);
@@ -968,7 +1119,10 @@ export class Orchestrator {
         verificationResult.status === "pass" &&
         (options?.trigger ?? "manual") === "auto"
       ) {
-        this.maybeStartAutoClaudeReviewAfterVerification(updatedWorkstream, latestTurn?.id ?? null);
+        const startedAutoFinish = this.maybeStartAutoFinishAfterVerification(updatedWorkstream, latestTurn?.id ?? null);
+        if (!startedAutoFinish) {
+          this.maybeStartAutoClaudeReviewAfterVerification(updatedWorkstream, latestTurn?.id ?? null);
+        }
       }
 
       return {
@@ -1583,6 +1737,7 @@ export class Orchestrator {
           repoPath: project.repoPath,
           workspaceKind: project.workspaceKind,
           defaultWorktreeBaseBranch: project.defaultWorktreeBaseBranch ?? null,
+          productionBranch: project.productionBranch ?? null,
           defaultLanes: project.defaultLanes.map((lane) => ({
             id: lane.id,
             baseBranch: lane.baseBranch,
@@ -2373,6 +2528,30 @@ export class Orchestrator {
         workstreamId: workstream.id,
         error: error instanceof Error ? error : new Error(String(error)),
         context: `Claude auto-verification failed for turn ${turnId}`,
+      });
+    });
+
+    return true;
+  }
+
+  private maybeStartAutoFinishAfterVerification(workstream: WorkstreamRow, sourceTurnId: string | null): boolean {
+    const project = this.getProject(workstream.project_id);
+    if (
+      !project.autoFinishAfterVerification ||
+      !this.isGitBackedProject(project) ||
+      workstream.workspace_mode !== "worktree"
+    ) {
+      return false;
+    }
+
+    void this.finishWorkstream(workstream.id, {
+      trigger: "auto",
+      finishedBy: "auto-verification",
+    }).catch((error) => {
+      eventBus.emit("error", {
+        workstreamId: workstream.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+        context: `Auto-finish failed after verification${sourceTurnId ? ` for turn ${sourceTurnId}` : ""}`,
       });
     });
 
@@ -4187,6 +4366,130 @@ export class Orchestrator {
 
     this.activeTurnByWorkstream.delete(workstreamId);
     return runningTurns.length;
+  }
+
+  private resolveProductionBranch(project: ProjectConfig): string {
+    const productionBranch = project.productionBranch ?? project.defaultWorktreeBaseBranch;
+    if (!productionBranch) {
+      throw new Error(`Project "${project.id}" does not define productionBranch or defaultWorktreeBaseBranch.`);
+    }
+
+    return productionBranch;
+  }
+
+  private resolveLaneTarget(projectId: string, laneId?: string | null): LaneTarget {
+    const project = this.getProject(projectId);
+    if (!this.isGitBackedProject(project)) {
+      throw new Error(`Project "${project.id}" is not git-backed; lane lifecycle commands require a git project.`);
+    }
+
+    const productionBranch = this.resolveProductionBranch(project);
+    const requestedLane = laneId?.trim() || null;
+
+    if (requestedLane) {
+      const defaultLane = project.defaultLanes.find((lane) =>
+        lane.id === requestedLane || lane.baseBranch === requestedLane
+      );
+      if (defaultLane) {
+        return {
+          projectId: project.id,
+          laneId: defaultLane.id,
+          durableBranch: defaultLane.baseBranch,
+          productionBranch,
+          source: "lane",
+        };
+      }
+
+      const epic = project.epicBranches.find((candidate) =>
+        candidate.id === requestedLane ||
+        candidate.branch === requestedLane ||
+        workstreamLaneForEpic(candidate) === requestedLane
+      );
+      if (epic) {
+        return {
+          projectId: project.id,
+          laneId: workstreamLaneForEpic(epic),
+          durableBranch: epic.branch,
+          productionBranch,
+          source: "epic",
+        };
+      }
+
+      throw new Error(`Project "${project.id}" does not define lane or epic "${requestedLane}".`);
+    }
+
+    const laneCandidates: LaneTarget[] = [
+      ...project.defaultLanes.map((lane) => ({
+        projectId: project.id,
+        laneId: lane.id,
+        durableBranch: lane.baseBranch,
+        productionBranch,
+        source: "lane" as const,
+      })),
+      ...project.epicBranches.map((epic) => ({
+        projectId: project.id,
+        laneId: workstreamLaneForEpic(epic),
+        durableBranch: epic.branch,
+        productionBranch,
+        source: "epic" as const,
+      })),
+    ];
+
+    if (laneCandidates.length === 1) {
+      return laneCandidates[0];
+    }
+
+    const available = laneCandidates
+      .map((candidate) => `${candidate.laneId} (${candidate.durableBranch})`)
+      .join(", ");
+    throw new Error(
+      available
+        ? `Project "${project.id}" has multiple lanes. Specify one of: ${available}.`
+        : `Project "${project.id}" does not define any durable lanes.`
+    );
+  }
+
+  private resolveLaneTargetForWorkstream(workstream: WorkstreamRow): LaneTarget {
+    const project = this.getProject(workstream.project_id);
+    const productionBranch = this.resolveProductionBranch(project);
+
+    if (workstream.epic_id) {
+      return this.resolveLaneTarget(project.id, workstream.epic_id);
+    }
+
+    if (workstream.base_branch) {
+      const defaultLane = project.defaultLanes.find((lane) => lane.baseBranch === workstream.base_branch);
+      if (defaultLane) {
+        return {
+          projectId: project.id,
+          laneId: defaultLane.id,
+          durableBranch: defaultLane.baseBranch,
+          productionBranch,
+          source: "lane",
+        };
+      }
+
+      const epic = project.epicBranches.find((candidate) => candidate.branch === workstream.base_branch);
+      if (epic) {
+        return {
+          projectId: project.id,
+          laneId: workstreamLaneForEpic(epic),
+          durableBranch: epic.branch,
+          productionBranch,
+          source: "epic",
+        };
+      }
+
+      return {
+        projectId: project.id,
+        laneId: workstream.base_branch,
+        durableBranch: workstream.base_branch,
+        productionBranch,
+        source: "lane",
+      };
+    }
+
+    return this.resolveLaneTarget(project.id);
   }
 
   private getProject(projectId: string): ProjectConfig {

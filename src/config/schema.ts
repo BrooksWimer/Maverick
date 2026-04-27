@@ -188,6 +188,15 @@ export const ProjectSchema = z.object({
   defaultWorktreeBaseBranch: z.string().optional().describe(
     "Default git ref for new Maverick worktrees when no epic branch is explicitly selected"
   ),
+  productionBranch: z.string().min(1).optional().describe(
+    "Stable production branch that explicit lane promotion pushes to"
+  ),
+  autoFinishAfterVerification: z.boolean().default(true).describe(
+    "Whether a passing auto-verification should finish the workstream into its durable lane branch"
+  ),
+  promoteRequiresExplicitCommand: z.boolean().default(true).describe(
+    "Whether production promotion must be invoked explicitly instead of happening during verification"
+  ),
   epicBranches: z.array(EpicBranchSchema).default([]).describe(
     "Long-lived epic branches that Maverick workstreams should merge back into"
   ),

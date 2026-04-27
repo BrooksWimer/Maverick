@@ -7,35 +7,35 @@
       "defaultLanes": [
         {
           "id": "control-plane",
-          "baseBranch": "main",
+          "baseBranch": "control-plane",
           "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "discord-routing",
-          "baseBranch": "main",
+          "baseBranch": "discord-routing",
           "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "assistant-infrastructure",
-          "baseBranch": "main",
+          "baseBranch": "assistant-infrastructure",
           "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "git-hygiene",
-          "baseBranch": "main",
+          "baseBranch": "git-hygiene",
           "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "deployment-ops",
-          "baseBranch": "main",
+          "baseBranch": "deployment-ops",
           "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
@@ -164,17 +164,18 @@
       "repoPath": "C:\\Users\\wimer\\Desktop\\portfolio",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "master",
+      "productionBranch": "master",
       "defaultLanes": [
         {
           "id": "portfolio",
-          "baseBranch": "master",
+          "baseBranch": "portfolio",
           "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
         },
         {
           "id": "resume",
-          "baseBranch": "master",
+          "baseBranch": "resume",
           "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
           "assistantEnabled": true,
           "ownerInstanceId": "linux"
@@ -226,6 +227,7 @@
       "repoPath": "C:\\Users\\wimer\\Desktop\\Work",
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "main",
+      "productionBranch": "main",
       "defaultLanes": [
         {
           "id": "job-ops",

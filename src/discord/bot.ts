@@ -25,6 +25,7 @@ import {
 import { createLogger } from "../logger.js";
 import { eventBus } from "../orchestrator/event-bus.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
+import type { LaneLifecycleResult } from "../orchestrator/orchestrator.js";
 import type { AssistantService } from "../assistant/index.js";
 import type { DailyBriefService } from "../daily-brief/index.js";
 import type { ApprovalRow, DiscordThreadBindingRow, WorkstreamRow } from "../state/index.js";
@@ -86,7 +87,7 @@ type ResolvedThreadContext = {
 
 type WorkSmartGoalChoice = "none" | "business-context" | "engineering-learning" | "both";
 
-type AsyncWorkstreamCommand = "plan" | "answer-plan" | "dispatch" | "review" | "verify";
+type AsyncWorkstreamCommand = "plan" | "answer-plan" | "dispatch" | "review" | "verify" | "finish";
 
 function isDiscordApiError(error: unknown, code?: number): boolean {
   if (!error || typeof error !== "object") {
@@ -575,6 +576,14 @@ function subcommandBuilder(config: OrchestratorConfig) {
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("finish")
+        .setDescription("Merge a verified workstream into this thread's durable lane branch")
+        .addStringOption((option) =>
+          option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("plan")
         .setDescription("Generate and store a Claude implementation plan")
         .addStringOption((option) =>
@@ -629,6 +638,55 @@ function subcommandBuilder(config: OrchestratorConfig) {
             .setDescription("Project id")
             .setRequired(false)
             .addChoices(...projectChoices)
+        )
+    );
+
+  const lane = new SlashCommandBuilder()
+    .setName("lane")
+    .setDescription("Manage the durable branch for this Discord thread or epic lane")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("status")
+        .setDescription("Show lane promotion readiness")
+        .addStringOption((option) =>
+          option
+            .setName("project")
+            .setDescription("Project id")
+            .setRequired(false)
+            .addChoices(...projectChoices)
+        )
+        .addStringOption((option) =>
+          option.setName("lane").setDescription("Lane id, epic id, or durable branch").setRequired(false)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("verify")
+        .setDescription("Verify this durable lane branch can promote to production")
+        .addStringOption((option) =>
+          option
+            .setName("project")
+            .setDescription("Project id")
+            .setRequired(false)
+            .addChoices(...projectChoices)
+        )
+        .addStringOption((option) =>
+          option.setName("lane").setDescription("Lane id, epic id, or durable branch").setRequired(false)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("promote")
+        .setDescription("Promote this durable lane branch to the production branch")
+        .addStringOption((option) =>
+          option
+            .setName("project")
+            .setDescription("Project id")
+            .setRequired(false)
+            .addChoices(...projectChoices)
+        )
+        .addStringOption((option) =>
+          option.setName("lane").setDescription("Lane id, epic id, or durable branch").setRequired(false)
         )
     );
 
@@ -872,6 +930,7 @@ function subcommandBuilder(config: OrchestratorConfig) {
   return [
     workstream.toJSON(),
     project.toJSON(),
+    lane.toJSON(),
     work.toJSON(),
     brief.toJSON(),
     assistant.toJSON(),
@@ -1007,6 +1066,31 @@ export class DiscordBot {
           ]
             .filter(Boolean)
             .join("\n"),
+        });
+      });
+    });
+
+    eventBus.on("workstream.finished", (event) => {
+      this.runBackgroundTask("workstream.finished", async () => {
+        const workstream = this.orchestrator.getWorkstream(event.workstreamId);
+        if (!workstream) {
+          return;
+        }
+
+        const channel = await this.resolveNotificationChannel(workstream, "notifications");
+        if (!channel) {
+          return;
+        }
+
+        await this.safeSend(channel, {
+          content: [
+            `Maverick finished \`${workstream.name}\`.`,
+            `Workstream: \`${event.workstreamId}\``,
+            `Disposable branch: \`${event.workstreamBranch}\``,
+            `Durable lane branch: \`${event.durableBranch}\``,
+            "The workstream is archived and its history remains inspectable.",
+            "Production was not changed. Use `/lane promote` from this lane when you are ready.",
+          ].join("\n"),
         });
       });
     });
@@ -1334,6 +1418,11 @@ export class DiscordBot {
       return;
     }
 
+    if (interaction.commandName === "lane") {
+      await this.handleLaneCommand(interaction);
+      return;
+    }
+
     if (interaction.commandName === "work") {
       await this.handleWorkCommand(interaction);
       return;
@@ -1389,6 +1478,10 @@ export class DiscordBot {
       case "verify":
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await this.handleVerify(interaction);
+        return;
+      case "finish":
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await this.handleFinish(interaction);
         return;
       case "plan":
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -1459,6 +1552,35 @@ export class DiscordBot {
     }
 
     await interaction.editReply(lines.join("\n"));
+  }
+
+  private async handleLaneCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    const subcommand = interaction.options.getSubcommand();
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const target = this.resolveLaneCommandTarget(interaction);
+    if (subcommand === "status" || subcommand === "verify") {
+      const result = await this.orchestrator.verifyLane(target.projectId, target.laneId);
+      await this.editReplyWithChunks(
+        interaction,
+        this.renderLaneLifecycleResult(
+          subcommand === "status" ? "Lane Status" : "Lane Verification",
+          result,
+        ),
+      );
+      return;
+    }
+
+    if (subcommand === "promote") {
+      const result = await this.orchestrator.promoteLane(target.projectId, target.laneId, interaction.user.id);
+      await this.editReplyWithChunks(
+        interaction,
+        this.renderLaneLifecycleResult("Lane Promotion", result),
+      );
+      return;
+    }
+
+    await interaction.editReply(`Unsupported lane subcommand: ${subcommand}`);
   }
 
   private async handleWorkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1752,6 +1874,19 @@ export class DiscordBot {
         lines.push(`- Repo: ${project.repoPath}`);
         if (project.defaultWorktreeBaseBranch) {
           lines.push(`- Default base branch: \`${project.defaultWorktreeBaseBranch}\``);
+        }
+        if (project.productionBranch) {
+          lines.push(`- Production branch: \`${project.productionBranch}\``);
+        }
+        if (project.defaultLanes.length > 0) {
+          lines.push(
+            `- Durable lanes: ${project.defaultLanes.map((lane) => `\`${lane.id}\` -> \`${lane.baseBranch}\``).join(", ")}`
+          );
+        }
+        if (project.epicBranches.length > 0) {
+          lines.push(
+            `- Epic branches: ${project.epicBranches.map((epic) => `\`${epic.id}\` -> \`${epic.branch}\``).join(", ")}`
+          );
         }
         if (project.bootstrap) {
           lines.push(
@@ -2083,6 +2218,20 @@ export class DiscordBot {
     });
   }
 
+  private async handleFinish(interaction: ChatInputCommandInteraction): Promise<void> {
+    const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
+
+    await this.startAsyncWorkstreamCommand(interaction, workstream, "finish", {
+      description: "Finishing the verified workstream into the durable lane branch.",
+      run: async () => {
+        await this.orchestrator.finishWorkstream(workstream.id, {
+          trigger: "manual",
+          finishedBy: interaction.user.id,
+        });
+      },
+    });
+  }
+
   private async handlePlan(interaction: ChatInputCommandInteraction): Promise<void> {
     const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
     const instruction = interaction.options.getString("instruction", true);
@@ -2238,6 +2387,8 @@ export class DiscordBot {
         return "review";
       case "verify":
         return "verification";
+      case "finish":
+        return "workstream finish";
     }
   }
 
@@ -2557,6 +2708,57 @@ export class DiscordBot {
       attachmentName: "workstream-status.md",
       attachmentNotice: "Status is long, so the full report is attached as a Markdown file.",
     });
+  }
+
+  private resolveLaneCommandTarget(interaction: ChatInputCommandInteraction): {
+    projectId: string;
+    laneId: string | null;
+  } {
+    const route = this.resolveInteractionRoute(interaction);
+    const threadContext = this.resolveInteractionThreadContext(interaction);
+    const explicitProjectId = interaction.options.getString("project");
+    const projectId = this.resolveProjectId(
+      interaction,
+      explicitProjectId,
+      null,
+      threadContext?.projectId ?? route?.projectId ?? null,
+    );
+    const explicitLane = interaction.options.getString("lane");
+    const inferredLane =
+      explicitLane ??
+      (threadContext?.projectId === projectId ? threadContext.epicId ?? threadContext.lane : null) ??
+      (route?.projectId === projectId ? route.epicId ?? route.lane ?? route.baseBranch ?? null : null);
+
+    return {
+      projectId,
+      laneId: inferredLane,
+    };
+  }
+
+  private renderLaneLifecycleResult(title: string, result: LaneLifecycleResult): string {
+    const statusLine =
+      result.git.status === "merged"
+        ? "Merged and pushed."
+        : result.git.status === "ready"
+          ? "Ready to promote."
+          : `Blocked: ${result.git.reason ?? "lane and production are not in a promotable state."}`;
+
+    return [
+      `# ${title}`,
+      statusLine,
+      "",
+      `Project: \`${result.lane.projectId}\``,
+      `Lane: \`${result.lane.laneId}\` (${result.lane.source})`,
+      `Durable branch: \`${result.lane.durableBranch}\``,
+      `Production branch: \`${result.lane.productionBranch}\``,
+      `Pushed: ${result.git.pushed ? "yes" : "no"}`,
+      result.git.headSha ? `Source SHA: \`${result.git.headSha}\`` : null,
+      result.git.targetShaBefore ? `Production before: \`${result.git.targetShaBefore}\`` : null,
+      result.git.targetShaAfter ? `Production after: \`${result.git.targetShaAfter}\`` : null,
+      result.git.rollbackCommand ? `Rollback: \`${result.git.rollbackCommand}\`` : null,
+    ]
+      .filter((line): line is string => line !== null)
+      .join("\n");
   }
 
   private projectIdForChannel(channelId: string, parentChannelId?: string | null): string | null {

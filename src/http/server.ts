@@ -135,6 +135,26 @@ export async function createHttpServer(
     });
   });
 
+  app.post("/api/workstreams/:id/finish", async (req) => {
+    const { id } = req.params as { id: string };
+    const { finishedBy } = (req.body as { finishedBy?: string }) ?? {};
+    return orchestrator.finishWorkstream(id, {
+      trigger: "manual",
+      finishedBy: finishedBy ?? "http",
+    });
+  });
+
+  app.post("/api/projects/:projectId/lanes/:laneId/verify", async (req) => {
+    const { projectId, laneId } = req.params as { projectId: string; laneId: string };
+    return orchestrator.verifyLane(projectId, laneId);
+  });
+
+  app.post("/api/projects/:projectId/lanes/:laneId/promote", async (req) => {
+    const { projectId, laneId } = req.params as { projectId: string; laneId: string };
+    const { promotedBy } = (req.body as { promotedBy?: string }) ?? {};
+    return orchestrator.promoteLane(projectId, laneId, promotedBy ?? "http");
+  });
+
   // --- Turns ---
 
   app.get("/api/workstreams/:id/turns", async (req) => {
