@@ -395,7 +395,7 @@ export function parsePlanningAnswerInput(text: string): {
 export function persistedEpicIdForResolvedEpic(
   epic: { id: string; source: "route" | "explicit" | "default" } | null
 ): string | undefined {
-  if (!epic || epic.source === "default") {
+  if (!epic || epic.source === "default" || epic.id === "default") {
     return undefined;
   }
 
@@ -2829,7 +2829,7 @@ export class DiscordBot {
         id: "default",
         branch: threadContext.baseBranch,
         lane: threadContext.lane ?? project.id,
-        source: "route",
+        source: "default",
       };
     }
 
@@ -2839,16 +2839,9 @@ export class DiscordBot {
       );
     }
 
-    if (!project.defaultWorktreeBaseBranch) {
-      return null;
-    }
-
-      return {
-        id: "default",
-        branch: project.defaultWorktreeBaseBranch,
-        lane: project.id,
-        source: "default",
-      };
+    throw new Error(
+      `No durable lane could be inferred for project "${projectId}". Start the workstream inside a Discord thread whose name matches a configured lane or epic, or pass the epic option explicitly.`
+    );
   }
 
   private resolveInteractionRoute(interaction: ChatInputCommandInteraction): DiscordRoute | null {
@@ -3089,22 +3082,6 @@ export class DiscordBot {
           binding,
         };
       }
-    }
-
-    if (project.defaultWorktreeBaseBranch) {
-      return {
-        projectId: project.id,
-        route,
-        parentChannelId,
-        threadId: channelId,
-        lane: project.id,
-        baseBranch: route.baseBranch ?? project.defaultWorktreeBaseBranch,
-        epicId: null,
-        assistantEnabled: route.assistantEnabled,
-        ownerInstanceId: route.ownerInstanceId ?? null,
-        source: "route",
-        binding: null,
-      };
     }
 
     return null;

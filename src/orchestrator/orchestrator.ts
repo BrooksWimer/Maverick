@@ -2414,7 +2414,8 @@ export class Orchestrator {
       return undefined;
     }
 
-    return this.repairDiscordThreadBinding(binding).binding;
+    const result = this.repairDiscordThreadBinding(binding);
+    return result.repair.reason ? undefined : result.binding;
   }
 
   listDiscordThreadBindings(projectId?: string) {

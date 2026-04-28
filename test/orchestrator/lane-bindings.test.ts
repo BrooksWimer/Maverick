@@ -149,4 +149,23 @@ describe("Orchestrator Discord thread binding repair", () => {
     expect(repaired?.lane).toBe("router-admin-ingestion");
     expect(repaired?.base_branch).toBe("codex/router-admin-ingestion-epic");
   });
+
+  it("does not trust an unresolved default binding as a durable lane", () => {
+    const orchestrator = new Orchestrator(config);
+    orchestrator.upsertDiscordThreadBinding({
+      threadId: "work-thread",
+      parentChannelId: "work-forum",
+      projectId: "portfolio-resume",
+      lane: null,
+      baseBranch: "master",
+      assistantEnabled: true,
+      ownerInstanceId: "linux",
+      source: "manual",
+    });
+
+    const report = orchestrator.repairDiscordThreadBindings();
+
+    expect(report.unresolved).toHaveLength(1);
+    expect(orchestrator.getRepairedDiscordThreadBinding("work-thread")).toBeUndefined();
+  });
 });

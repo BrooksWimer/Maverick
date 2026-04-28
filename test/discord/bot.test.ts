@@ -17,6 +17,13 @@ describe("persistedEpicIdForResolvedEpic", () => {
         source: "default",
       })
     ).toBeUndefined();
+
+    expect(
+      persistedEpicIdForResolvedEpic({
+        id: "default",
+        source: "route",
+      })
+    ).toBeUndefined();
   });
 
   it("preserves configured epic ids for routed or explicit epic workstreams", () => {
