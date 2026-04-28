@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildWorkstreamEpicChoices,
   buildPlanNotificationMessages,
   buildAttachedTextReply,
   parsePlanningAnswerInput,
+  parseWorkstreamEpicChoice,
   persistedEpicIdForResolvedEpic,
   shouldAttachReplyPreview,
   shouldPostPlanGeneratedMessage,
@@ -50,6 +52,56 @@ describe("shouldAttachReplyPreview", () => {
 
   it("keeps short content inline when nothing was truncated", () => {
     expect(shouldAttachReplyPreview(["Stored Claude plan."], "short plan", 1200)).toBe(false);
+  });
+});
+
+describe("workstream epic choices", () => {
+  it("includes durable default lanes as selectable workstream lanes", () => {
+    const choices = buildWorkstreamEpicChoices({
+      projects: [
+        {
+          id: "portfolio-resume",
+          name: "Portfolio & Resume",
+          epicBranches: [],
+          defaultLanes: [
+            { id: "portfolio", baseBranch: "portfolio" },
+            { id: "resume", baseBranch: "resume" },
+          ],
+        },
+        {
+          id: "netwise",
+          name: "Astra",
+          epicBranches: [{ id: "router-admin-ingestion", branch: "codex/router-admin-ingestion-epic" }],
+          defaultLanes: [],
+        },
+      ],
+    } as any);
+
+    expect(choices).toContainEqual({
+      name: "Portfolio & Resume: portfolio",
+      value: "portfolio-resume:lane:portfolio",
+    });
+    expect(choices).toContainEqual({
+      name: "Portfolio & Resume: resume",
+      value: "portfolio-resume:lane:resume",
+    });
+    expect(choices).toContainEqual({
+      name: "Astra: router-admin-ingestion",
+      value: "netwise:epic:router-admin-ingestion",
+    });
+  });
+
+  it("parses lane and legacy epic choices", () => {
+    expect(parseWorkstreamEpicChoice("portfolio-resume:lane:portfolio")).toEqual({
+      projectId: "portfolio-resume",
+      epicId: "portfolio",
+      kind: "lane",
+    });
+    expect(parseWorkstreamEpicChoice("netwise:router-admin-ingestion")).toEqual({
+      projectId: "netwise",
+      epicId: "router-admin-ingestion",
+      kind: "epic",
+    });
   });
 });
 

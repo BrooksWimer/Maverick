@@ -59,9 +59,10 @@ type SendableChannel = TextBasedChannel & {
 const DISCORD_STATUS_PREVIEW_LIMIT = 1500;
 const DISCORD_RENDERED_MESSAGE_LIMIT = 1900;
 
-type ParsedEpicChoice = {
+export type ParsedEpicChoice = {
   projectId: string;
   epicId: string;
+  kind: "epic" | "lane";
 };
 
 type ResolvedEpic = {
@@ -402,6 +403,44 @@ export function persistedEpicIdForResolvedEpic(
   return epic.id;
 }
 
+export function buildWorkstreamEpicChoices(config: Pick<OrchestratorConfig, "projects">) {
+  return config.projects.flatMap((project) => [
+    ...project.epicBranches.map((epic) => ({
+      name: `${project.name}: ${epic.id}`,
+      value: `${project.id}:epic:${epic.id}`,
+    })),
+    ...project.defaultLanes.map((lane) => ({
+      name: `${project.name}: ${lane.id}`,
+      value: `${project.id}:lane:${lane.id}`,
+    })),
+  ]);
+}
+
+export function parseWorkstreamEpicChoice(rawEpicChoice: string | null): ParsedEpicChoice | null {
+  if (!rawEpicChoice) {
+    return null;
+  }
+
+  const parts = rawEpicChoice.split(":");
+  if (parts.length === 2) {
+    const [projectId, epicId] = parts;
+    if (!projectId || !epicId) {
+      throw new Error(`Epic choice must look like "<project>:<epic>", got "${rawEpicChoice}".`);
+    }
+
+    return { projectId, epicId, kind: "epic" };
+  }
+
+  const [projectId, kind, epicId] = parts;
+  if (!projectId || !epicId || (kind !== "epic" && kind !== "lane")) {
+    throw new Error(
+      `Epic choice must look like "<project>:epic:<epic>" or "<project>:lane:<lane>", got "${rawEpicChoice}".`
+    );
+  }
+
+  return { projectId, epicId, kind };
+}
+
 function routeScore(route: DiscordRoute, purpose: "workstreams" | "notifications" | "approvals" | "logs") {
   if (route.purpose === purpose) {
     return 3;
@@ -463,12 +502,7 @@ function subcommandBuilder(config: OrchestratorConfig) {
       .addAttachmentOption((option) =>
         option.setName("attachment_4").setDescription("Optional fourth image or file").setRequired(false)
       );
-  const epicChoices = config.projects.flatMap((project) =>
-    project.epicBranches.map((epic) => ({
-      name: `${project.name}: ${epic.id}`,
-      value: `${project.id}:${epic.id}`,
-    }))
-  );
+  const epicChoices = buildWorkstreamEpicChoices(config);
 
   const workstream = new SlashCommandBuilder()
     .setName("workstream")
@@ -493,7 +527,8 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .addStringOption((option) => {
           option
             .setName("epic")
-            .setDescription("Epic lane to branch from when the route is not already pinned");
+            .setDescription("Epic or durable lane to branch from when the route is not already pinned")
+            .setRequired(false);
           if (epicChoices.length > 0) {
             option.addChoices(...epicChoices);
           }
@@ -2075,6 +2110,7 @@ export class DiscordBot {
         `ID: \`${workstream.id}\``,
         `Project: \`${projectId}\``,
         epic && epic.source !== "default" ? `Epic: \`${epic.id}\` (${epic.source})` : null,
+        epic ? `Lane: \`${epic.lane}\`` : null,
         epic ? `Base branch: \`${epic.branch}\`${epic.source === "default" ? " (default)" : ""}` : null,
         workstream.branch ? `Branch: \`${workstream.branch}\`` : `Branch: \`${workstream.workspace_mode}\` workspace`,
         workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
@@ -2780,16 +2816,7 @@ export class DiscordBot {
   }
 
   private parseEpicChoice(rawEpicChoice: string | null): ParsedEpicChoice | null {
-    if (!rawEpicChoice) {
-      return null;
-    }
-
-    const [projectId, epicId] = rawEpicChoice.split(":", 2);
-    if (!projectId || !epicId) {
-      throw new Error(`Epic choice must look like "<project>:<epic>", got "${rawEpicChoice}".`);
-    }
-
-    return { projectId, epicId };
+    return parseWorkstreamEpicChoice(rawEpicChoice);
   }
 
   private resolveEpic(
@@ -2806,22 +2833,47 @@ export class DiscordBot {
       );
     }
 
+    if (explicitEpic?.kind === "lane") {
+      const lane = project.defaultLanes.find((candidate) => candidate.id === explicitEpic.epicId);
+      if (!lane) {
+        throw new Error(`Project "${projectId}" does not define durable lane "${explicitEpic.epicId}".`);
+      }
+
+      return {
+        id: "default",
+        branch: lane.baseBranch,
+        lane: lane.id,
+        source: "default",
+      };
+    }
+
+    const explicitEpicId = explicitEpic?.kind === "epic" ? explicitEpic.epicId : undefined;
     const epicId =
-      explicitEpic?.epicId ??
+      explicitEpicId ??
       (threadContext?.projectId === projectId ? threadContext.epicId ?? undefined : undefined) ??
       (route?.projectId === projectId ? route.epicId : undefined);
     if (epicId) {
       const epic = project.epicBranches.find((candidate) => candidate.id === epicId);
-      if (!epic) {
-        throw new Error(`Project "${projectId}" does not define epic "${epicId}".`);
+      if (epic) {
+        return {
+          id: epic.id,
+          branch: epic.branch,
+          lane: workstreamLaneForEpic(epic),
+          source: explicitEpic ? "explicit" : "route",
+        };
       }
 
-      return {
-        id: epic.id,
-        branch: epic.branch,
-        lane: workstreamLaneForEpic(epic),
-        source: explicitEpic ? "explicit" : "route",
-      };
+      const lane = project.defaultLanes.find((candidate) => candidate.id === epicId);
+      if (explicitEpic && lane) {
+        return {
+          id: "default",
+          branch: lane.baseBranch,
+          lane: lane.id,
+          source: "default",
+        };
+      }
+
+      throw new Error(`Project "${projectId}" does not define epic "${epicId}".`);
     }
 
     if (threadContext?.projectId === projectId && threadContext.baseBranch) {
