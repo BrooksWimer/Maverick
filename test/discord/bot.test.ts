@@ -5,7 +5,9 @@ import {
   buildAttachedTextReply,
   parsePlanningAnswerInput,
   parseWorkstreamEpicChoice,
+  notificationChannelCandidateIds,
   persistedEpicIdForResolvedEpic,
+  resolveWorkstreamChannelBindingForIds,
   shouldAttachReplyPreview,
   shouldPostPlanGeneratedMessage,
   splitDiscordMessageContent,
@@ -102,6 +104,50 @@ describe("workstream epic choices", () => {
       epicId: "router-admin-ingestion",
       kind: "epic",
     });
+  });
+});
+
+describe("workstream Discord channel binding", () => {
+  it("uses the sendable thread as the workstream channel for forum-backed project routes", () => {
+    expect(
+      resolveWorkstreamChannelBindingForIds({
+        interactionChannelId: "portfolio-thread",
+        parentChannelId: "portfolio-forum",
+        routeChannelId: "portfolio-forum",
+      })
+    ).toEqual({
+      channelId: "portfolio-thread",
+      threadId: "portfolio-thread",
+      parentChannelId: "portfolio-forum",
+    });
+  });
+
+  it("uses the interaction channel directly outside routed forum threads", () => {
+    expect(
+      resolveWorkstreamChannelBindingForIds({
+        interactionChannelId: "plain-channel",
+        parentChannelId: null,
+        routeChannelId: "portfolio-forum",
+      })
+    ).toEqual({
+      channelId: "plain-channel",
+    });
+  });
+});
+
+describe("notificationChannelCandidateIds", () => {
+  it("prefers stored Discord threads before parent route channels", () => {
+    expect(
+      notificationChannelCandidateIds(
+        {
+          project_id: "portfolio-resume",
+          discord_thread_id: "portfolio-thread",
+          discord_channel_id: "portfolio-forum",
+        },
+        "portfolio-forum",
+        "default-channel"
+      )
+    ).toEqual(["portfolio-thread", "portfolio-forum", "default-channel"]);
   });
 });
 

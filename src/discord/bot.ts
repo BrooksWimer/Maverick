@@ -59,6 +59,12 @@ type SendableChannel = TextBasedChannel & {
 const DISCORD_STATUS_PREVIEW_LIMIT = 1500;
 const DISCORD_RENDERED_MESSAGE_LIMIT = 1900;
 
+export type WorkstreamChannelBinding = {
+  channelId: string;
+  threadId?: string;
+  parentChannelId?: string;
+};
+
 export type ParsedEpicChoice = {
   projectId: string;
   epicId: string;
@@ -401,6 +407,37 @@ export function persistedEpicIdForResolvedEpic(
   }
 
   return epic.id;
+}
+
+export function resolveWorkstreamChannelBindingForIds(params: {
+  interactionChannelId: string;
+  parentChannelId?: string | null;
+  routeChannelId?: string | null;
+}): WorkstreamChannelBinding {
+  if (params.parentChannelId && params.routeChannelId === params.parentChannelId) {
+    return {
+      channelId: params.interactionChannelId,
+      threadId: params.interactionChannelId,
+      parentChannelId: params.parentChannelId,
+    };
+  }
+
+  return {
+    channelId: params.interactionChannelId,
+  };
+}
+
+export function notificationChannelCandidateIds(
+  workstream: Pick<WorkstreamRow, "discord_thread_id" | "discord_channel_id" | "project_id">,
+  routeChannelId?: string | null,
+  defaultChannelId?: string | null,
+): string[] {
+  return [
+    workstream.discord_thread_id,
+    workstream.discord_channel_id,
+    routeChannelId,
+    defaultChannelId,
+  ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
 }
 
 export function buildWorkstreamEpicChoices(config: Pick<OrchestratorConfig, "projects">) {
@@ -2705,21 +2742,13 @@ export class DiscordBot {
 
   private resolveWorkstreamChannelBinding(
     interaction: ChatInputCommandInteraction,
-  ): { channelId: string; threadId?: string; parentChannelId?: string } {
+  ): WorkstreamChannelBinding {
     const route = this.resolveInteractionRoute(interaction);
-    const parentChannelId = this.parentChannelIdForInteraction(interaction);
-
-    if (parentChannelId && route?.channelId === parentChannelId) {
-      return {
-        channelId: parentChannelId,
-        threadId: interaction.channelId,
-        parentChannelId,
-      };
-    }
-
-    return {
-      channelId: interaction.channelId,
-    };
+    return resolveWorkstreamChannelBindingForIds({
+      interactionChannelId: interaction.channelId,
+      parentChannelId: this.parentChannelIdForInteraction(interaction),
+      routeChannelId: route?.channelId ?? null,
+    });
   }
 
   private formatWorkstream(workstream: WorkstreamRow): string {
@@ -3207,11 +3236,11 @@ export class DiscordBot {
     workstream: WorkstreamRow,
     purpose: "notifications" | "approvals"
   ): Promise<SendableChannel | null> {
-    const candidateIds = [
-      workstream.discord_channel_id,
+    const candidateIds = notificationChannelCandidateIds(
+      workstream,
       this.bestRouteForProject(workstream.project_id, purpose)?.channelId,
       this.config.discord.defaultNotificationChannelId,
-    ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+    );
 
     for (const channelId of candidateIds) {
       const channel = await this.fetchTextChannel(channelId);
