@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  cleanupFinishedWorkstreamBranch,
   finishWorkstreamBranch,
   promoteLaneBranch,
   verifyLanePromotion,
@@ -108,5 +109,26 @@ describe("git lifecycle helpers", () => {
     expect(result.status).toBe("blocked");
     expect(result.pushed).toBe(false);
     expect(result.reason).toContain("not an ancestor");
+  });
+
+  it("cleans only a disposable worktree branch after the durable lane contains its head", async () => {
+    git(repo, ["checkout", "portfolio"]);
+    const worktreePath = join(tempDir, "cleanup-worktree");
+    git(repo, ["worktree", "add", "-b", "maverick/test/cleanup", worktreePath, "portfolio"]);
+    const workstreamHead = commitFile(worktreePath, "cleanup.txt", "clean\n", "ready to clean");
+    git(worktreePath, ["push", "origin", "HEAD:refs/heads/portfolio"]);
+
+    const result = await cleanupFinishedWorkstreamBranch({
+      repoPath: repo,
+      worktreePath,
+      workstreamBranch: "maverick/test/cleanup",
+      durableBranch: "portfolio",
+    });
+
+    expect(result.status).toBe("cleaned");
+    expect(result.worktreeRemoved).toBe(true);
+    expect(existsSync(worktreePath)).toBe(false);
+    expect(git(repo, ["ls-remote", "origin", "refs/heads/portfolio"]).split(/\s+/)[0]).toBe(workstreamHead);
+    expect(git(repo, ["branch", "--list", "maverick/test/cleanup"])).toBe("");
   });
 });

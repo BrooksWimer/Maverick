@@ -81,8 +81,10 @@ import { buildEpicCharterContext, requireEpicById, workstreamLaneForEpic } from 
 import { provisionWorktree } from "../git/worktree.js";
 import {
   finishWorkstreamBranch,
+  cleanupFinishedWorkstreamBranch,
   promoteLaneBranch,
   verifyLanePromotion,
+  type GitCleanupResult,
   type GitLifecycleResult,
 } from "../git/lifecycle.js";
 import { getRuntimeInstanceId } from "../runtime/identity.js";
@@ -134,9 +136,35 @@ export interface WorkstreamFinishResult {
   git: GitLifecycleResult;
 }
 
+export interface WorkstreamCleanupResult {
+  workstreamId: string;
+  workstreamName: string;
+  projectId: string;
+  durableBranch: string;
+  workstreamBranch: string;
+  git: GitCleanupResult;
+}
+
 export interface LaneLifecycleResult {
   lane: LaneTarget;
   git: GitLifecycleResult;
+}
+
+export interface DiscordThreadBindingRepair {
+  threadId: string;
+  projectId: string;
+  changed: boolean;
+  reason: string | null;
+  before: {
+    epicId: string | null;
+    lane: string | null;
+    baseBranch: string | null;
+  };
+  after: {
+    epicId: string | null;
+    lane: string | null;
+    baseBranch: string | null;
+  };
 }
 
 type PlanningRoutingAgent =
@@ -347,6 +375,16 @@ export class Orchestrator {
 
     this.syncConfiguredProjects();
     this.reconcileStoredWorkspaceMetadata();
+    const bindingRepair = this.repairDiscordThreadBindings();
+    if (bindingRepair.changed.length > 0 || bindingRepair.unresolved.length > 0) {
+      log.info(
+        {
+          changedBindings: bindingRepair.changed.length,
+          unresolvedBindings: bindingRepair.unresolved.length,
+        },
+        "Discord thread bindings reconciled against configured durable lanes"
+      );
+    }
 
     // Create execution adapters per project (or use default)
     for (const project of this.config.projects) {
@@ -874,6 +912,57 @@ export class Orchestrator {
       durableBranch: target.durableBranch,
       workstreamBranch: ws.branch,
       archived: archived.state === "done",
+      git,
+    };
+  }
+
+  async cleanupFinishedWorkstream(workstreamId: string): Promise<WorkstreamCleanupResult> {
+    const ws = workstreams.getById(workstreamId);
+    if (!ws) throw new Error(`Workstream not found: ${workstreamId}`);
+
+    if (ws.state !== "done") {
+      throw new Error(`Workstream "${ws.name}" is not archived/done yet.`);
+    }
+
+    const project = this.getProject(ws.project_id);
+    if (!this.isGitBackedProject(project)) {
+      throw new Error(`Project "${project.id}" is not git-backed; cleanup is only available for git projects.`);
+    }
+
+    if (ws.workspace_mode !== "worktree") {
+      throw new Error(`Workstream "${ws.name}" is in workspace mode "${ws.workspace_mode}", not a disposable worktree.`);
+    }
+
+    if (!ws.cwd || !ws.branch || !ws.base_branch) {
+      throw new Error(`Workstream "${ws.name}" is missing cwd, branch, or durable base branch metadata.`);
+    }
+
+    const target = this.resolveLaneTargetForWorkstream(ws);
+    const git = await cleanupFinishedWorkstreamBranch({
+      repoPath: project.repoPath,
+      worktreePath: ws.cwd,
+      workstreamBranch: ws.branch,
+      durableBranch: target.durableBranch,
+    });
+
+    eventLog.emit({
+      workstream_id: ws.id,
+      project_id: ws.project_id,
+      event_type: "workstream.cleanupCompleted",
+      payload: {
+        durableBranch: target.durableBranch,
+        workstreamBranch: ws.branch,
+        git,
+      },
+      source: "orchestrator",
+    });
+
+    return {
+      workstreamId: ws.id,
+      workstreamName: ws.name,
+      projectId: ws.project_id,
+      durableBranch: target.durableBranch,
+      workstreamBranch: ws.branch,
       git,
     };
   }
@@ -2319,8 +2408,208 @@ export class Orchestrator {
     return discordThreadBindings.getByThreadId(threadId);
   }
 
+  getRepairedDiscordThreadBinding(threadId: string) {
+    const binding = discordThreadBindings.getByThreadId(threadId);
+    if (!binding) {
+      return undefined;
+    }
+
+    return this.repairDiscordThreadBinding(binding).binding;
+  }
+
   listDiscordThreadBindings(projectId?: string) {
     return projectId ? discordThreadBindings.listByProject(projectId) : discordThreadBindings.list();
+  }
+
+  repairDiscordThreadBindings(options?: {
+    projectIds?: string[];
+    excludeProjectIds?: string[];
+  }): {
+    changed: DiscordThreadBindingRepair[];
+    unchanged: DiscordThreadBindingRepair[];
+    unresolved: DiscordThreadBindingRepair[];
+  } {
+    const projectIds = new Set(options?.projectIds ?? []);
+    const excluded = new Set(options?.excludeProjectIds ?? []);
+    const results = {
+      changed: [] as DiscordThreadBindingRepair[],
+      unchanged: [] as DiscordThreadBindingRepair[],
+      unresolved: [] as DiscordThreadBindingRepair[],
+    };
+
+    for (const binding of discordThreadBindings.list()) {
+      if (projectIds.size > 0 && !projectIds.has(binding.project_id)) {
+        continue;
+      }
+      if (excluded.has(binding.project_id)) {
+        continue;
+      }
+
+      const repair = this.repairDiscordThreadBinding(binding).repair;
+      if (repair.changed) {
+        results.changed.push(repair);
+      } else if (repair.reason) {
+        results.unresolved.push(repair);
+      } else {
+        results.unchanged.push(repair);
+      }
+    }
+
+    return results;
+  }
+
+  private repairDiscordThreadBinding(binding: DiscordThreadBindingRow): {
+    binding: DiscordThreadBindingRow;
+    repair: DiscordThreadBindingRepair;
+  } {
+    const before = {
+      epicId: binding.epic_id,
+      lane: binding.lane,
+      baseBranch: binding.base_branch,
+    };
+    const repairBase: DiscordThreadBindingRepair = {
+      threadId: binding.thread_id,
+      projectId: binding.project_id,
+      changed: false,
+      reason: null,
+      before,
+      after: before,
+    };
+
+    let project: ProjectConfig;
+    try {
+      project = this.getProject(binding.project_id);
+    } catch {
+      return {
+        binding,
+        repair: {
+          ...repairBase,
+          reason: `Unknown project "${binding.project_id}".`,
+        },
+      };
+    }
+
+    const target = this.resolveConfiguredBindingTarget(project, binding);
+    if (!target) {
+      return {
+        binding,
+        repair: {
+          ...repairBase,
+          reason: "Binding does not match a configured lane or epic.",
+        },
+      };
+    }
+
+    const changed =
+      target.epicId !== binding.epic_id ||
+      target.lane !== binding.lane ||
+      target.baseBranch !== binding.base_branch;
+
+    if (!changed) {
+      return {
+        binding,
+        repair: {
+          ...repairBase,
+          after: target,
+        },
+      };
+    }
+
+    const repaired = discordThreadBindings.upsert({
+      thread_id: binding.thread_id,
+      parent_channel_id: binding.parent_channel_id,
+      project_id: binding.project_id,
+      epic_id: target.epicId,
+      lane: target.lane,
+      base_branch: target.baseBranch,
+      assistant_enabled: Boolean(binding.assistant_enabled),
+      owner_instance_id: binding.owner_instance_id,
+      source: binding.source,
+    });
+
+    eventLog.emit({
+      project_id: binding.project_id,
+      event_type: "discord.threadBindingRepaired",
+      payload: {
+        threadId: binding.thread_id,
+        before,
+        after: target,
+      },
+      source: "orchestrator",
+    });
+
+    return {
+      binding: repaired,
+      repair: {
+        ...repairBase,
+        changed: true,
+        after: target,
+      },
+    };
+  }
+
+  private resolveConfiguredBindingTarget(
+    project: ProjectConfig,
+    binding: DiscordThreadBindingRow,
+  ): DiscordThreadBindingRepair["after"] | null {
+    if (binding.epic_id) {
+      const epic = project.epicBranches.find((candidate) => candidate.id === binding.epic_id);
+      if (epic) {
+        return {
+          epicId: epic.id,
+          lane: workstreamLaneForEpic(epic),
+          baseBranch: epic.branch,
+        };
+      }
+    }
+
+    if (binding.lane) {
+      const defaultLane = project.defaultLanes.find((candidate) =>
+        candidate.id === binding.lane || candidate.baseBranch === binding.lane
+      );
+      if (defaultLane) {
+        return {
+          epicId: null,
+          lane: defaultLane.id,
+          baseBranch: defaultLane.baseBranch,
+        };
+      }
+
+      const epic = project.epicBranches.find((candidate) =>
+        candidate.id === binding.lane ||
+        candidate.branch === binding.lane ||
+        workstreamLaneForEpic(candidate) === binding.lane
+      );
+      if (epic) {
+        return {
+          epicId: epic.id,
+          lane: workstreamLaneForEpic(epic),
+          baseBranch: epic.branch,
+        };
+      }
+    }
+
+    if (binding.base_branch) {
+      const defaultLane = project.defaultLanes.find((candidate) => candidate.baseBranch === binding.base_branch);
+      if (defaultLane) {
+        return {
+          epicId: null,
+          lane: defaultLane.id,
+          baseBranch: defaultLane.baseBranch,
+        };
+      }
+
+      const epic = project.epicBranches.find((candidate) => candidate.branch === binding.base_branch);
+      if (epic) {
+        return {
+          epicId: epic.id,
+          lane: workstreamLaneForEpic(epic),
+          baseBranch: epic.branch,
+        };
+      }
+    }
+
+    return null;
   }
 
   upsertDiscordThreadBinding(data: {

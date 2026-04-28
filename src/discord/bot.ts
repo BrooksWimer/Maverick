@@ -2971,7 +2971,7 @@ export class DiscordBot {
       return null;
     }
 
-    const existingBinding = this.orchestrator.getDiscordThreadBinding(channelId);
+    const existingBinding = this.orchestrator.getRepairedDiscordThreadBinding(channelId);
     if (existingBinding) {
       return {
         projectId: existingBinding.project_id,

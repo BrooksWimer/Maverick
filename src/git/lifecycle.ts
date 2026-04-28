@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 
 type ExecResult = {
   stdout: string;
@@ -17,6 +18,15 @@ export interface GitLifecycleResult {
   targetShaAfter: string | null;
   reason: string | null;
   rollbackCommand: string | null;
+}
+
+export interface GitCleanupResult {
+  status: "cleaned" | "skipped";
+  worktreePath: string;
+  branch: string;
+  worktreeRemoved: boolean;
+  branchDeleted: boolean;
+  reason: string | null;
 }
 
 function execGit(args: string[], cwd: string, timeoutMs = 120_000): Promise<ExecResult> {
@@ -81,6 +91,14 @@ async function remoteBranchSha(cwd: string, branch: string): Promise<string | nu
 
 async function isAncestor(cwd: string, ancestorRef: string, descendantRef: string): Promise<boolean> {
   return tryGit(cwd, ["merge-base", "--is-ancestor", ancestorRef, descendantRef]);
+}
+
+async function localBranchExists(cwd: string, branch: string): Promise<boolean> {
+  return tryGit(cwd, ["show-ref", "--verify", "--quiet", remoteHeadRef(branch)]);
+}
+
+async function branchContainsCommit(cwd: string, branch: string, commit: string): Promise<boolean> {
+  return tryGit(cwd, ["merge-base", "--is-ancestor", commit, branch]);
 }
 
 export async function finishWorkstreamBranch(params: {
@@ -217,5 +235,67 @@ export async function promoteLaneBranch(params: {
     rollbackCommand: readiness.targetShaBefore
       ? `git push origin ${readiness.targetShaBefore}:refs/heads/${params.productionBranch}`
       : null,
+  };
+}
+
+export async function cleanupFinishedWorkstreamBranch(params: {
+  repoPath: string;
+  worktreePath: string;
+  workstreamBranch: string;
+  durableBranch: string;
+}): Promise<GitCleanupResult> {
+  if (!params.workstreamBranch.startsWith("maverick/")) {
+    throw new Error(`Refusing to clean non-disposable branch "${params.workstreamBranch}".`);
+  }
+  if (params.workstreamBranch === params.durableBranch) {
+    throw new Error(`Refusing to clean durable branch "${params.durableBranch}".`);
+  }
+
+  if (!existsSync(params.worktreePath)) {
+    return {
+      status: "skipped",
+      worktreePath: params.worktreePath,
+      branch: params.workstreamBranch,
+      worktreeRemoved: false,
+      branchDeleted: false,
+      reason: "Worktree path does not exist.",
+    };
+  }
+
+  await ensureCleanGitWorktree(params.worktreePath);
+  const currentBranch = await gitOutput(params.worktreePath, ["branch", "--show-current"]);
+  if (currentBranch !== params.workstreamBranch) {
+    throw new Error(
+      `Worktree is on branch "${currentBranch}", expected disposable branch "${params.workstreamBranch}".`
+    );
+  }
+
+  const headSha = await gitOutput(params.worktreePath, ["rev-parse", "HEAD"]);
+  await fetchBranch(params.repoPath, params.durableBranch);
+  const durableContainsHead = await branchContainsCommit(
+    params.repoPath,
+    remoteBranchRef(params.durableBranch),
+    headSha,
+  );
+  if (!durableContainsHead) {
+    throw new Error(
+      `Refusing to clean "${params.workstreamBranch}" because "${params.durableBranch}" does not contain its HEAD.`
+    );
+  }
+
+  await execGit(["worktree", "remove", params.worktreePath], params.repoPath);
+  let branchDeleted = false;
+  if (await localBranchExists(params.repoPath, params.workstreamBranch)) {
+    await execGit(["branch", "-D", params.workstreamBranch], params.repoPath);
+    branchDeleted = true;
+  }
+
+  return {
+    status: "cleaned",
+    worktreePath: params.worktreePath,
+    branch: params.workstreamBranch,
+    worktreeRemoved: true,
+    branchDeleted,
+    reason: null,
   };
 }
