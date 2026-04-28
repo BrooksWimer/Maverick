@@ -77,6 +77,11 @@ function requiredBranches(project) {
 
 const args = process.argv.slice(2);
 const createMissing = args.includes("--create-missing");
+const configArgIndex = args.findIndex((arg) => arg === "--config");
+const configArg =
+  args.find((arg) => arg.startsWith("--config="))?.slice("--config=".length) ??
+  (configArgIndex >= 0 ? args[configArgIndex + 1] : undefined) ??
+  process.env.MAVERICK_CONFIG_PATH;
 const exclude = new Set(
   args
     .filter((arg) => arg.startsWith("--exclude="))
@@ -85,7 +90,11 @@ const exclude = new Set(
     .filter(Boolean)
 );
 
-const configPath = resolve(repoRoot, "config", "control-plane.json");
+const defaultConfigName =
+  process.platform === "linux" && existsSync(resolve(repoRoot, "config", "control-plane.linux.json"))
+    ? "control-plane.linux.json"
+    : "control-plane.json";
+const configPath = configArg ? resolve(configArg) : resolve(repoRoot, "config", defaultConfigName);
 const config = loadConfig(configPath);
 let hadMissing = false;
 
