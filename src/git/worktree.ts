@@ -74,6 +74,44 @@ async function isGitRepository(repoPath: string): Promise<boolean> {
   }
 }
 
+async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
+  try {
+    await execGit(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repoPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchRemoteBranchIfAvailable(repoPath: string, branch: string): Promise<void> {
+  try {
+    await execGit(["fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], repoPath);
+  } catch {
+    // Some test/local repositories intentionally have no origin or no matching remote branch.
+  }
+}
+
+async function resolveWorktreeBaseRef(repoPath: string, baseRef?: string): Promise<string> {
+  if (!baseRef) {
+    return "HEAD";
+  }
+
+  await fetchRemoteBranchIfAvailable(repoPath, baseRef);
+
+  const remoteRef = `refs/remotes/origin/${baseRef}`;
+  if (await gitRefExists(repoPath, remoteRef)) {
+    return remoteRef;
+  }
+
+  if (await gitRefExists(repoPath, baseRef)) {
+    return baseRef;
+  }
+
+  throw new Error(
+    `Base ref "${baseRef}" was not found locally or at origin/${baseRef}. Fetch or create the durable lane branch before starting this workstream.`
+  );
+}
+
 export async function provisionWorktree(params: {
   repoPath: string;
   projectId: string;
@@ -103,9 +141,10 @@ export async function provisionWorktree(params: {
   const names = deriveWorktreeNames(params);
   const generatedRoot = params.generatedRoot ?? resolve(process.cwd(), ".generated", "worktrees");
   const worktreePath = resolve(generatedRoot, ...names.relativeSegments);
+  const baseRef = await resolveWorktreeBaseRef(params.repoPath, params.baseRef);
 
   mkdirSync(dirname(worktreePath), { recursive: true });
-  await execGit(["worktree", "add", "-b", names.branch, worktreePath, params.baseRef ?? "HEAD"], params.repoPath);
+  await execGit(["worktree", "add", "-b", names.branch, worktreePath, baseRef], params.repoPath);
 
   return {
     cwd: worktreePath,
