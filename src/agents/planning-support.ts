@@ -343,6 +343,162 @@ function fallbackPlanningResult(rawOutput: string): PlanningResult {
   };
 }
 
+function stripMarkdownNoise(value: string): string {
+  return value
+    .replace(/[`*_>#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractSection(content: string, heading: string): string {
+  const lines = content.split(/\r?\n/);
+  const headingPattern = new RegExp(`^#{1,6}\\s+${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i");
+  const startIndex = lines.findIndex((line) => headingPattern.test(line.trim()));
+  if (startIndex < 0) {
+    return "";
+  }
+
+  const startHeading = lines[startIndex]?.match(/^(#+)/)?.[1].length ?? 1;
+  const collected: string[] = [];
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const headingMatch = line.match(/^(#+)\s+/);
+    if (headingMatch && headingMatch[1].length <= startHeading) {
+      break;
+    }
+    collected.push(line);
+  }
+
+  return collected.join("\n").trim();
+}
+
+function extractFirstFenceAfter(content: string, marker: string): string {
+  const markerIndex = content.toLowerCase().indexOf(marker.toLowerCase());
+  if (markerIndex < 0) {
+    return "";
+  }
+
+  const afterMarker = content.slice(markerIndex + marker.length);
+  const match = afterMarker.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)```/);
+  return match?.[1]?.trim() ?? "";
+}
+
+function extractReadyDispatchPrompt(content: string): string {
+  return (
+    extractFirstFenceAfter(content, "Ready Dispatch Prompt") ||
+    extractFirstFenceAfter(content, "finalExecutionPrompt") ||
+    extractFirstFenceAfter(content, "Final Codex execution prompt")
+  );
+}
+
+function extractBulletItems(section: string): string[] {
+  return section
+    .split(/\r?\n/)
+    .map((line) => line.trim().match(/^[-*]\s+(.+)$/)?.[1] ?? "")
+    .map(stripMarkdownNoise)
+    .filter(Boolean);
+}
+
+function extractMainFiles(content: string): string[] {
+  const mainFiles = extractSection(content, "Main Files");
+  const matches = [...mainFiles.matchAll(/`([^`]+)`/g)]
+    .map((match) => match[1]?.trim() ?? "")
+    .filter(Boolean);
+  return [...new Set(matches)];
+}
+
+function extractStepsFromPrompt(finalExecutionPrompt: string, fallbackFiles: string[]): PlanStep[] {
+  const numberedSteps = finalExecutionPrompt
+    .split(/\r?\n/)
+    .map((line) => line.trim().match(/^(\d+)\.\s+(.+)$/))
+    .filter((match): match is RegExpMatchArray => match !== null)
+    .map((match) => ({
+      order: Number.parseInt(match[1], 10),
+      description: stripMarkdownNoise(match[2] ?? ""),
+      files: fallbackFiles,
+      verification: "Use the verification checklist from the durable planning brief.",
+      canParallelize: false,
+    }))
+    .filter((step) => step.description);
+
+  if (numberedSteps.length > 0) {
+    return numberedSteps;
+  }
+
+  return [{
+    order: 1,
+    description: "Implement the recovered planning prompt.",
+    files: fallbackFiles,
+    verification: "Use the verification checklist from the durable planning brief.",
+    canParallelize: false,
+  }];
+}
+
+function summarizeStructuredPlan(rawOutput: string, finalExecutionPrompt: string): string {
+  const firstParagraph = rawOutput
+    .split(/\r?\n\r?\n/)
+    .map(stripMarkdownNoise)
+    .find(Boolean);
+  if (firstParagraph) {
+    return firstParagraph;
+  }
+
+  return `Recovered a dispatch-ready execution prompt: ${stripMarkdownNoise(finalExecutionPrompt).slice(0, 220)}`;
+}
+
+export function structureRawPlanningOutput(params: {
+  originalInstruction: string;
+  rawAgentOutput: string;
+  contextBundle?: PlanningContextBundle | null;
+  supplementalDocs?: string[];
+}): PlanningResult | null {
+  const rawAgentOutput = params.rawAgentOutput.trim();
+  const parsed = parsePlanningResult(null, rawAgentOutput);
+  if (parsed.finalExecutionPrompt.trim() || parsed.requiredAnswers.length > 0 || parsed.importantDecisions.length > 0) {
+    return parsed;
+  }
+
+  const supplementalDocs = params.supplementalDocs ?? [];
+  const combinedContext = [
+    params.contextBundle?.projectContext,
+    params.contextBundle?.epicContext,
+    ...supplementalDocs,
+  ]
+    .filter((entry): entry is string => Boolean(entry?.trim()))
+    .join("\n\n");
+
+  const finalExecutionPrompt =
+    extractReadyDispatchPrompt(combinedContext) ||
+    extractReadyDispatchPrompt(rawAgentOutput);
+
+  if (!finalExecutionPrompt.trim()) {
+    return null;
+  }
+
+  const mainFiles = extractMainFiles(combinedContext);
+  const verificationChecklist = extractBulletItems(extractSection(combinedContext, "Verification Checklist"));
+  const constraints = extractBulletItems(extractSection(combinedContext, "Constraints"));
+  const todoItems = extractBulletItems(extractSection(combinedContext, "TODO"));
+
+  return {
+    currentStateSummary: summarizeStructuredPlan(rawAgentOutput, finalExecutionPrompt),
+    recommendedNextSlice: "Dispatch the recovered execution prompt from the durable planning brief.",
+    requiredAnswers: [],
+    importantDecisions: [],
+    draftExecutionPrompt: finalExecutionPrompt,
+    finalExecutionPrompt,
+    remainingUnknowns: todoItems,
+    steps: extractStepsFromPrompt(finalExecutionPrompt, mainFiles),
+    risks: constraints.slice(0, 8),
+    dependencies: [],
+    estimatedTurns: Math.max(1, extractStepsFromPrompt(finalExecutionPrompt, mainFiles).length),
+    testStrategy: verificationChecklist.length > 0
+      ? verificationChecklist.join("; ")
+      : "Run the narrowest verification that proves the recovered implementation prompt.",
+    rollbackPlan: "Revert the disposable workstream changes or reset the worktree back to the durable epic branch before finish.",
+  };
+}
+
 function normalizeAnswer(value: unknown, questionId: string): PlanningAnswer | null {
   if (!isRecord(value)) {
     return null;

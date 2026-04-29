@@ -592,7 +592,7 @@ describe("Orchestrator planning agent flow", () => {
 
     await expect(orchestrator.generatePlan(workstream.id, "Plan a bounded implementation.", "manual"))
       .rejects
-      .toThrow("Planning agent returned unstructured output");
+      .toThrow("deterministic structurer could not find");
   });
 
   it("uses static-site verification for Portfolio instead of generic npm test/build", async () => {

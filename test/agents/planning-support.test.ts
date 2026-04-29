@@ -5,6 +5,7 @@ import {
   parsePlanningContextRecord,
   parsePlanningResult,
   renderPlanningSummary,
+  structureRawPlanningOutput,
 } from "../../src/agents/planning-support.js";
 
 describe("parsePlanningResult", () => {
@@ -61,6 +62,57 @@ describe("parsePlanningResult", () => {
     expect(result.currentStateSummary).toContain("unstructured output");
     expect(result.recommendedNextSlice).toContain("Review the raw planning output");
     expect(result.requiredAnswers).toEqual([]);
+  });
+
+  it("structures a prose plan from a repo-owned ready dispatch prompt without another agent run", () => {
+    const rawAgentOutput = [
+      "**Maverick is ready to dispatch.**",
+      "",
+      "The plan is grounded in the actual `index.html` and the durable planning baseline.",
+      "",
+      "If those defaults are acceptable, Codex can be dispatched immediately with the `finalExecutionPrompt` above.",
+    ].join("\n");
+    const durablePlanDoc = [
+      "# Making Portfolio Pop",
+      "",
+      "## Main Files",
+      "",
+      "- `index.html`: hero and project cards.",
+      "- `assets/css/main.css`: compiled site CSS.",
+      "",
+      "## Constraints",
+      "",
+      "- Do not add new site dependencies.",
+      "- Do not invent facts.",
+      "",
+      "## Verification Checklist",
+      "",
+      "- Serve the site locally.",
+      "- Check desktop and mobile viewports.",
+      "",
+      "## Ready Dispatch Prompt",
+      "",
+      "```text",
+      "Implement a portfolio polish pass for this static HTML/CSS portfolio.",
+      "",
+      "Implement the work in slices:",
+      "1. Hero positioning and anchor navigation.",
+      "2. Project card hooks and title cleanup.",
+      "3. Mobile and accessibility fixes.",
+      "```",
+    ].join("\n");
+
+    const result = structureRawPlanningOutput({
+      originalInstruction: "Create a bounded implementation plan.",
+      rawAgentOutput,
+      supplementalDocs: [durablePlanDoc],
+    });
+
+    expect(result?.finalExecutionPrompt).toContain("Implement a portfolio polish pass");
+    expect(result?.steps.map((step) => step.description)).toContain("Hero positioning and anchor navigation.");
+    expect(result?.steps[0]?.files).toContain("index.html");
+    expect(result?.testStrategy).toContain("Serve the site locally");
+    expect(result?.risks).toContain("Do not invent facts.");
   });
 
   it("extracts structured planning JSON from a fenced raw Claude response", () => {

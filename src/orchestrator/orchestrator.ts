@@ -44,6 +44,7 @@ import {
   parsePlanningResult,
   renderPlanningSummary,
   serializePlanningAnswers,
+  structureRawPlanningOutput,
 } from "../agents/planning-support.js";
 import { coerceExplanationResult } from "../agents/response-formatting-support.js";
 import { coerceReviewAgentResult } from "../agents/review-support.js";
@@ -1320,8 +1321,6 @@ export class Orchestrator {
       throw new Error(`Claude planning is disabled for project ${project.id}.`);
     }
 
-    const cwd = this.resolveExecutionWorkspace(workstream);
-    const adapter = await this.getUtilityClaudeAdapter();
     const storedContext = parsePlanningContextRecord(workstream.planning_context_json);
     if (options.resumeExisting && !storedContext) {
       throw new Error(`Workstream ${workstreamId} has no stored planning context to resume.`);
@@ -1335,6 +1334,15 @@ export class Orchestrator {
         `Resume uses the existing planning instruction "${storedContext.originalInstruction}". Start a fresh /workstream plan to change it.`
       );
     }
+    if (options.resumeExisting && storedContext?.status === "needs-final-prompt") {
+      const structured = this.structureStoredPlanningContext(workstream.id, "resume");
+      if (structured.finalExecutionPrompt) {
+        return structured;
+      }
+    }
+
+    const cwd = this.resolveExecutionWorkspace(workstream);
+    const adapter = await this.getUtilityClaudeAdapter();
     const previousContext = options.resumeExisting ? storedContext : null;
     const effectiveInstruction = previousContext?.originalInstruction ?? instruction;
     const contextBundle = this.buildPlanningContextBundle(workstream, effectiveInstruction, previousContext);
@@ -1438,8 +1446,12 @@ export class Orchestrator {
         throw new Error(agentResult.output || "Claude plan generation failed.");
       }
 
-      const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
-      this.assertPlanningAgentResultIsActionable(agentResult, planningResult);
+      const planningResult = this.coercePlanningAgentResult(
+        workstream,
+        effectiveInstruction,
+        agentResult,
+        contextBundle,
+      );
       const basePlanningContext = buildPlanningContextRecord({
         originalInstruction: effectiveInstruction,
         result: planningResult,
@@ -1493,6 +1505,83 @@ export class Orchestrator {
     }
 
     return parsePlanningContextRecord(workstream.planning_context_json);
+  }
+
+  structureStoredPlanningContext(
+    workstreamId: string,
+    trigger: PlanningRunTrigger = "resume",
+  ): GeneratedPlanResult {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    const existingContext = parsePlanningContextRecord(workstream.planning_context_json);
+    if (!existingContext) {
+      throw new Error(`Workstream ${workstreamId} has no stored planning context to structure.`);
+    }
+
+    const planningResult = this.structureRawPlanningOutputForWorkstream(
+      workstream,
+      existingContext.originalInstruction,
+      existingContext.rawAgentOutput,
+      existingContext.contextBundle,
+    );
+    if (!planningResult) {
+      throw new Error(
+        `Stored planning output for "${workstream.name}" could not be structured deterministically.`
+      );
+    }
+    this.assertPlanningResultIsActionable(planningResult);
+
+    const basePlanningContext = buildPlanningContextRecord({
+      originalInstruction: existingContext.originalInstruction,
+      result: planningResult,
+      rawAgentOutput: existingContext.rawAgentOutput,
+      contextBundle: existingContext.contextBundle,
+      intake: existingContext.intake,
+      goalFrame: existingContext.goalFrame,
+      modeling: existingContext.modeling,
+      testDesign: existingContext.testDesign,
+      answers: existingContext.answers,
+      planningThreadId: existingContext.planningThreadId,
+      previous: existingContext,
+    });
+    const feedbackRequest = basePlanningContext.feedbackRequest;
+    const explanation = coerceExplanationResult(null, basePlanningContext, feedbackRequest);
+    const planningContext = buildPlanningContextRecord({
+      originalInstruction: existingContext.originalInstruction,
+      result: planningResult,
+      rawAgentOutput: existingContext.rawAgentOutput,
+      contextBundle: existingContext.contextBundle,
+      intake: existingContext.intake,
+      goalFrame: existingContext.goalFrame,
+      modeling: existingContext.modeling,
+      testDesign: existingContext.testDesign,
+      feedbackRequest,
+      explanation,
+      answers: existingContext.answers,
+      planningThreadId: existingContext.planningThreadId,
+      previous: existingContext,
+    });
+
+    const renderedPlan = this.persistPlanningContext(
+      workstream,
+      existingContext.originalInstruction,
+      planningContext,
+      trigger,
+    );
+    this.persistOperatorReport(
+      workstream,
+      this.buildPlanOperatorReport(workstream, planningContext, trigger),
+    );
+
+    return {
+      renderedPlan,
+      planningContext,
+      finalExecutionPrompt: planningContext.finalExecutionPrompt,
+      needsAnswers: planningContext.pendingQuestions.length > 0,
+    };
   }
 
   async provideDecisionAnswers(
@@ -1619,8 +1708,12 @@ export class Orchestrator {
         throw new Error(agentResult.output || "Claude planning resume failed.");
       }
 
-      const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
-      this.assertPlanningAgentResultIsActionable(agentResult, planningResult);
+      const planningResult = this.coercePlanningAgentResult(
+        workstream,
+        existingContext.originalInstruction,
+        agentResult,
+        contextBundle,
+      );
       const basePlanningContext = buildPlanningContextRecord({
         originalInstruction: existingContext.originalInstruction,
         result: planningResult,
@@ -3485,19 +3578,39 @@ export class Orchestrator {
     };
   }
 
-  private assertPlanningAgentResultIsActionable(
+  private coercePlanningAgentResult(
+    workstream: WorkstreamRow,
+    instruction: string,
     agentResult: AgentResult,
-    planningResult: PlanningResult,
-  ): void {
-    if (!agentResult.structured) {
-      throw new Error(
-        [
-          "Planning agent returned unstructured output.",
-          "Maverick requires schema-shaped planning JSON before it will store or dispatch a plan.",
-          "Retry planning after fixing the agent output; raw prose was not accepted as a plan.",
-        ].join(" ")
-      );
+    contextBundle: PlanningContextBundle,
+  ): PlanningResult {
+    if (agentResult.structured) {
+      const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
+      this.assertPlanningResultIsActionable(planningResult);
+      return planningResult;
     }
+
+    const structured = this.structureRawPlanningOutputForWorkstream(
+      workstream,
+      instruction,
+      agentResult.output,
+      contextBundle,
+    );
+    if (structured) {
+      this.assertPlanningResultIsActionable(structured);
+      return structured;
+    }
+
+    throw new Error(
+      [
+        "Planning agent returned unstructured output.",
+        "Maverick preserved the raw prose, but the deterministic structurer could not find a dispatch-ready prompt or pending questions.",
+        "Add a repo-owned Ready Dispatch Prompt or rerun planning with a stricter final prompt request.",
+      ].join(" ")
+    );
+  }
+
+  private assertPlanningResultIsActionable(planningResult: PlanningResult): void {
 
     const hasBlockingQuestions =
       planningResult.requiredAnswers.length > 0 || planningResult.importantDecisions.length > 0;
@@ -3509,6 +3622,63 @@ export class Orchestrator {
         ].join(" ")
       );
     }
+  }
+
+  private structureRawPlanningOutputForWorkstream(
+    workstream: WorkstreamRow,
+    instruction: string,
+    rawAgentOutput: string,
+    contextBundle?: PlanningContextBundle | null,
+  ): PlanningResult | null {
+    return structureRawPlanningOutput({
+      originalInstruction: instruction,
+      rawAgentOutput,
+      contextBundle,
+      supplementalDocs: this.readPlanningStructureDocs(workstream, instruction),
+    });
+  }
+
+  private readPlanningStructureDocs(workstream: WorkstreamRow, instruction: string): string[] {
+    const project = this.getProject(workstream.project_id);
+    const docs = [
+      this.readPlanningDoc(project, "docs/maverick/PROJECT_CONTEXT.md").content,
+      workstream.epic_id
+        ? this.readPlanningDoc(project, `docs/maverick/epics/${workstream.epic_id}.md`).content
+        : "",
+    ];
+
+    const planDir = resolve(project.repoPath, "docs", "maverick", "plans");
+    if (existsSync(planDir)) {
+      const preferredSlugs = new Set([
+        this.slugPlanningDocName(workstream.name),
+        this.slugPlanningDocName(instruction),
+        workstream.epic_id ? this.slugPlanningDocName(workstream.epic_id) : "",
+      ].filter(Boolean));
+      for (const entry of readdirSync(planDir)) {
+        if (!entry.toLowerCase().endsWith(".md")) {
+          continue;
+        }
+        const stem = entry.replace(/\.md$/i, "");
+        if (preferredSlugs.size > 0 && !preferredSlugs.has(stem) && preferredSlugs.size < 8) {
+          // Include all planning docs only when there is no useful slug signal.
+          continue;
+        }
+        try {
+          docs.push(readFileSync(resolve(planDir, entry), "utf8"));
+        } catch {
+          // Ignore unreadable supplemental planning docs; the raw output remains the source of truth.
+        }
+      }
+    }
+
+    return docs.filter((doc) => doc.trim().length > 0);
+  }
+
+  private slugPlanningDocName(value: string): string {
+    return value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
   }
 
   private buildCheckpointPlanningResult(
