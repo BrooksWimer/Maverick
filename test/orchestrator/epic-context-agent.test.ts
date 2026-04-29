@@ -113,6 +113,17 @@ describe("Orchestrator epic-context agent integration", () => {
     mkdirSync(repoPath, { recursive: true });
     writeFileSync(join(repoPath, "AGENTS.md"), "# Test doctrine", "utf8");
     writeFileSync(join(repoPath, "package.json"), '{"name":"repo"}', "utf8");
+    mkdirSync(join(repoPath, "docs", "maverick", "epics"), { recursive: true });
+    writeFileSync(
+      join(repoPath, "docs", "maverick", "PROJECT_CONTEXT.md"),
+      "# Astra Context\n\nAstra turns local network facts into ordinary-user insight.",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoPath, "docs", "maverick", "epics", "router-admin-ingestion.md"),
+      "# Router Admin Ingestion\n\nDo not overfit to Xfinity-only selectors.",
+      "utf8",
+    );
 
     initDatabase(join(tempDir, "orchestrator.db"));
 
@@ -145,6 +156,16 @@ describe("Orchestrator epic-context agent integration", () => {
               charter: {
                 summary: "Router admin ingestion is a real product capability.",
                 bullets: ["Prefer durable router-vendor generalization."],
+                docs: [
+                  {
+                    path: "docs/maverick/PROJECT_CONTEXT.md",
+                    purpose: "Project context.",
+                  },
+                  {
+                    path: "docs/maverick/epics/router-admin-ingestion.md",
+                    purpose: "Epic context.",
+                  },
+                ],
               },
             },
           ],
@@ -162,25 +183,12 @@ describe("Orchestrator epic-context agent integration", () => {
     rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("feeds dynamic epic context into the planning agent", async () => {
+  it("feeds bounded repo-owned epic context into the planning agent", async () => {
     config.projects[0]!.claudePlanning!.routing = planningRouting;
     orchestrator = new Orchestrator(config);
     await orchestrator.initialize();
 
     const utilityAdapter = new QueuedAdapter("utility", [
-      agentOutput(
-        {
-          epicId: "router-admin-ingestion",
-          summary: "The epic has one active workstream and a durable router-generalization constraint.",
-          completedWorkstreams: [],
-          activeWorkstreams: ["router admin capture [planning]"],
-          blockedItems: [],
-          recentDecisions: ["Do not overfit to Xfinity-only selectors."],
-          openQuestions: ["How much vendor abstraction is required in this slice?"],
-          contextForNextWorkstream: "Carry the router-generalization boundary into planning and review.",
-        },
-        "Epic context ready.",
-      ),
       agentOutput(
         {
           request: "Plan the next router-admin ingestion slice.",
@@ -196,18 +204,6 @@ describe("Orchestrator epic-context agent integration", () => {
       ),
       agentOutput(
         {
-          objective: "Plan the next router-admin slice within the epic charter.",
-          problemStatement: "Planning should stay aligned with the router-generalization constraint.",
-          successCriteria: ["The plan respects vendor-generalization boundaries."],
-          constraints: ["Do not overfit to one router UI."],
-          assumptions: ["The current epic context is accurate."],
-          autonomyGuidance: "Proceed until a real decision gate appears.",
-          operatorDecisionPolicy: "Escalate cross-vendor scope changes.",
-        },
-        "Goal frame ready.",
-      ),
-      agentOutput(
-        {
           systemSummary: "The router-admin ingestion flow spans epic context, planning, and downstream implementation.",
           mermaid: "flowchart TD\n  A[Epic context] --> B[Planning]\n  B --> C[Router-admin slice]",
           keyEntities: ["epic context", "planning", "router-admin slice"],
@@ -215,15 +211,6 @@ describe("Orchestrator epic-context agent integration", () => {
           openQuestions: [],
         },
         "Model ready.",
-      ),
-      agentOutput(
-        {
-          strategySummary: "Verify the next router-admin slice stays vendor-generalized.",
-          testCases: [],
-          verificationChecklist: ["Run focused planning tests"],
-          suggestedCommands: ["npm run lint"],
-        },
-        "Test design ready.",
       ),
       agentOutput(
         {
@@ -243,15 +230,6 @@ describe("Orchestrator epic-context agent integration", () => {
         },
         "Planning ready.",
       ),
-      agentOutput(
-        {
-          headline: "Planning stored",
-          summary: "Epic context is available for the next slice.",
-          markdown: "## Planning Stored\nEpic context is available for the next router-admin slice.",
-          nextAction: "Resume or dispatch once a final prompt exists.",
-        },
-        "Formatting ready.",
-      ),
     ]);
 
     (orchestrator as { utilityClaudeAdapter: ExecutionBackendAdapter | null }).utilityClaudeAdapter = utilityAdapter;
@@ -268,15 +246,13 @@ describe("Orchestrator epic-context agent integration", () => {
       "manual",
     );
 
-    expect(utilityAdapter.turnRequests).toHaveLength(7);
-    expect(utilityAdapter.turnRequests[0]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[1]?.model).toBe("haiku");
-    expect(utilityAdapter.turnRequests[3]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[4]?.model).toBe("haiku");
-    expect(utilityAdapter.turnRequests[5]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[6]?.model).toBe("haiku");
-    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Summarize the current durable and operational context");
-    expect(utilityAdapter.turnRequests[5]?.instruction).toContain("Epic Context Analysis");
-    expect(utilityAdapter.turnRequests[5]?.instruction).toContain("Do not overfit to Xfinity-only selectors.");
+    expect(utilityAdapter.turnRequests).toHaveLength(3);
+    expect(utilityAdapter.turnRequests[0]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests[1]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[2]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Bounded Epic Context");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Do not overfit to Xfinity-only selectors.");
+    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Epic Context Analysis");
+    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Do not overfit to Xfinity-only selectors.");
   });
 });

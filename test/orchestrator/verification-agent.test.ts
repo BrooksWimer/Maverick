@@ -122,6 +122,7 @@ describe("Orchestrator verification agent routing", () => {
           id: "maverick",
           name: "Maverick",
           repoPath,
+          workspaceKind: "notes",
           executionBackend: {
             type: "mock",
             responseDelay: 0,

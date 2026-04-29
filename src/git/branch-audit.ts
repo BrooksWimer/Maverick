@@ -21,6 +21,11 @@ export interface BranchAuditResult {
   missing: RequiredBranch[];
 }
 
+export interface BranchRepairResult extends BranchAuditResult {
+  created: RequiredBranch[];
+  skipped: RequiredBranch[];
+}
+
 function execGit(args: string[], cwd: string): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     execFile("git", args, { cwd, timeout: 60_000 }, (error, stdout, stderr) => {
@@ -69,7 +74,7 @@ export function collectRequiredBranches(project: ProjectConfig): RequiredBranch[
       : []),
     ...project.defaultLanes.map((lane) => ({
       projectId: project.id,
-      kind: "lane" as const,
+      kind: "epic" as const,
       id: lane.id,
       branch: lane.baseBranch,
     })),
@@ -114,5 +119,38 @@ export async function auditRemoteBranches(project: ProjectConfig): Promise<Branc
     checked,
     present,
     missing,
+  };
+}
+
+export async function createMissingRemoteBranches(project: ProjectConfig): Promise<BranchRepairResult> {
+  const audit = await auditRemoteBranches(project);
+  const production = audit.checked.find((branch) => branch.kind === "production");
+  if (!production) {
+    return {
+      ...audit,
+      created: [],
+      skipped: audit.missing,
+    };
+  }
+
+  const created: RequiredBranch[] = [];
+  const skipped: RequiredBranch[] = [];
+  for (const branch of audit.missing) {
+    if (branch.kind === "production") {
+      skipped.push(branch);
+      continue;
+    }
+
+    await execGit(["fetch", "origin", production.branch], project.repoPath);
+    await execGit(["push", "origin", `refs/remotes/origin/${production.branch}:refs/heads/${branch.branch}`], project.repoPath);
+    created.push(branch);
+  }
+
+  return {
+    ...audit,
+    created,
+    skipped,
+    missing: skipped,
+    present: [...audit.present, ...created],
   };
 }

@@ -3,7 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { closeDatabase, getDatabase, initDatabase } from "../../src/state/index.js";
+import {
+  closeDatabase,
+  configureRemoteStateBackend,
+  configureSqliteStateBackend,
+  getDatabase,
+  initDatabase,
+  projects,
+} from "../../src/state/index.js";
 
 describe("initDatabase legacy migrations", () => {
   const tempDirs: string[] = [];
@@ -118,5 +125,41 @@ describe("initDatabase legacy migrations", () => {
     const db = getDatabase();
     const columns = db.prepare("PRAGMA table_info(turns)").all() as Array<{ name: string }>;
     expect(columns.some((column) => column.name === "last_progress_at")).toBe(true);
+  });
+
+  it("does not open a SQLite file when configured for remote state", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "maverick-state-"));
+    tempDirs.push(tempDir);
+    const previousBackend = process.env.STATE_BACKEND;
+    const previousUrl = process.env.MAVERICK_STATE_URL;
+    const previousToken = process.env.MAVERICK_STATE_TOKEN;
+
+    try {
+      process.env.STATE_BACKEND = "remote";
+      process.env.MAVERICK_STATE_URL = "http://127.0.0.1:9";
+      process.env.MAVERICK_STATE_TOKEN = "test-token";
+
+      expect(initDatabase(join(tempDir, "orchestrator.db"))).toBeNull();
+      expect(() => getDatabase()).toThrow(/Database not initialized/);
+    } finally {
+      process.env.STATE_BACKEND = previousBackend;
+      process.env.MAVERICK_STATE_URL = previousUrl;
+      process.env.MAVERICK_STATE_TOKEN = previousToken;
+      configureSqliteStateBackend();
+    }
+  });
+
+  it("fails closed when remote state is unavailable", () => {
+    configureRemoteStateBackend({
+      url: "http://127.0.0.1:9",
+      token: "test-token",
+      timeoutMs: 1_000,
+    });
+
+    try {
+      expect(() => projects.list()).toThrow(/Remote Maverick state operation failed/);
+    } finally {
+      configureSqliteStateBackend();
+    }
   });
 });

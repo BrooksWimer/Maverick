@@ -34,6 +34,7 @@ describe("Orchestrator workstream status snapshots", () => {
           id: "maverick",
           name: "Maverick",
           repoPath,
+          workspaceKind: "notes",
           executionBackend: {
             type: "mock",
             responseDelay: 0,

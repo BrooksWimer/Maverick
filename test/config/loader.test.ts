@@ -155,7 +155,7 @@ describe("loadConfig epic charters", () => {
     ]));
   });
 
-  it("accepts default lanes and assistant ownership on discord routes", () => {
+  it("migrates legacy default lanes into epic branches and preserves assistant ownership", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "maverick-config-"));
     tempDirs.push(tempDir);
 
@@ -197,13 +197,14 @@ describe("loadConfig epic charters", () => {
     }, null, 2));
 
     const config = loadConfig(configPath);
-    expect(config.projects[0].defaultLanes[0]).toMatchObject({
+    expect(config.projects[0].defaultLanes).toEqual([]);
+    expect(config.projects[0].epicBranches[0]).toMatchObject({
       id: "job-ops",
-      baseBranch: "main",
-      ownerInstanceId: "windows",
+      branch: "main",
     });
+    expect(config.projects[0].requireEpicForWorktree).toBe(true);
     expect(config.discord.routes[0]).toMatchObject({
-      lane: "job-ops",
+      epicId: "job-ops",
       assistantEnabled: true,
       ownerInstanceId: "windows",
     });

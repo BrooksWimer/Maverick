@@ -40,6 +40,12 @@ export interface TurnRequest {
   addDirs?: string[];
   maxTurns?: number;
   permissionMode?: string;
+  jsonSchema?: Record<string, unknown> | string;
+  maxBudgetUsd?: number;
+  tools?: string[];
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  noSessionPersistence?: boolean;
 }
 
 export interface TurnResult {
@@ -74,6 +80,12 @@ export interface ReviewRequest {
   addDirs?: string[];
   maxTurns?: number;
   permissionMode?: string;
+  jsonSchema?: Record<string, unknown> | string;
+  maxBudgetUsd?: number;
+  tools?: string[];
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  noSessionPersistence?: boolean;
 }
 
 export interface ReviewResult {

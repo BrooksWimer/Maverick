@@ -230,6 +230,11 @@ export interface ModelingResult {
   keyEntities: string[];
   criticalFlows: string[];
   openQuestions: string[];
+  needsBroaderInspection?: Array<{
+    paths: string[];
+    patterns: string[];
+    reason: string;
+  }>;
 }
 
 /** Test design agent output */
@@ -238,6 +243,30 @@ export interface TestDesignResult {
   testCases: TestDesignCase[];
   verificationChecklist: string[];
   suggestedCommands: string[];
+}
+
+export interface PlanningChangedFileSummary {
+  path: string;
+  status: string;
+  summary: string;
+}
+
+export interface PlanningContextBundle {
+  schemaVersion: number;
+  projectContextPath: string | null;
+  projectContext: string;
+  epicContextPath: string | null;
+  epicContext: string;
+  agentsPath: string | null;
+  agentsSummary: string;
+  contextFingerprint: string;
+  previousContextFingerprint: string | null;
+  fingerprintChanged: boolean;
+  fingerprintInputs: Record<string, string>;
+  changedEvidence: string[];
+  changedFiles: PlanningChangedFileSummary[];
+  broaderInspectionPolicy: string;
+  boundedAddDirs: string[];
 }
 
 export interface TestDesignCase {
@@ -294,6 +323,7 @@ export interface PlanningContextRecord {
   schemaVersion: number;
   originalInstruction: string;
   planningThreadId: string | null;
+  contextBundle: PlanningContextBundle | null;
   intake: IntakeResult | null;
   goalFrame: GoalFrameResult | null;
   modeling: ModelingResult | null;

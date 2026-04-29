@@ -257,6 +257,20 @@ export interface RunAgentOptions {
   /** Override the model */
   model?: string;
 
+  /** Claude CLI JSON schema guardrail */
+  jsonSchema?: Record<string, unknown> | string;
+
+  /** Claude CLI max budget guardrail */
+  maxBudgetUsd?: number;
+
+  /** Restrict available Claude tools */
+  tools?: string[];
+  allowedTools?: string[];
+  disallowedTools?: string[];
+
+  /** Disable Claude session persistence when safe for bounded utility runs */
+  noSessionPersistence?: boolean;
+
   /** Callback for streaming output */
   onOutput?: (content: string, isPartial: boolean) => void;
 }
@@ -320,6 +334,12 @@ export async function runAgent(
     addDirs: context.addDirs,
     maxTurns,
     permissionMode,
+    jsonSchema: options.jsonSchema,
+    maxBudgetUsd: options.maxBudgetUsd,
+    tools: options.tools,
+    allowedTools: options.allowedTools,
+    disallowedTools: options.disallowedTools,
+    noSessionPersistence: options.noSessionPersistence,
   });
 
   const durationMs = Date.now() - startTime;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseClaudeStreamLine } from "../../src/claude/claude-adapter.js";
+import { buildClaudePrintArgs, parseClaudeStreamLine } from "../../src/claude/claude-adapter.js";
 
 describe("parseClaudeStreamLine", () => {
   it("parses streamed text deltas", () => {
@@ -44,5 +44,44 @@ describe("parseClaudeStreamLine", () => {
       kind: "error",
       message: "boom",
     });
+  });
+});
+
+describe("buildClaudePrintArgs", () => {
+  it("includes budget, schema, tool limits, session, and bounded directory flags", () => {
+    const args = buildClaudePrintArgs({
+      addDirs: ["C:/repo"],
+      model: "haiku",
+      permissionMode: "plan",
+      systemPrompt: "Be bounded.",
+      maxBudgetUsd: 0.25,
+      jsonSchema: { type: "object" },
+      tools: ["Read", "Grep"],
+      allowedTools: ["Read"],
+      disallowedTools: ["Write", "WebSearch"],
+      noSessionPersistence: true,
+    });
+
+    expect(args).toEqual(expect.arrayContaining([
+      "--model",
+      "haiku",
+      "--permission-mode",
+      "plan",
+      "--system-prompt",
+      "Be bounded.",
+      "--no-session-persistence",
+      "--max-budget-usd",
+      "0.25",
+      "--json-schema",
+      JSON.stringify({ type: "object" }),
+      "--tools",
+      "Read,Grep",
+      "--allowedTools",
+      "Read",
+      "--disallowedTools",
+      "Write,WebSearch",
+      "--add-dir",
+      "C:/repo",
+    ]));
   });
 });

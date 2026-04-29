@@ -313,7 +313,7 @@ describe("planning context records", () => {
 
     const parsed = parsePlanningContextRecord(JSON.stringify(context));
 
-    expect(parsed?.schemaVersion).toBe(4);
+    expect(parsed?.schemaVersion).toBe(5);
     expect(parsed?.intake?.scope).toContain("goal framing");
     expect(parsed?.goalFrame?.objective).toContain("pre-planning");
     expect(parsed?.modeling?.keyEntities).toContain("goal frame");

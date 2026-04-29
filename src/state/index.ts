@@ -1,5 +1,11 @@
 export { initDatabase, closeDatabase, getDatabase } from "./database.js";
 export {
+  configureRemoteStateBackend,
+  configureSqliteStateBackend,
+  configureStateBackendFromEnv,
+  getStateBackendMode,
+} from "./backend.js";
+export {
   projects,
   workstreams,
   turns,
@@ -13,6 +19,9 @@ export {
   assistantCalendarEvents,
   assistantReminders,
   assistantSettings,
+  workstreamRuntimeBindings,
+  activeWorkstreamOperations,
+  invokeLocalStateOperation,
 } from "./repositories.js";
 export type {
   ProjectRow,
@@ -28,4 +37,6 @@ export type {
   AssistantCalendarEventRow,
   AssistantReminderRow,
   AssistantSettingRow,
+  WorkstreamRuntimeBindingRow,
+  ActiveWorkstreamOperationRow,
 } from "./repositories.js";

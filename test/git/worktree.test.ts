@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { deriveWorktreeNames, provisionWorktree } from "../../src/git/worktree.js";
+import { deriveWorktreeNames, provisionWorktree, recoverWorktreeForBranch } from "../../src/git/worktree.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -87,6 +87,47 @@ describe("deriveWorktreeNames", () => {
       expect(workspace.branch).toBe("maverick/portfolio-resume/portfolio/adding-images-92b173d5");
       expect(existsSync(join(workspace.cwd, "portfolio.txt"))).toBe(true);
       expect(git(workspace.cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe(workspace.branch);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("recovers an existing disposable workstream branch from origin", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "maverick-worktree-"));
+    try {
+      const origin = join(tempDir, "origin.git");
+      const repo = join(tempDir, "repo");
+      const generatedRoot = join(tempDir, "generated");
+      const branch = "maverick/portfolio-resume/portfolio/recovered-work-1111111";
+
+      mkdirSync(origin, { recursive: true });
+      git(origin, ["init", "--bare"]);
+      git(tempDir, ["clone", origin, repo]);
+      git(repo, ["config", "user.email", "maverick@example.test"]);
+      git(repo, ["config", "user.name", "Maverick Test"]);
+      commitFile(repo, "README.md", "# Test\n", "initial");
+      git(repo, ["branch", "-M", "master"]);
+      git(repo, ["push", "-u", "origin", "master"]);
+      git(repo, ["checkout", "-b", branch]);
+      commitFile(repo, "handoff.txt", "ready\n", "seed handoff branch");
+      git(repo, ["push", "-u", "origin", branch]);
+      git(repo, ["checkout", "master"]);
+      git(repo, ["branch", "-D", branch]);
+
+      const workspace = await recoverWorktreeForBranch({
+        repoPath: repo,
+        projectId: "portfolio-resume",
+        workstreamId: "11111111-0000-4000-8000-000000000000",
+        name: "recovered work",
+        lane: "portfolio",
+        branch,
+        generatedRoot,
+      });
+
+      expect(workspace.mode).toBe("worktree");
+      expect(workspace.branch).toBe(branch);
+      expect(existsSync(join(workspace.cwd, "handoff.txt"))).toBe(true);
+      expect(git(workspace.cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe(branch);
     } finally {
       rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }

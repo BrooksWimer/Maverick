@@ -18,7 +18,9 @@ Tracked server assets:
 - Linux service unit: `deploy/systemd/maverick.service`
 - Windows first-time bootstrap wrapper: `scripts/bootstrap-linux-server.ps1`
 - Windows ongoing deploy script: `scripts/deploy-linux.ps1`
-- Windows state sync script: `scripts/sync-linux-state.ps1`
+- Windows state tunnel helper: `scripts/start-state-tunnel.ps1`
+- Offline state recovery/import helper: `scripts/sync-linux-state.ps1`
+- SQLite merge helper: `scripts/merge-state-databases.mjs`
 
 ## One-Time Physical Linux Steps
 
@@ -70,14 +72,67 @@ The wrapper will:
 - clone Maverick, Netwise, and SyncSonic
 - install Node 20, build tools, SQLite tools, Go, `libpcap` headers for Netwise, and Codex
 - install and enable the `maverick` `systemd` service
-- sync the local SQLite state to `/var/lib/maverick`
+- leave Linux as the canonical SQLite owner at `/var/lib/maverick`
 - start Maverick and run a localhost health check
 
-If you want to bootstrap without copying the SQLite state yet:
+If you explicitly need to import the local SQLite file during first-time recovery work:
 
 ```powershell
-.\scripts\bootstrap-linux-server.ps1 -SshHost maverick-server -MaverickRepoUrl git@github.com:YOUR_USER/Maverick.git -SkipDatabaseSync
+.\scripts\bootstrap-linux-server.ps1 `
+  -SshHost maverick-server `
+  -MaverickRepoUrl git@github.com:YOUR_USER/Maverick.git `
+  -ImportLocalDatabase
 ```
+
+Routine Windows/Linux operation should not copy SQLite files. Windows should use the Linux-owned state API through the SSH tunnel below.
+
+## Shared State Model
+
+Linux owns the SQLite file directly:
+
+```dotenv
+MAVERICK_INSTANCE_ID=linux
+STATE_BACKEND=sqlite
+DATABASE_PATH=/var/lib/maverick/orchestrator.db
+MAVERICK_STATE_TOKEN=<same-long-secret-on-linux-and-windows>
+```
+
+The HTTP server is already bound to `127.0.0.1` by default in the shared control-plane config. The internal state API is only enabled when `MAVERICK_STATE_TOKEN` is set.
+
+Windows keeps the existing Discord command routing and instance behavior, but uses the Linux state service:
+
+```dotenv
+MAVERICK_INSTANCE_ID=windows
+STATE_BACKEND=remote
+MAVERICK_STATE_URL=http://127.0.0.1:3848
+MAVERICK_STATE_TOKEN=<same-long-secret-on-linux-and-windows>
+```
+
+Start the tunnel before starting the Windows bot:
+
+```powershell
+.\scripts\start-state-tunnel.ps1 -SshHost maverick-server
+```
+
+This forwards `127.0.0.1:3848` on Windows to the Linux service on `127.0.0.1:3847`. If the tunnel or Linux state API is unavailable, Windows remote state calls fail closed instead of opening its own SQLite database.
+
+## State Migration
+
+For the first shared-state migration:
+
+1. Stop both bots.
+2. Back up both SQLite files, including matching `-wal` and `-shm` files.
+3. Apply the new schema on Linux with `npm run db:migrate`.
+4. Merge Windows-only rows into the Linux database:
+
+```powershell
+node .\scripts\merge-state-databases.mjs `
+  --canonical C:\path\to\linux\orchestrator.db `
+  --source C:\Users\wimer\Desktop\Maverick\data\orchestrator.db `
+  --report .\maverick-state-merge-report.json
+```
+
+The merge script keeps Linux rows on duplicate primary keys, imports missing rows, remaps conflicting event ids so source events are not lost, and converts legacy `workstreams.cwd` / `workstreams.codex_thread_id` values into per-instance `workstream_runtime_bindings`.
 
 ## Ongoing Deploys From Windows
 
@@ -116,9 +171,9 @@ When testing Maverick changes that affect Discord routing, workstream creation, 
 Restarting the `systemd` service is the normal path.
 Reboot the Linux host only when the change actually requires a full machine restart.
 
-## Re-Syncing State Later
+## Offline State Recovery
 
-To re-copy the local SQLite state:
+Do not use SQLite copying for routine state sharing. The sync script is retained for explicit offline recovery/import only, after stopping the local bot and the Linux service:
 
 ```powershell
 .\scripts\sync-linux-state.ps1 -SshHost maverick-server

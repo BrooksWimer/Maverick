@@ -91,6 +91,10 @@ async function fetchRemoteBranchIfAvailable(repoPath: string, branch: string): P
   }
 }
 
+async function fetchRemoteBranch(repoPath: string, branch: string): Promise<void> {
+  await execGit(["fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], repoPath);
+}
+
 async function resolveWorktreeBaseRef(repoPath: string, baseRef?: string): Promise<string> {
   if (!baseRef) {
     return "HEAD";
@@ -149,6 +153,60 @@ export async function provisionWorktree(params: {
   return {
     cwd: worktreePath,
     branch: names.branch,
+    mode: "worktree",
+  };
+}
+
+export async function recoverWorktreeForBranch(params: {
+  repoPath: string;
+  projectId: string;
+  workstreamId: string;
+  name: string;
+  workspaceKind?: "git" | "notes";
+  lane?: string | null;
+  branch: string | null;
+  generatedRoot?: string;
+}): Promise<WorktreeProvisionResult> {
+  if (params.workspaceKind === "notes") {
+    return {
+      cwd: params.repoPath,
+      branch: null,
+      mode: "notes",
+    };
+  }
+
+  if (!(await isGitRepository(params.repoPath))) {
+    return {
+      cwd: params.repoPath,
+      branch: null,
+      mode: "legacy-root",
+    };
+  }
+
+  if (!params.branch) {
+    throw new Error("Cannot recover a git worktree without a stored disposable workstream branch.");
+  }
+
+  const names = deriveWorktreeNames(params);
+  const generatedRoot = params.generatedRoot ?? resolve(process.cwd(), ".generated", "worktrees");
+  const worktreePath = resolve(generatedRoot, ...names.relativeSegments);
+  const remoteRef = `refs/remotes/origin/${params.branch}`;
+  const localRef = `refs/heads/${params.branch}`;
+
+  await fetchRemoteBranch(params.repoPath, params.branch);
+
+  mkdirSync(dirname(worktreePath), { recursive: true });
+  if (await gitRefExists(params.repoPath, localRef)) {
+    await execGit(["worktree", "add", worktreePath, params.branch], params.repoPath);
+  } else if (await gitRefExists(params.repoPath, remoteRef)) {
+    await execGit(["worktree", "add", "-b", params.branch, worktreePath, remoteRef], params.repoPath);
+  } else {
+    throw new Error(`Disposable workstream branch "${params.branch}" was not found at origin.`);
+  }
+
+  return {
+    cwd: worktreePath,
+    branch: params.branch,
     mode: "worktree",
   };
 }

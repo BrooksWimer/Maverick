@@ -8,6 +8,8 @@ import type {
   PendingPlanningDecision,
   PlanStep,
   PlanningAnswer,
+  PlanningChangedFileSummary,
+  PlanningContextBundle,
   PlanningContextRecord,
   PlanningDecision,
   PlanningResult,
@@ -446,6 +448,24 @@ function normalizeModeling(value: unknown): ModelingResult | null {
     keyEntities: asStringArray(value.keyEntities),
     criticalFlows: asStringArray(value.criticalFlows),
     openQuestions: asStringArray(value.openQuestions),
+    needsBroaderInspection: Array.isArray(value.needsBroaderInspection)
+      ? value.needsBroaderInspection
+          .map((entry) => {
+            if (!isRecord(entry)) {
+              return null;
+            }
+            const reason = asTrimmedString(entry.reason);
+            if (!reason) {
+              return null;
+            }
+            return {
+              paths: asStringArray(entry.paths),
+              patterns: asStringArray(entry.patterns),
+              reason,
+            };
+          })
+          .filter((entry): entry is NonNullable<ModelingResult["needsBroaderInspection"]>[number] => entry !== null)
+      : [],
   };
 }
 
@@ -485,6 +505,64 @@ function normalizeTestDesign(value: unknown): TestDesignResult | null {
       : [],
     verificationChecklist: asStringArray(value.verificationChecklist),
     suggestedCommands: asStringArray(value.suggestedCommands),
+  };
+}
+
+function normalizeChangedFileSummary(value: unknown): PlanningChangedFileSummary | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const path = asTrimmedString(value.path);
+  if (!path) {
+    return null;
+  }
+
+  return {
+    path,
+    status: asTrimmedString(value.status) || "changed",
+    summary: asTrimmedString(value.summary) || "Changed since the last saved planning context.",
+  };
+}
+
+function normalizePlanningContextBundle(value: unknown): PlanningContextBundle | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const contextFingerprint = asTrimmedString(value.contextFingerprint);
+  if (!contextFingerprint) {
+    return null;
+  }
+
+  return {
+    schemaVersion: asPositiveInteger(value.schemaVersion, 1),
+    projectContextPath: asTrimmedString(value.projectContextPath) || null,
+    projectContext: asTrimmedString(value.projectContext),
+    epicContextPath: asTrimmedString(value.epicContextPath) || null,
+    epicContext: asTrimmedString(value.epicContext),
+    agentsPath: asTrimmedString(value.agentsPath) || null,
+    agentsSummary: asTrimmedString(value.agentsSummary),
+    contextFingerprint,
+    previousContextFingerprint: asTrimmedString(value.previousContextFingerprint) || null,
+    fingerprintChanged: Boolean(value.fingerprintChanged),
+    fingerprintInputs: isRecord(value.fingerprintInputs)
+      ? Object.fromEntries(
+          Object.entries(value.fingerprintInputs)
+            .map(([key, inputValue]) => [key, asTrimmedString(inputValue)] as const)
+            .filter((entry) => entry[1].length > 0)
+        )
+      : {},
+    changedEvidence: asStringArray(value.changedEvidence),
+    changedFiles: Array.isArray(value.changedFiles)
+      ? value.changedFiles
+          .map((entry) => normalizeChangedFileSummary(entry))
+          .filter((entry): entry is PlanningChangedFileSummary => entry !== null)
+      : [],
+    broaderInspectionPolicy:
+      asTrimmedString(value.broaderInspectionPolicy) ||
+      "Use only the provided context bundle. Request broader inspection only with exact paths or patterns and a concrete reason.",
+    boundedAddDirs: asStringArray(value.boundedAddDirs),
   };
 }
 
@@ -535,6 +613,7 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
     const goalFrame = normalizeGoalFrame(parsed.goalFrame, intake, originalInstruction);
     const modeling = normalizeModeling(parsed.modeling);
     const testDesign = normalizeTestDesign(parsed.testDesign);
+    const contextBundle = normalizePlanningContextBundle(parsed.contextBundle);
     let feedbackRequest = normalizeFeedbackRequest(parsed.feedbackRequest);
     const answersSource = isRecord(parsed.answers) ? parsed.answers : {};
     const answers = Object.fromEntries(
@@ -591,6 +670,7 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
       schemaVersion: asPositiveInteger(parsed.schemaVersion, 4),
       originalInstruction,
       planningThreadId: asTrimmedString(parsed.planningThreadId) || null,
+      contextBundle,
       intake,
       goalFrame,
       modeling,
@@ -619,6 +699,7 @@ export function buildPlanningContextRecord(params: {
   goalFrame?: GoalFrameResult | null;
   modeling?: ModelingResult | null;
   testDesign?: TestDesignResult | null;
+  contextBundle?: PlanningContextBundle | null;
   feedbackRequest?: OperatorFeedbackResult | null;
   explanation?: ExplanationResult | null;
   answers?: Record<string, PlanningAnswer>;
@@ -655,9 +736,10 @@ export function buildPlanningContextRecord(params: {
         : "needs-final-prompt";
 
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     originalInstruction: params.originalInstruction,
     planningThreadId: params.planningThreadId ?? params.previous?.planningThreadId ?? null,
+    contextBundle: params.contextBundle ?? params.previous?.contextBundle ?? null,
     intake: params.intake ?? params.previous?.intake ?? null,
     goalFrame: params.goalFrame ?? params.previous?.goalFrame ?? null,
     modeling: params.modeling ?? params.previous?.modeling ?? null,
@@ -731,6 +813,15 @@ export function renderPlanningSummary(
   const testDesignSummary = context.testDesign ? renderTestDesignMarkdown(context.testDesign) : "None recorded.";
   const feedbackSummary = context.feedbackRequest ? renderOperatorFeedbackMarkdown(context.feedbackRequest) : "None recorded.";
   const explanationSummary = context.explanation?.markdown ?? "None recorded.";
+  const contextBundleSummary = context.contextBundle
+    ? [
+        `Fingerprint: ${context.contextBundle.contextFingerprint}`,
+        `Changed: ${context.contextBundle.fingerprintChanged ? "yes" : "no"}`,
+        context.contextBundle.changedEvidence.length > 0
+          ? `Changed evidence: ${context.contextBundle.changedEvidence.join("; ")}`
+          : "Changed evidence: none",
+      ].join("\n")
+    : "None recorded.";
   const pendingQuestions = context.pendingQuestions.length > 0
     ? context.pendingQuestions
         .map((question, index) => {
@@ -776,6 +867,9 @@ export function renderPlanningSummary(
   return [
     "Structured intake:",
     intakeSummary,
+    "",
+    "Bounded planning context:",
+    contextBundleSummary,
     "",
     "Goal frame:",
     goalFrameSummary,

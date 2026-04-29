@@ -27,7 +27,9 @@ param(
 
     [string]$GitHubPublicKeyPath,
 
-    [switch]$SkipDatabaseSync
+    [switch]$SkipDatabaseSync,
+
+    [switch]$ImportLocalDatabase
 )
 
 Set-StrictMode -Version Latest
@@ -228,6 +230,7 @@ if (-not $SyncSonicRepoUrl) {
 
 $envValues = Read-DotEnvFile -Path $LocalEnvPath
 $envValues["NODE_ENV"] = "production"
+$envValues["STATE_BACKEND"] = "sqlite"
 $envValues["DATABASE_PATH"] = "$RemoteStateDir/orchestrator.db"
 $envValues["HTTP_PORT"] = "3847"
 $envValues.Remove("CODEX_NODE_PATH")
@@ -271,11 +274,13 @@ try {
 
     Invoke-SshCommand -Command $remoteBootstrap
 
-    if (-not $SkipDatabaseSync) {
+    if ($ImportLocalDatabase -and -not $SkipDatabaseSync) {
         & (Join-Path $repoRoot "scripts\sync-linux-state.ps1") `
             -SshHost $SshHost `
             -ServiceName $ServiceName `
             -RemoteStateDir $RemoteStateDir
+    } elseif (-not $SkipDatabaseSync) {
+        Write-Host "Skipping routine SQLite copy. Use -ImportLocalDatabase only for explicit offline recovery/import."
     }
 
     Invoke-SshCommand -Command "set -euo pipefail && sudo systemctl restart $ServiceName && sleep 2 && curl --fail --silent http://127.0.0.1:3847/health"

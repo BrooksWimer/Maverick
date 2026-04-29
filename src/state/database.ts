@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLogger } from "../logger.js";
+import { configureStateBackendFromEnv } from "./backend.js";
 
 const log = createLogger("database");
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -58,7 +59,14 @@ export function getDatabase(): SqliteDatabase {
   return db;
 }
 
-export function initDatabase(dbPath?: string): SqliteDatabase {
+export function initDatabase(dbPath?: string): SqliteDatabase | null {
+  const backend = configureStateBackendFromEnv();
+  if (backend === "remote") {
+    log.info({ url: process.env.MAVERICK_STATE_URL }, "Using remote Maverick state backend");
+    db = null;
+    return null;
+  }
+
   const resolvedPath = dbPath ?? process.env.DATABASE_PATH ?? "./data/orchestrator.db";
 
   // Ensure parent directory exists
@@ -157,6 +165,11 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
     "assistant_calendar_events",
     "recurrence_rule",
     "ALTER TABLE assistant_calendar_events ADD COLUMN recurrence_rule TEXT"
+  );
+  ensureIndex(
+    db,
+    "idx_turns_one_running_per_workstream",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_running_per_workstream ON turns(workstream_id) WHERE status = 'running'"
   );
 
   log.info({ schemaPath }, "Database schema applied");

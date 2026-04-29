@@ -14,20 +14,20 @@ import {
 } from "../../src/discord/bot.js";
 
 describe("persistedEpicIdForResolvedEpic", () => {
-  it("omits the synthetic default lane from persisted epic ids", () => {
-    expect(
-      persistedEpicIdForResolvedEpic({
-        id: "default",
-        source: "default",
-      })
-    ).toBeUndefined();
-
+  it("persists every resolved epic id now that synthetic default lanes are retired", () => {
     expect(
       persistedEpicIdForResolvedEpic({
         id: "default",
         source: "route",
       })
-    ).toBeUndefined();
+    ).toBe("default");
+
+    expect(
+      persistedEpicIdForResolvedEpic({
+        id: "portfolio",
+        source: "explicit",
+      })
+    ).toBe("portfolio");
   });
 
   it("preserves configured epic ids for routed or explicit epic workstreams", () => {

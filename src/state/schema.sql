@@ -59,6 +59,36 @@ CREATE INDEX IF NOT EXISTS idx_workstreams_state ON workstreams(state);
 CREATE INDEX IF NOT EXISTS idx_workstreams_discord_channel ON workstreams(discord_channel_id);
 CREATE INDEX IF NOT EXISTS idx_workstreams_discord_thread ON workstreams(discord_thread_id);
 
+-- Per-host runtime bindings for workstreams. The durable workstream row is shared,
+-- while cwd/Codex thread identity can differ between Windows and Linux.
+CREATE TABLE IF NOT EXISTS workstream_runtime_bindings (
+  workstream_id    TEXT NOT NULL REFERENCES workstreams(id),
+  instance_id      TEXT NOT NULL,
+  cwd              TEXT,
+  codex_thread_id  TEXT,
+  runtime_status   TEXT NOT NULL DEFAULT 'idle',
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (workstream_id, instance_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workstream_runtime_instance ON workstream_runtime_bindings(instance_id);
+
+-- Cross-host operation guard. This preserves existing Discord routing while
+-- preventing two bot instances from mutating the same workstream at once.
+CREATE TABLE IF NOT EXISTS active_workstream_operations (
+  workstream_id       TEXT PRIMARY KEY REFERENCES workstreams(id),
+  operation_kind      TEXT NOT NULL,
+  owner_instance_id   TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'running',
+  started_at          TEXT NOT NULL,
+  last_seen_at        TEXT NOT NULL,
+  completed_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_active_workstream_operations_owner ON active_workstream_operations(owner_instance_id);
+
 -- Turns: individual units of execution within a workstream
 CREATE TABLE IF NOT EXISTS turns (
   id              TEXT PRIMARY KEY,
@@ -74,6 +104,9 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_workstream ON turns(workstream_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_running_per_workstream
+  ON turns(workstream_id)
+  WHERE status = 'running';
 
 -- Approvals: pending and resolved approval requests
 CREATE TABLE IF NOT EXISTS approvals (

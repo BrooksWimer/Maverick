@@ -3,6 +3,8 @@
  * Each entity gets typed CRUD methods that return plain objects.
  */
 import { randomUUID } from "node:crypto";
+import { getRuntimeInstanceId } from "../runtime/identity.js";
+import { getStateBackendMode, invokeRemoteStateOperation } from "./backend.js";
 import { getDatabase } from "./database.js";
 
 // --- Types ---
@@ -203,9 +205,30 @@ export interface AssistantSettingRow {
   updated_at: string;
 }
 
+export interface WorkstreamRuntimeBindingRow {
+  workstream_id: string;
+  instance_id: string;
+  cwd: string | null;
+  codex_thread_id: string | null;
+  runtime_status: string;
+  created_at: string;
+  updated_at: string;
+  last_seen_at: string;
+}
+
+export interface ActiveWorkstreamOperationRow {
+  workstream_id: string;
+  operation_kind: string;
+  owner_instance_id: string;
+  status: string;
+  started_at: string;
+  last_seen_at: string;
+  completed_at: string | null;
+}
+
 // --- Projects ---
 
-export const projects = {
+const localProjects = {
   upsert(data: {
     id: string;
     name: string;
@@ -223,7 +246,7 @@ export const projects = {
         updated_at = datetime('now')
     `).run(data.id, data.name, data.repo_path, data.config_json);
 
-    return projects.getById(data.id)!;
+    return localProjects.getById(data.id)!;
   },
 
   getById(id: string): ProjectRow | undefined {
@@ -239,7 +262,7 @@ export const projects = {
 
 // --- Workstreams ---
 
-export const workstreams = {
+const localWorkstreams = {
   create(data: {
     id?: string;
     project_id: string;
@@ -277,7 +300,7 @@ export const workstreams = {
       data.discord_thread_id ?? null,
       data.discord_parent_channel_id ?? null,
     );
-    return workstreams.getById(id)!;
+    return localWorkstreams.getById(id)!;
   },
 
   getById(id: string): WorkstreamRow | undefined {
@@ -324,13 +347,13 @@ export const workstreams = {
 
     values.push(id);
     db.prepare(`UPDATE workstreams SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-    return workstreams.getById(id);
+    return localWorkstreams.getById(id);
   },
 };
 
 // --- Discord thread bindings ---
 
-export const discordThreadBindings = {
+const localDiscordThreadBindings = {
   upsert(data: {
     thread_id: string;
     parent_channel_id: string;
@@ -370,7 +393,7 @@ export const discordThreadBindings = {
       data.source ?? "manual",
     );
 
-    return discordThreadBindings.getByThreadId(data.thread_id)!;
+    return localDiscordThreadBindings.getByThreadId(data.thread_id)!;
   },
 
   getByThreadId(threadId: string): DiscordThreadBindingRow | undefined {
@@ -414,13 +437,13 @@ export const discordThreadBindings = {
 
 // --- Turns ---
 
-export const turns = {
+const localTurns = {
   create(data: { workstream_id: string; instruction: string }): TurnRow {
     const db = getDatabase();
     const id = randomUUID();
     db.prepare("INSERT INTO turns (id, workstream_id, instruction) VALUES (?, ?, ?)")
       .run(id, data.workstream_id, data.instruction);
-    return turns.getById(id)!;
+    return localTurns.getById(id)!;
   },
 
   getById(id: string): TurnRow | undefined {
@@ -454,16 +477,16 @@ export const turns = {
       }
     }
 
-    if (sets.length === 0) return turns.getById(id);
+    if (sets.length === 0) return localTurns.getById(id);
     values.push(id);
     db.prepare(`UPDATE turns SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-    return turns.getById(id);
+    return localTurns.getById(id);
   },
 };
 
 // --- Artifacts ---
 
-export const artifacts = {
+const localArtifacts = {
   create(data: {
     id?: string;
     workstream_id: string;
@@ -489,7 +512,7 @@ export const artifacts = {
       data.path ?? null,
       data.metadata_json ?? null,
     );
-    return artifacts.getById(id)!;
+    return localArtifacts.getById(id)!;
   },
 
   getById(id: string): ArtifactRow | undefined {
@@ -547,7 +570,7 @@ export const artifacts = {
 
 // --- Approvals ---
 
-export const approvals = {
+const localApprovals = {
   create(data: {
     workstream_id: string;
     turn_id?: string;
@@ -570,7 +593,7 @@ export const approvals = {
       data.context_json ?? null,
       data.tier
     );
-    return approvals.getById(id)!;
+    return localApprovals.getById(id)!;
   },
 
   getById(id: string): ApprovalRow | undefined {
@@ -592,7 +615,7 @@ export const approvals = {
     const db = getDatabase();
     db.prepare("UPDATE approvals SET status = ?, decided_by = ?, decided_at = datetime('now') WHERE id = ?")
       .run(status, decidedBy, id);
-    return approvals.getById(id);
+    return localApprovals.getById(id);
   },
 
   expirePendingByWorkstream(workstreamId: string, decidedBy = "system"): number {
@@ -608,7 +631,7 @@ export const approvals = {
 
 // --- Events ---
 
-export const events = {
+const localEvents = {
   emit(data: {
     workstream_id?: string;
     project_id?: string;
@@ -650,7 +673,7 @@ export const events = {
 
 // --- Assistant messages ---
 
-export const assistantMessages = {
+const localAssistantMessages = {
   create(data: {
     id?: string;
     source: string;
@@ -686,7 +709,7 @@ export const assistantMessages = {
       data.status ?? "received",
       data.metadata_json ?? null
     );
-    return assistantMessages.getById(id)!;
+    return localAssistantMessages.getById(id)!;
   },
 
   getById(id: string): AssistantMessageRow | undefined {
@@ -713,18 +736,18 @@ export const assistantMessages = {
     }
 
     if (sets.length === 0) {
-      return assistantMessages.getById(id);
+      return localAssistantMessages.getById(id);
     }
 
     values.push(id);
     db.prepare(`UPDATE assistant_messages SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-    return assistantMessages.getById(id);
+    return localAssistantMessages.getById(id);
   },
 };
 
 // --- Assistant notes ---
 
-export const assistantNotes = {
+const localAssistantNotes = {
   create(data: {
     id?: string;
     message_id?: string | null;
@@ -761,7 +784,7 @@ export const assistantNotes = {
       data.storage_path ?? null,
       data.tags_json ?? null
     );
-    return assistantNotes.getById(id)!;
+    return localAssistantNotes.getById(id)!;
   },
 
   getById(id: string): AssistantNoteRow | undefined {
@@ -791,18 +814,18 @@ export const assistantNotes = {
     }
 
     if (sets.length === 0) {
-      return assistantNotes.getById(id);
+      return localAssistantNotes.getById(id);
     }
 
     values.push(id);
     db.prepare(`UPDATE assistant_notes SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-    return assistantNotes.getById(id);
+    return localAssistantNotes.getById(id);
   },
 };
 
 // --- Assistant tasks ---
 
-export const assistantTasks = {
+const localAssistantTasks = {
   create(data: {
     id?: string;
     message_id?: string | null;
@@ -841,7 +864,7 @@ export const assistantTasks = {
       data.calendar_event_id ?? null,
       data.completed_at ?? null
     );
-    return assistantTasks.getById(id)!;
+    return localAssistantTasks.getById(id)!;
   },
 
   getById(id: string): AssistantTaskRow | undefined {
@@ -894,13 +917,13 @@ export const assistantTasks = {
 
     values.push(id);
     db.prepare(`UPDATE assistant_tasks SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-    return assistantTasks.getById(id);
+    return localAssistantTasks.getById(id);
   },
 };
 
 // --- Assistant calendar events ---
 
-export const assistantCalendarEvents = {
+const localAssistantCalendarEvents = {
   create(data: {
     id?: string;
     message_id?: string | null;
@@ -941,7 +964,7 @@ export const assistantCalendarEvents = {
       data.sync_status ?? "pending",
       data.sync_error ?? null
     );
-    return assistantCalendarEvents.getById(id)!;
+    return localAssistantCalendarEvents.getById(id)!;
   },
 
   getById(id: string): AssistantCalendarEventRow | undefined {
@@ -981,18 +1004,18 @@ export const assistantCalendarEvents = {
     }
 
     if (sets.length === 0) {
-      return assistantCalendarEvents.getById(id);
+      return localAssistantCalendarEvents.getById(id);
     }
 
     values.push(id);
     db.prepare(`UPDATE assistant_calendar_events SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-    return assistantCalendarEvents.getById(id);
+    return localAssistantCalendarEvents.getById(id);
   },
 };
 
 // --- Assistant reminders ---
 
-export const assistantReminders = {
+const localAssistantReminders = {
   create(data: {
     id?: string;
     message_id?: string | null;
@@ -1020,7 +1043,7 @@ export const assistantReminders = {
       data.provider ?? "disabled",
       data.status ?? "scheduled"
     );
-    return assistantReminders.getById(id)!;
+    return localAssistantReminders.getById(id)!;
   },
 
   getById(id: string): AssistantReminderRow | undefined {
@@ -1059,12 +1082,12 @@ export const assistantReminders = {
     }
 
     if (sets.length === 0) {
-      return assistantReminders.getById(id);
+      return localAssistantReminders.getById(id);
     }
 
     values.push(id);
     db.prepare(`UPDATE assistant_reminders SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-    return assistantReminders.getById(id);
+    return localAssistantReminders.getById(id);
   },
 
   markSent(id: string, providerMessageId?: string | null): AssistantReminderRow | undefined {
@@ -1074,7 +1097,7 @@ export const assistantReminders = {
       SET status = 'sent', sent_at = datetime('now'), provider_message_id = ?, error = NULL
       WHERE id = ?
     `).run(providerMessageId ?? null, id);
-    return assistantReminders.getById(id);
+    return localAssistantReminders.getById(id);
   },
 
   markFailed(id: string, error: string): AssistantReminderRow | undefined {
@@ -1084,13 +1107,13 @@ export const assistantReminders = {
       SET status = 'failed', error = ?
       WHERE id = ?
     `).run(error, id);
-    return assistantReminders.getById(id);
+    return localAssistantReminders.getById(id);
   },
 };
 
 // --- Assistant settings ---
 
-export const assistantSettings = {
+const localAssistantSettings = {
   upsert(data: {
     scope_type: string;
     scope_id: string;
@@ -1106,7 +1129,7 @@ export const assistantSettings = {
         profile = excluded.profile,
         updated_at = datetime('now')
     `).run(id, data.scope_type, data.scope_id, data.feature, data.profile);
-    return assistantSettings.getById(id)!;
+    return localAssistantSettings.getById(id)!;
   },
 
   getById(id: string): AssistantSettingRow | undefined {
@@ -1131,3 +1154,241 @@ export const assistantSettings = {
     `).all() as AssistantSettingRow[];
   },
 };
+
+// --- Per-instance runtime bindings ---
+
+const localWorkstreamRuntimeBindings = {
+  upsert(data: {
+    workstream_id: string;
+    instance_id?: string;
+    cwd?: string | null;
+    codex_thread_id?: string | null;
+    runtime_status?: string;
+  }): WorkstreamRuntimeBindingRow {
+    const db = getDatabase();
+    const instanceId = data.instance_id ?? getRuntimeInstanceId();
+    db.prepare(`
+      INSERT INTO workstream_runtime_bindings (
+        workstream_id, instance_id, cwd, codex_thread_id, runtime_status, last_seen_at
+      )
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(workstream_id, instance_id) DO UPDATE SET
+        cwd = excluded.cwd,
+        codex_thread_id = excluded.codex_thread_id,
+        runtime_status = excluded.runtime_status,
+        updated_at = datetime('now'),
+        last_seen_at = datetime('now')
+    `).run(
+      data.workstream_id,
+      instanceId,
+      data.cwd ?? null,
+      data.codex_thread_id ?? null,
+      data.runtime_status ?? "idle",
+    );
+
+    return localWorkstreamRuntimeBindings.get(data.workstream_id, instanceId)!;
+  },
+
+  get(workstreamId: string, instanceId = getRuntimeInstanceId()): WorkstreamRuntimeBindingRow | undefined {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM workstream_runtime_bindings
+      WHERE workstream_id = ? AND instance_id = ?
+    `).get(workstreamId, instanceId) as WorkstreamRuntimeBindingRow | undefined;
+  },
+
+  listByWorkstream(workstreamId: string): WorkstreamRuntimeBindingRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM workstream_runtime_bindings
+      WHERE workstream_id = ?
+      ORDER BY last_seen_at DESC, instance_id ASC
+    `).all(workstreamId) as WorkstreamRuntimeBindingRow[];
+  },
+
+  markStatus(workstreamId: string, status: string, instanceId = getRuntimeInstanceId()): WorkstreamRuntimeBindingRow | undefined {
+    const db = getDatabase();
+    db.prepare(`
+      UPDATE workstream_runtime_bindings
+      SET runtime_status = ?, updated_at = datetime('now'), last_seen_at = datetime('now')
+      WHERE workstream_id = ? AND instance_id = ?
+    `).run(status, workstreamId, instanceId);
+    return localWorkstreamRuntimeBindings.get(workstreamId, instanceId);
+  },
+};
+
+// --- Active operation guards ---
+
+const localActiveWorkstreamOperations = {
+  begin(data: {
+    workstream_id: string;
+    operation_kind: string;
+    owner_instance_id?: string;
+    started_at?: string;
+  }): ActiveWorkstreamOperationRow {
+    const db = getDatabase();
+    const owner = data.owner_instance_id ?? getRuntimeInstanceId();
+    const startedAt = data.started_at ?? new Date().toISOString();
+    const existing = localActiveWorkstreamOperations.get(data.workstream_id);
+    if (existing && existing.status === "running" && existing.owner_instance_id !== owner) {
+      throw new Error(
+        `Workstream ${data.workstream_id} is already running ${existing.operation_kind} on ${existing.owner_instance_id}.`
+      );
+    }
+
+    db.prepare(`
+      INSERT INTO active_workstream_operations (
+        workstream_id, operation_kind, owner_instance_id, status, started_at, last_seen_at
+      )
+      VALUES (?, ?, ?, 'running', ?, ?)
+      ON CONFLICT(workstream_id) DO UPDATE SET
+        operation_kind = excluded.operation_kind,
+        owner_instance_id = excluded.owner_instance_id,
+        status = 'running',
+        started_at = excluded.started_at,
+        last_seen_at = excluded.last_seen_at,
+        completed_at = NULL
+    `).run(data.workstream_id, data.operation_kind, owner, startedAt, startedAt);
+
+    return localActiveWorkstreamOperations.get(data.workstream_id)!;
+  },
+
+  get(workstreamId: string): ActiveWorkstreamOperationRow | undefined {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM active_workstream_operations
+      WHERE workstream_id = ? AND status = 'running'
+    `).get(workstreamId) as ActiveWorkstreamOperationRow | undefined;
+  },
+
+  touch(
+    workstreamId: string,
+    operationKind: string,
+    ownerInstanceId = getRuntimeInstanceId(),
+    at = new Date().toISOString(),
+  ): ActiveWorkstreamOperationRow {
+    const existing = localActiveWorkstreamOperations.get(workstreamId);
+    if (existing && existing.owner_instance_id !== ownerInstanceId) {
+      throw new Error(
+        `Workstream ${workstreamId} is already running ${existing.operation_kind} on ${existing.owner_instance_id}.`
+      );
+    }
+
+    if (!existing) {
+      return localActiveWorkstreamOperations.begin({
+        workstream_id: workstreamId,
+        operation_kind: operationKind,
+        owner_instance_id: ownerInstanceId,
+        started_at: at,
+      });
+    }
+
+    const db = getDatabase();
+    db.prepare(`
+      UPDATE active_workstream_operations
+      SET operation_kind = ?, last_seen_at = ?
+      WHERE workstream_id = ? AND owner_instance_id = ? AND status = 'running'
+    `).run(operationKind, at, workstreamId, ownerInstanceId);
+    return localActiveWorkstreamOperations.get(workstreamId)!;
+  },
+
+  complete(workstreamId: string, ownerInstanceId = getRuntimeInstanceId()): void {
+    const db = getDatabase();
+    db.prepare(`
+      UPDATE active_workstream_operations
+      SET status = 'completed', completed_at = ?, last_seen_at = ?
+      WHERE workstream_id = ? AND owner_instance_id = ? AND status = 'running'
+    `).run(new Date().toISOString(), new Date().toISOString(), workstreamId, ownerInstanceId);
+  },
+
+  clearForOwner(ownerInstanceId = getRuntimeInstanceId()): number {
+    const db = getDatabase();
+    const result = db.prepare(`
+      UPDATE active_workstream_operations
+      SET status = 'completed', completed_at = datetime('now'), last_seen_at = datetime('now')
+      WHERE owner_instance_id = ? AND status = 'running'
+    `).run(ownerInstanceId);
+    return result.changes;
+  },
+};
+
+const localRepositories = {
+  projects: localProjects,
+  workstreams: localWorkstreams,
+  turns: localTurns,
+  artifacts: localArtifacts,
+  approvals: localApprovals,
+  events: localEvents,
+  discordThreadBindings: localDiscordThreadBindings,
+  assistantMessages: localAssistantMessages,
+  assistantNotes: localAssistantNotes,
+  assistantTasks: localAssistantTasks,
+  assistantCalendarEvents: localAssistantCalendarEvents,
+  assistantReminders: localAssistantReminders,
+  assistantSettings: localAssistantSettings,
+  workstreamRuntimeBindings: localWorkstreamRuntimeBindings,
+  activeWorkstreamOperations: localActiveWorkstreamOperations,
+};
+
+type StateRepositories = typeof localRepositories;
+export type StateRepositoryName = keyof StateRepositories;
+
+export function invokeLocalStateOperation(
+  repository: string,
+  method: string,
+  args: unknown[],
+): unknown {
+  if (!isStateRepositoryName(repository)) {
+    throw new Error(`Unknown state repository: ${repository}`);
+  }
+
+  const repo = localRepositories[repository] as Record<string, unknown>;
+  const operation = repo[method];
+  if (typeof operation !== "function") {
+    throw new Error(`Unknown state operation: ${repository}.${method}`);
+  }
+
+  return operation(...args);
+}
+
+export const projects = createRepositoryProxy("projects", localProjects);
+export const workstreams = createRepositoryProxy("workstreams", localWorkstreams);
+export const turns = createRepositoryProxy("turns", localTurns);
+export const artifacts = createRepositoryProxy("artifacts", localArtifacts);
+export const approvals = createRepositoryProxy("approvals", localApprovals);
+export const events = createRepositoryProxy("events", localEvents);
+export const discordThreadBindings = createRepositoryProxy("discordThreadBindings", localDiscordThreadBindings);
+export const assistantMessages = createRepositoryProxy("assistantMessages", localAssistantMessages);
+export const assistantNotes = createRepositoryProxy("assistantNotes", localAssistantNotes);
+export const assistantTasks = createRepositoryProxy("assistantTasks", localAssistantTasks);
+export const assistantCalendarEvents = createRepositoryProxy("assistantCalendarEvents", localAssistantCalendarEvents);
+export const assistantReminders = createRepositoryProxy("assistantReminders", localAssistantReminders);
+export const assistantSettings = createRepositoryProxy("assistantSettings", localAssistantSettings);
+export const workstreamRuntimeBindings = createRepositoryProxy("workstreamRuntimeBindings", localWorkstreamRuntimeBindings);
+export const activeWorkstreamOperations = createRepositoryProxy("activeWorkstreamOperations", localActiveWorkstreamOperations);
+
+function createRepositoryProxy<TRepository extends object>(
+  repositoryName: StateRepositoryName,
+  localRepository: TRepository,
+): TRepository {
+  return new Proxy(localRepository, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof property !== "string" || typeof value !== "function") {
+        return value;
+      }
+
+      return (...args: unknown[]) => {
+        if (getStateBackendMode() === "remote") {
+          return invokeRemoteStateOperation(repositoryName, property, args);
+        }
+
+        return (value as (...methodArgs: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  }) as TRepository;
+}
+
+function isStateRepositoryName(value: string): value is StateRepositoryName {
+  return Object.prototype.hasOwnProperty.call(localRepositories, value);
+}

@@ -18,6 +18,31 @@ function asStringArray(value: unknown): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+function normalizeBroaderInspection(value: unknown): ModelingResult["needsBroaderInspection"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return null;
+      }
+
+      const reason = asTrimmedString(entry.reason);
+      if (!reason) {
+        return null;
+      }
+
+      return {
+        paths: asStringArray(entry.paths),
+        patterns: asStringArray(entry.patterns),
+        reason,
+      };
+    })
+    .filter((entry): entry is NonNullable<ModelingResult["needsBroaderInspection"]>[number] => entry !== null);
+}
+
 export function parseModelingResult(
   structured: Record<string, unknown> | null,
   fallbackSummary: string,
@@ -29,6 +54,7 @@ export function parseModelingResult(
       keyEntities: [],
       criticalFlows: [],
       openQuestions: [],
+      needsBroaderInspection: [],
     };
   }
 
@@ -40,6 +66,7 @@ export function parseModelingResult(
     keyEntities: asStringArray(structured.keyEntities),
     criticalFlows: asStringArray(structured.criticalFlows),
     openQuestions: asStringArray(structured.openQuestions),
+    needsBroaderInspection: normalizeBroaderInspection(structured.needsBroaderInspection),
   };
 }
 
@@ -49,6 +76,9 @@ export function renderModelingMarkdown(result: ModelingResult): string {
     result.keyEntities.length > 0 ? `Key entities: ${result.keyEntities.join("; ")}` : null,
     result.criticalFlows.length > 0 ? `Critical flows: ${result.criticalFlows.join("; ")}` : null,
     result.openQuestions.length > 0 ? `Open questions: ${result.openQuestions.join("; ")}` : null,
+    result.needsBroaderInspection && result.needsBroaderInspection.length > 0
+      ? `Broader inspection requested: ${result.needsBroaderInspection.map((entry) => entry.reason).join("; ")}`
+      : null,
     "Mermaid:",
     "```mermaid",
     result.mermaid,

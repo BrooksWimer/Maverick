@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OrchestratorConfigSchema, type ProjectConfig } from "../../src/config/index.js";
-import { auditRemoteBranches, collectRequiredBranches } from "../../src/git/branch-audit.js";
+import { auditRemoteBranches, collectRequiredBranches, createMissingRemoteBranches } from "../../src/git/branch-audit.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -89,5 +89,15 @@ describe("branch audit helpers", () => {
     expect(audit.present.map((branch) => branch.branch)).toEqual(["master", "portfolio"]);
     expect(audit.missing.map((branch) => branch.branch)).toEqual(["resume"]);
     expect(git(repo, ["ls-remote", "origin", "refs/heads/resume"])).toBe("");
+  });
+
+  it("creates missing durable branches from production without resetting existing branches", async () => {
+    const portfolioBefore = git(repo, ["rev-parse", "origin/portfolio"]);
+    const result = await createMissingRemoteBranches(project);
+
+    expect(result.created.map((branch) => branch.branch)).toEqual(["resume"]);
+    expect(result.skipped).toEqual([]);
+    expect(git(repo, ["ls-remote", "origin", "refs/heads/resume"])).toContain("refs/heads/resume");
+    expect(git(repo, ["rev-parse", "origin/portfolio"])).toBe(portfolioBefore);
   });
 });

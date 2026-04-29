@@ -13,6 +13,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+Write-Warning "sync-linux-state.ps1 is an offline recovery/import tool. Do not use it for routine Windows/Linux state sharing."
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $LocalDatabasePath) {
     $LocalDatabasePath = Join-Path $repoRoot "data\orchestrator.db"

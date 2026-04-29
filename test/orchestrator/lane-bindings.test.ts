@@ -67,6 +67,12 @@ describe("Orchestrator Discord thread binding repair", () => {
             },
           ],
         },
+        {
+          id: "unmapped",
+          name: "Unmapped Git Project",
+          repoPath,
+          defaultWorktreeBaseBranch: "main",
+        },
       ],
     });
 
@@ -167,5 +173,19 @@ describe("Orchestrator Discord thread binding repair", () => {
 
     expect(report.unresolved).toHaveLength(1);
     expect(orchestrator.getRepairedDiscordThreadBinding("work-thread")).toBeUndefined();
+  });
+
+  it("rejects git-backed workstream creation when no epic is resolved", async () => {
+    const orchestrator = new Orchestrator(config);
+    await orchestrator.initialize();
+
+    try {
+      await expect(orchestrator.createWorkstream({
+        projectId: "unmapped",
+        name: "no epic",
+      })).rejects.toThrow("requires a configured epic");
+    } finally {
+      await orchestrator.shutdown();
+    }
   });
 });

@@ -210,6 +210,7 @@ install_env_file() {
   fi
 
   upsert_env_var "NODE_ENV" "production"
+  upsert_env_var "STATE_BACKEND" "sqlite"
   upsert_env_var "DATABASE_PATH" "${STATE_DIR}/orchestrator.db"
   upsert_env_var "HTTP_PORT" "3847"
   upsert_env_var "CODEX_NODE_PATH" "$(command -v node)"

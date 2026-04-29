@@ -25,6 +25,19 @@ type ClaudeCliOptions = {
   maxTurns?: number;
 };
 
+type ClaudeTurnOptions = {
+  addDirs: string[];
+  model: string;
+  permissionMode: string;
+  systemPrompt?: string;
+  jsonSchema?: Record<string, unknown> | string;
+  maxBudgetUsd?: number;
+  tools?: string[];
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  noSessionPersistence?: boolean;
+};
+
 export interface ParsedClaudeStreamEvent {
   kind: "delta" | "final" | "error" | "unknown";
   text?: string;
@@ -112,6 +125,59 @@ function normalizeSeverity(value: unknown): ReviewResult["severity"] {
   return value === "clean" || value === "minor" || value === "major" || value === "critical"
     ? value
     : "minor";
+}
+
+function pushToolList(args: string[], flag: string, values?: string[]): void {
+  const cleaned = values?.map((value) => value.trim()).filter(Boolean) ?? [];
+  if (cleaned.length > 0) {
+    args.push(flag, cleaned.join(","));
+  }
+}
+
+export function buildClaudePrintArgs(options: ClaudeTurnOptions): string[] {
+  const args = [
+    "-p",
+    "--verbose",
+    "--input-format",
+    "text",
+    "--output-format",
+    "stream-json",
+    "--model",
+    options.model,
+  ];
+
+  if (options.permissionMode !== "default") {
+    args.push("--permission-mode", options.permissionMode);
+  }
+
+  if (options.systemPrompt) {
+    args.push("--system-prompt", options.systemPrompt);
+  }
+
+  if (options.noSessionPersistence) {
+    args.push("--no-session-persistence");
+  }
+
+  if (typeof options.maxBudgetUsd === "number" && Number.isFinite(options.maxBudgetUsd) && options.maxBudgetUsd > 0) {
+    args.push("--max-budget-usd", String(options.maxBudgetUsd));
+  }
+
+  if (options.jsonSchema) {
+    args.push(
+      "--json-schema",
+      typeof options.jsonSchema === "string" ? options.jsonSchema : JSON.stringify(options.jsonSchema),
+    );
+  }
+
+  pushToolList(args, "--tools", options.tools);
+  pushToolList(args, "--allowedTools", options.allowedTools);
+  pushToolList(args, "--disallowedTools", options.disallowedTools);
+
+  for (const addDir of options.addDirs) {
+    args.push("--add-dir", addDir);
+  }
+
+  return args;
 }
 
 function resolveDefaultClaudePath(explicitPath?: string): string {
@@ -249,6 +315,12 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
         model,
         permissionMode,
         systemPrompt: request.systemPrompt,
+        jsonSchema: request.jsonSchema,
+        maxBudgetUsd: request.maxBudgetUsd,
+        tools: request.tools,
+        allowedTools: request.allowedTools,
+        disallowedTools: request.disallowedTools,
+        noSessionPersistence: request.noSessionPersistence,
       });
 
       thread.status = "idle";
@@ -300,10 +372,16 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
       systemPrompt:
         request.systemPrompt ??
         "You are reviewing another agent's work. Be concrete about bugs, regressions, and missing validation.",
-      addDirs: request.addDirs,
-      maxTurns: request.maxTurns ?? 3,
-      permissionMode: request.permissionMode ?? "plan",
-    });
+        addDirs: request.addDirs,
+        maxTurns: request.maxTurns ?? 3,
+        permissionMode: request.permissionMode ?? "plan",
+        jsonSchema: request.jsonSchema,
+        maxBudgetUsd: request.maxBudgetUsd,
+        tools: request.tools,
+        allowedTools: request.allowedTools,
+        disallowedTools: request.disallowedTools,
+        noSessionPersistence: request.noSessionPersistence,
+      });
 
     if (result.status !== "completed") {
       return {
@@ -333,31 +411,16 @@ export class ClaudeCliAdapter implements ExecutionBackendAdapter {
       model: string;
       permissionMode: string;
       systemPrompt?: string;
+      jsonSchema?: Record<string, unknown> | string;
+      maxBudgetUsd?: number;
+      tools?: string[];
+      allowedTools?: string[];
+      disallowedTools?: string[];
+      noSessionPersistence?: boolean;
     }
   ): Promise<TurnResult> {
     return new Promise((resolve, reject) => {
-      const args = [
-        "-p",
-        "--verbose",
-        "--input-format",
-        "text",
-        "--output-format",
-        "stream-json",
-        "--model",
-        options.model,
-      ];
-
-      if (options.permissionMode !== "default") {
-        args.push("--permission-mode", options.permissionMode);
-      }
-
-      if (options.systemPrompt) {
-        args.push("--system-prompt", options.systemPrompt);
-      }
-
-      for (const addDir of options.addDirs) {
-        args.push("--add-dir", addDir);
-      }
+      const args = buildClaudePrintArgs(options);
 
       const child = spawn(this.options.claudePath, args, {
         cwd,

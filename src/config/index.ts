@@ -1,4 +1,5 @@
 export { loadConfig } from "./loader.js";
+export { normalizeEpicFirstConfig } from "./epic-first.js";
 export {
   OrchestratorConfigSchema,
   ProjectSchema,

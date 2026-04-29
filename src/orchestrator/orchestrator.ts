@@ -9,7 +9,7 @@
  * The Discord and HTTP modules are event consumers that subscribe to the event bus.
  */
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -66,11 +66,23 @@ import type {
   WorkstreamStatusSnapshot,
 } from "./status.js";
 import { WorkstreamStateMachine } from "./state-machine.js";
-import { artifacts, projects, workstreams, turns, approvals, discordThreadBindings, events as eventLog } from "../state/index.js";
+import {
+  activeWorkstreamOperations,
+  artifacts,
+  getStateBackendMode,
+  projects,
+  workstreams,
+  turns,
+  approvals,
+  discordThreadBindings,
+  events as eventLog,
+  workstreamRuntimeBindings,
+} from "../state/index.js";
 import type { ArtifactRow, DiscordThreadBindingRow, TurnRow, WorkstreamRow } from "../state/index.js";
 import { createAdapter, type ExecutionBackendAdapter } from "../codex/index.js";
 import type { ApprovalRequest, ExecutionThread, ReviewResult } from "../codex/types.js";
 import type { EscalationTier, OrchestratorConfig, ProjectConfig, RemoteHostConfig } from "../config/schema.js";
+import { normalizeEpicFirstConfig } from "../config/epic-first.js";
 import {
   ensureProjectBootstrap,
   inspectProjectBootstrap,
@@ -78,7 +90,7 @@ import {
   type BootstrapStatus,
 } from "../projects/bootstrap.js";
 import { buildEpicCharterContext, requireEpicById, workstreamLaneForEpic } from "../projects/epics.js";
-import { provisionWorktree } from "../git/worktree.js";
+import { provisionWorktree, recoverWorktreeForBranch } from "../git/worktree.js";
 import {
   finishWorkstreamBranch,
   cleanupFinishedWorkstreamBranch,
@@ -95,7 +107,9 @@ import type {
   ModelingResult,
   OperatorFeedbackResult,
   PlanningAnswer,
+  PlanningContextBundle,
   PlanningContextRecord,
+  PlanningResult,
   TestDesignResult,
   VerificationContextRecord,
 } from "../agents/types.js";
@@ -362,7 +376,7 @@ export class Orchestrator {
   private initialized = false;
 
   constructor(config: OrchestratorConfig) {
-    this.config = config;
+    this.config = normalizeEpicFirstConfig(config);
     this.instanceId = getRuntimeInstanceId();
   }
 
@@ -476,18 +490,33 @@ export class Orchestrator {
     const sm = this.getStateMachine(params.projectId);
     let resolvedBaseBranch = params.baseBranch;
     let resolvedLane = params.lane;
+    let resolvedEpicId = params.epicId;
 
-    if (params.epicId) {
-      const epic = requireEpicById(project, params.epicId);
+    if (!resolvedEpicId && params.lane) {
+      const epic = project.epicBranches.find((candidate) =>
+        candidate.id === params.lane ||
+        candidate.branch === params.lane ||
+        workstreamLaneForEpic(candidate) === params.lane
+      );
+      resolvedEpicId = epic?.id;
+    }
+
+    if (!resolvedEpicId && params.baseBranch) {
+      const epic = project.epicBranches.find((candidate) => candidate.branch === params.baseBranch);
+      resolvedEpicId = epic?.id;
+    }
+
+    if (resolvedEpicId) {
+      const epic = requireEpicById(project, resolvedEpicId);
       const epicLane = workstreamLaneForEpic(epic);
       if (params.baseBranch && params.baseBranch !== epic.branch) {
         throw new Error(
-          `Workstream requested epic "${params.epicId}" but base branch "${params.baseBranch}" does not match "${epic.branch}".`
+          `Workstream requested epic "${resolvedEpicId}" but base branch "${params.baseBranch}" does not match "${epic.branch}".`
         );
       }
       if (params.lane && params.lane !== epicLane) {
         throw new Error(
-          `Workstream requested epic "${params.epicId}" but lane "${params.lane}" does not match "${epicLane}".`
+          `Workstream requested epic "${resolvedEpicId}" but lane "${params.lane}" does not match "${epicLane}".`
         );
       }
 
@@ -495,9 +524,10 @@ export class Orchestrator {
       resolvedLane ??= epicLane;
     }
 
-    if (project.requireEpicForWorktree && !resolvedBaseBranch) {
+    if (project.workspaceKind === "git" && !resolvedEpicId) {
+      const available = project.epicBranches.map((epic) => epic.id).join(", ") || "none configured";
       throw new Error(
-        `Project "${project.id}" requires an epic/base branch selection before Maverick can create a worktree.`
+        `Project "${project.id}" requires a configured epic before Maverick can create a worktree. Available epics: ${available}. Start from a Discord thread whose slug matches an epic or pass the epic option explicitly.`
       );
     }
 
@@ -543,7 +573,7 @@ export class Orchestrator {
     const ws = workstreams.create({
       id: workstreamId,
       project_id: params.projectId,
-      epic_id: params.epicId,
+      epic_id: resolvedEpicId,
       name: params.name,
       description: params.description,
       cwd: workspace.cwd,
@@ -560,6 +590,13 @@ export class Orchestrator {
     workstreams.update(ws.id, {
       codex_thread_id: thread.id,
       state: sm.initialState,
+    });
+    workstreamRuntimeBindings.upsert({
+      workstream_id: ws.id,
+      instance_id: this.instanceId,
+      cwd: workspace.cwd,
+      codex_thread_id: thread.id,
+      runtime_status: "idle",
     });
 
     // Log event
@@ -617,20 +654,28 @@ export class Orchestrator {
       preparedInstruction.instruction
     );
 
-    // Create turn record
-    const turn = turns.create({
-      workstream_id: workstreamId,
-      instruction,
-    });
-    this.activeTurnByWorkstream.set(workstreamId, turn.id);
     const startedAt = new Date().toISOString();
     this.beginActiveOperation(workstreamId, "implementation", startedAt);
 
-    turns.update(turn.id, {
-      status: "running",
-      started_at: startedAt,
-      last_progress_at: startedAt,
-    });
+    let turn: TurnRow;
+    try {
+      // Create turn record only after the shared DB guard is held.
+      turn = turns.create({
+        workstream_id: workstreamId,
+        instruction,
+      });
+      this.activeTurnByWorkstream.set(workstreamId, turn.id);
+
+      turns.update(turn.id, {
+        status: "running",
+        started_at: startedAt,
+        last_progress_at: startedAt,
+      });
+    } catch (error) {
+      this.activeTurnByWorkstream.delete(workstreamId);
+      this.completeActiveOperation(workstreamId);
+      throw error;
+    }
 
     workstreams.update(workstreamId, { current_goal: instruction });
 
@@ -679,6 +724,9 @@ export class Orchestrator {
         dispatchWorkstream,
         this.buildDispatchOperatorReport(dispatchWorkstream, turn.id, result),
       );
+      if (result.status === "completed") {
+        this.pushDisposableBranchIfClean(dispatchWorkstream);
+      }
 
       eventBus.emit("turn.completed", {
         workstreamId,
@@ -750,10 +798,11 @@ export class Orchestrator {
 
   async steer(workstreamId: string, instruction: string) {
     const ws = workstreams.getById(workstreamId);
-    if (!ws?.codex_thread_id) throw new Error(`Workstream not found or no thread: ${workstreamId}`);
+    const threadId = ws ? this.resolveRuntimeThreadId(ws) : null;
+    if (!ws || !threadId) throw new Error(`Workstream not found or no runtime thread on ${this.instanceId}: ${workstreamId}`);
 
     const adapter = this.getAdapter(ws.project_id);
-    await adapter.steerTurn({ threadId: ws.codex_thread_id, instruction });
+    await adapter.steerTurn({ threadId, instruction });
     this.touchProgress("implementation", workstreamId);
 
     eventLog.emit({
@@ -767,10 +816,11 @@ export class Orchestrator {
 
   async cancel(workstreamId: string) {
     const ws = workstreams.getById(workstreamId);
-    if (!ws?.codex_thread_id) throw new Error(`Workstream not found or no thread: ${workstreamId}`);
+    const threadId = ws ? this.resolveRuntimeThreadId(ws) : null;
+    if (!ws || !threadId) throw new Error(`Workstream not found or no runtime thread on ${this.instanceId}: ${workstreamId}`);
 
     const adapter = this.getAdapter(ws.project_id);
-    await adapter.interruptTurn(ws.codex_thread_id);
+    await adapter.interruptTurn(threadId);
     const cancelledTurns = this.markRunningTurnsCancelled(workstreamId, "Cancelled by user.");
     const expiredApprovals = approvals.expirePendingByWorkstream(workstreamId, "cancel");
     this.completeActiveOperation(workstreamId);
@@ -795,9 +845,10 @@ export class Orchestrator {
     }
 
     const activeTurnId = this.activeTurnByWorkstream.get(workstreamId);
-    if (activeTurnId && ws.codex_thread_id) {
+    const threadId = this.resolveRuntimeThreadId(ws);
+    if (activeTurnId && threadId) {
       const adapter = this.getAdapter(ws.project_id);
-      await adapter.interruptTurn(ws.codex_thread_id);
+      await adapter.interruptTurn(threadId);
     }
 
     const cancelledTurns = this.markRunningTurnsCancelled(workstreamId, `Archived by ${archivedBy}`);
@@ -1034,8 +1085,9 @@ export class Orchestrator {
       throw new Error(`Workstream not found: ${workstreamId}`);
     }
 
-    if (reviewer === "primary" && !ws.codex_thread_id) {
-      throw new Error(`Workstream not found or no thread: ${workstreamId}`);
+    const runtimeThreadId = this.resolveRuntimeThreadId(ws);
+    if (reviewer === "primary" && !runtimeThreadId) {
+      throw new Error(`Workstream not found or no runtime thread on ${this.instanceId}: ${workstreamId}`);
     }
 
     const effectiveTarget = target ?? "uncommitted";
@@ -1046,7 +1098,7 @@ export class Orchestrator {
         reviewer === "claude"
           ? await this.runClaudeReview(ws, effectiveTarget, latestTurn?.id ?? null)
           : await this.getAdapter(ws.project_id).startReview({
-              threadId: ws.codex_thread_id!,
+              threadId: runtimeThreadId!,
               cwd: this.resolveExecutionWorkspace(ws),
               target: effectiveTarget,
             });
@@ -1284,10 +1336,8 @@ export class Orchestrator {
     }
     const previousContext = options.resumeExisting ? storedContext : null;
     const effectiveInstruction = previousContext?.originalInstruction ?? instruction;
-    const epicContextAnalysis = await this.getAgentEpicContextAnalysis(
-      workstream,
-      this.resolvePlanningAgentModel(project, "epic-context"),
-    );
+    const contextBundle = this.buildPlanningContextBundle(workstream, effectiveInstruction, previousContext);
+    const epicContextAnalysis = contextBundle.epicContext;
     this.beginActiveOperation(workstreamId, "planning");
     try {
       const intake =
@@ -1297,18 +1347,32 @@ export class Orchestrator {
           effectiveInstruction,
           this.resolvePlanningAgentModel(project, "intake"),
           epicContextAnalysis,
+          contextBundle,
         );
+      let checkpoint = this.checkpointPlanningContext({
+        workstream,
+        instruction: effectiveInstruction,
+        stage: "scope framing",
+        contextBundle,
+        previous: previousContext,
+        intake,
+      });
       const goalFrame =
         previousContext?.goalFrame ??
-        await this.runPlanningGoalFrame(
-          workstream,
-          effectiveInstruction,
-          intake,
-          this.resolvePlanningAgentModel(project, "goal-framing"),
-          epicContextAnalysis,
-        );
+        parseGoalFrameResult(null, intake);
+      checkpoint = this.checkpointPlanningContext({
+        workstream,
+        instruction: effectiveInstruction,
+        stage: "goal framing",
+        contextBundle,
+        previous: checkpoint,
+        intake,
+        goalFrame,
+      });
       const modeling =
-        previousContext?.modeling ??
+        previousContext?.modeling && !contextBundle.fingerprintChanged
+          ? previousContext.modeling
+          :
         await this.runPlanningModeling(
           workstream,
           effectiveInstruction,
@@ -1316,18 +1380,34 @@ export class Orchestrator {
           goalFrame,
           this.resolvePlanningAgentModel(project, "modeling"),
           epicContextAnalysis,
+          contextBundle,
+          previousContext?.modeling ?? null,
         );
+      checkpoint = this.checkpointPlanningContext({
+        workstream,
+        instruction: effectiveInstruction,
+        stage: contextBundle.fingerprintChanged ? "model update" : "model reuse",
+        contextBundle,
+        previous: checkpoint,
+        intake,
+        goalFrame,
+        modeling,
+      });
       const testDesign =
-        previousContext?.testDesign ??
-        await this.runPlanningTestDesign(
-          workstream,
-          effectiveInstruction,
-          intake,
-          goalFrame,
-          modeling,
-          this.resolvePlanningAgentModel(project, "test-design"),
-          epicContextAnalysis,
-        );
+        previousContext?.testDesign && !contextBundle.fingerprintChanged
+          ? previousContext.testDesign
+          : this.buildDeterministicTestDesign(workstream, goalFrame, contextBundle);
+      checkpoint = this.checkpointPlanningContext({
+        workstream,
+        instruction: effectiveInstruction,
+        stage: "verification synthesis",
+        contextBundle,
+        previous: checkpoint,
+        intake,
+        goalFrame,
+        modeling,
+        testDesign,
+      });
       const agentResult = await runAgent(
         adapter,
         "planning",
@@ -1341,6 +1421,7 @@ export class Orchestrator {
           previousContext,
           undefined,
           epicContextAnalysis,
+          contextBundle,
         ),
         {
           threadId: previousContext?.planningThreadId ?? undefined,
@@ -1348,6 +1429,7 @@ export class Orchestrator {
           maxTurns: 6,
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
+          ...this.planningAgentGuardrails("plan"),
         },
       );
 
@@ -1360,6 +1442,7 @@ export class Orchestrator {
         originalInstruction: effectiveInstruction,
         result: planningResult,
         rawAgentOutput: agentResult.output,
+        contextBundle,
         intake,
         goalFrame,
         modeling,
@@ -1367,25 +1450,13 @@ export class Orchestrator {
         planningThreadId: agentResult.threadId,
         previous: previousContext,
       });
-      const feedbackRequest = await this.runPlanningFeedbackRequest(
-        workstream,
-        effectiveInstruction,
-        basePlanningContext,
-        this.resolvePlanningAgentModel(project, "operator-feedback"),
-        epicContextAnalysis,
-      );
-      const explanation = await this.runPlanningExplanation(
-        workstream,
-        effectiveInstruction,
-        basePlanningContext,
-        feedbackRequest,
-        this.resolvePlanningAgentModel(project, "response-formatting"),
-        epicContextAnalysis,
-      );
+      const feedbackRequest = basePlanningContext.feedbackRequest;
+      const explanation = coerceExplanationResult(null, basePlanningContext, feedbackRequest);
       const planningContext = buildPlanningContextRecord({
         originalInstruction: effectiveInstruction,
         result: planningResult,
         rawAgentOutput: agentResult.output,
+        contextBundle,
         intake,
         goalFrame,
         modeling,
@@ -1469,10 +1540,12 @@ export class Orchestrator {
       }
 
       const adapter = await this.getUtilityClaudeAdapter();
-      const epicContextAnalysis = await this.getAgentEpicContextAnalysis(
+      const contextBundle = this.buildPlanningContextBundle(
         workstream,
-        this.resolvePlanningAgentModel(project, "epic-context"),
+        existingContext.originalInstruction,
+        existingContext,
       );
+      const epicContextAnalysis = contextBundle.epicContext;
       const intake =
         existingContext.intake ??
         await this.runPlanningIntake(
@@ -1480,18 +1553,15 @@ export class Orchestrator {
           existingContext.originalInstruction,
           this.resolvePlanningAgentModel(project, "intake"),
           epicContextAnalysis,
+          contextBundle,
         );
       const goalFrame =
         existingContext.goalFrame ??
-        await this.runPlanningGoalFrame(
-          workstream,
-          existingContext.originalInstruction,
-          intake,
-          this.resolvePlanningAgentModel(project, "goal-framing"),
-          epicContextAnalysis,
-        );
+        parseGoalFrameResult(null, intake);
       const modeling =
-        existingContext.modeling ??
+        existingContext.modeling && !contextBundle.fingerprintChanged
+          ? existingContext.modeling
+          :
         await this.runPlanningModeling(
           workstream,
           existingContext.originalInstruction,
@@ -1499,18 +1569,25 @@ export class Orchestrator {
           goalFrame,
           this.resolvePlanningAgentModel(project, "modeling"),
           epicContextAnalysis,
+          contextBundle,
+          existingContext.modeling ?? null,
         );
       const testDesign =
-        existingContext.testDesign ??
-        await this.runPlanningTestDesign(
-          workstream,
-          existingContext.originalInstruction,
-          intake,
-          goalFrame,
-          modeling,
-          this.resolvePlanningAgentModel(project, "test-design"),
-          epicContextAnalysis,
-        );
+        existingContext.testDesign && !contextBundle.fingerprintChanged
+          ? existingContext.testDesign
+          : this.buildDeterministicTestDesign(workstream, goalFrame, contextBundle);
+      const checkpoint = this.checkpointPlanningContext({
+        workstream,
+        instruction: existingContext.originalInstruction,
+        stage: "answered planning resume",
+        contextBundle,
+        previous: existingContext,
+        intake,
+        goalFrame,
+        modeling,
+        testDesign,
+        answers: mergedAnswers,
+      });
       const agentResult = await runAgent(
         adapter,
         "planning",
@@ -1524,6 +1601,7 @@ export class Orchestrator {
           existingContext,
           mergedAnswers,
           epicContextAnalysis,
+          contextBundle,
         ),
         {
           threadId: existingContext.planningThreadId ?? undefined,
@@ -1531,6 +1609,7 @@ export class Orchestrator {
           maxTurns: 6,
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
+          ...this.planningAgentGuardrails("plan"),
         },
       );
 
@@ -1543,33 +1622,22 @@ export class Orchestrator {
         originalInstruction: existingContext.originalInstruction,
         result: planningResult,
         rawAgentOutput: agentResult.output,
+        contextBundle,
         intake,
         goalFrame,
         modeling,
         testDesign,
         planningThreadId: agentResult.threadId,
         answers: mergedAnswers,
-        previous: existingContext,
+        previous: checkpoint,
       });
-      const feedbackRequest = await this.runPlanningFeedbackRequest(
-        workstream,
-        existingContext.originalInstruction,
-        basePlanningContext,
-        this.resolvePlanningAgentModel(project, "operator-feedback"),
-        epicContextAnalysis,
-      );
-      const explanation = await this.runPlanningExplanation(
-        workstream,
-        existingContext.originalInstruction,
-        basePlanningContext,
-        feedbackRequest,
-        this.resolvePlanningAgentModel(project, "response-formatting"),
-        epicContextAnalysis,
-      );
+      const feedbackRequest = basePlanningContext.feedbackRequest;
+      const explanation = coerceExplanationResult(null, basePlanningContext, feedbackRequest);
       const planningContext = buildPlanningContextRecord({
         originalInstruction: existingContext.originalInstruction,
         result: planningResult,
         rawAgentOutput: agentResult.output,
+        contextBundle,
         intake,
         goalFrame,
         modeling,
@@ -1578,7 +1646,7 @@ export class Orchestrator {
         explanation,
         planningThreadId: agentResult.threadId,
         answers: mergedAnswers,
-        previous: existingContext,
+        previous: checkpoint,
       });
 
       const renderedPlan = this.persistPlanningContext(
@@ -1675,7 +1743,7 @@ export class Orchestrator {
       state: workstream.state,
       branch: workstream.branch,
       workspace: workstream.cwd,
-      codexThreadId: workstream.codex_thread_id,
+      codexThreadId: this.resolveRuntimeThreadId(workstream) ?? workstream.codex_thread_id,
       currentGoal: workstream.current_goal,
       waitingOnApproval: Boolean(workstream.waiting_on_approval) || pendingApprovalCount > 0,
       pendingApprovalCount,
@@ -1710,14 +1778,15 @@ export class Orchestrator {
     }
 
     const ws = workstreams.getById(approval.workstream_id);
-    if (!ws?.codex_thread_id) {
-      throw new Error(`Workstream not found or no thread for approval: ${approvalId}`);
+    const threadId = ws ? this.resolveRuntimeThreadId(ws) : null;
+    if (!ws || !threadId) {
+      throw new Error(`Workstream not found or no runtime thread for approval on ${this.instanceId}: ${approvalId}`);
     }
 
     const adapter = this.getAdapter(ws.project_id);
     const backendApprovalId = this.extractBackendApprovalId(approval);
     try {
-      await adapter.resolveApproval(ws.codex_thread_id, backendApprovalId, approved);
+      await adapter.resolveApproval(threadId, backendApprovalId, approved);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("Unknown approval request")) {
@@ -1960,6 +2029,12 @@ export class Orchestrator {
     kind: ActiveOperationKind,
     startedAt = new Date().toISOString(),
   ): void {
+    activeWorkstreamOperations.begin({
+      workstream_id: workstreamId,
+      operation_kind: kind,
+      owner_instance_id: this.instanceId,
+      started_at: startedAt,
+    });
     this.activeOperationByWorkstream.set(workstreamId, {
       kind,
       startedAt,
@@ -1968,6 +2043,7 @@ export class Orchestrator {
   }
 
   private completeActiveOperation(workstreamId: string): void {
+    activeWorkstreamOperations.complete(workstreamId, this.instanceId);
     this.activeOperationByWorkstream.delete(workstreamId);
   }
 
@@ -1987,6 +2063,7 @@ export class Orchestrator {
     turnId?: string,
     at = new Date().toISOString(),
   ): void {
+    const persisted = activeWorkstreamOperations.touch(workstreamId, kind, this.instanceId, at);
     const activeOperation = this.activeOperationByWorkstream.get(workstreamId);
     if (activeOperation) {
       this.activeOperationByWorkstream.set(workstreamId, {
@@ -1997,7 +2074,7 @@ export class Orchestrator {
     } else {
       this.activeOperationByWorkstream.set(workstreamId, {
         kind,
-        startedAt: at,
+        startedAt: persisted.started_at,
         lastProgressAt: at,
       });
     }
@@ -2350,7 +2427,12 @@ export class Orchestrator {
   }
 
   private collectWorkspaceChangedFiles(workstream: WorkstreamRow): string[] {
-    const cwd = workstream.cwd ?? this.getProject(workstream.project_id).repoPath;
+    const project = this.getProject(workstream.project_id);
+    if (!this.isGitBackedProject(project) || workstream.workspace_mode === "notes") {
+      return [];
+    }
+
+    const cwd = workstream.cwd ?? project.repoPath;
     const statusOutput = this.readGitOutput(["status", "--short"], cwd);
     if (!statusOutput || statusOutput.startsWith("Git command failed")) {
       return [];
@@ -2383,6 +2465,16 @@ export class Orchestrator {
         startedAt: explicit.startedAt,
         lastProgressAt: explicit.lastProgressAt,
         quiet: Date.now() - new Date(explicit.lastProgressAt).getTime() >= QUIET_HEALTH_THRESHOLD_MS,
+      };
+    }
+
+    const persisted = activeWorkstreamOperations.get(workstream.id);
+    if (persisted) {
+      return {
+        kind: persisted.operation_kind as ActiveOperationKind,
+        startedAt: persisted.started_at,
+        lastProgressAt: persisted.last_seen_at,
+        quiet: Date.now() - new Date(persisted.last_seen_at).getTime() >= QUIET_HEALTH_THRESHOLD_MS,
       };
     }
 
@@ -3169,9 +3261,6 @@ export class Orchestrator {
   private buildPlanningAddDirs(project: ProjectConfig, cwd: string): string[] {
     const candidates = [
       cwd,
-      project.repoPath,
-      ...this.resolveRelatedPlanningProjects(project).map((relatedProject) => relatedProject.repoPath),
-      ...splitMetadataList(project.metadata?.planning_extra_dirs),
     ];
 
     return [...new Set(candidates.map((candidate) => resolve(candidate)))]
@@ -3194,6 +3283,230 @@ export class Orchestrator {
     ];
 
     return lines.filter((line): line is string => Boolean(line)).join("\n\n");
+  }
+
+  private readPlanningDoc(project: ProjectConfig, relativePath: string): { path: string; content: string } {
+    const path = resolve(project.repoPath, relativePath);
+    if (!existsSync(path)) {
+      return { path, content: "" };
+    }
+
+    try {
+      return { path, content: readFileSync(path, "utf8") };
+    } catch {
+      return { path, content: "" };
+    }
+  }
+
+  private hashPlanningInput(value: string): string {
+    return createHash("sha256").update(value).digest("hex");
+  }
+
+  private summarizePlanningDoc(content: string, fallback: string): string {
+    const normalized = content.trim();
+    if (!normalized) {
+      return fallback;
+    }
+
+    return normalized.length <= 6000 ? normalized : `${normalized.slice(0, 6000)}\n\n[truncated]`;
+  }
+
+  private isPlanningContextRelevantEvent(eventType: string): boolean {
+    return !eventType.startsWith("plan.");
+  }
+
+  private listChangedFilesForPlanning(workstream: WorkstreamRow): PlanningContextBundle["changedFiles"] {
+    if (workstream.workspace_mode !== "worktree" || !workstream.base_branch) {
+      return [];
+    }
+
+    const cwd = this.resolveExecutionWorkspace(workstream);
+    const output = this.readGitOutput(["diff", "--name-status", `${workstream.base_branch}...HEAD`], cwd);
+    if (output.startsWith("Git command failed")) {
+      return [];
+    }
+
+    return output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 25)
+      .map((line) => {
+        const [status, ...pathParts] = line.split(/\s+/);
+        const path = pathParts.join(" ");
+        return {
+          path,
+          status: status || "changed",
+          summary: `${status || "changed"} ${path}`,
+        };
+      })
+      .filter((entry) => entry.path);
+  }
+
+  private buildPlanningContextBundle(
+    workstream: WorkstreamRow,
+    instruction: string,
+    previousContext?: PlanningContextRecord | null,
+  ): PlanningContextBundle {
+    const project = this.getProject(workstream.project_id);
+    const projectDoc = this.readPlanningDoc(project, "docs/maverick/PROJECT_CONTEXT.md");
+    const epicDoc = workstream.epic_id
+      ? this.readPlanningDoc(project, `docs/maverick/epics/${workstream.epic_id}.md`)
+      : { path: "", content: "" };
+    const agentsMdPath = project.agentsMdPath ?? join(project.repoPath, "AGENTS.md");
+    const agentsMd = this.readAgentsMd(project);
+    const epic = workstream.epic_id
+      ? project.epicBranches.find((candidate) => candidate.id === workstream.epic_id)
+      : null;
+    const recentEvents = eventLog.listByWorkstream(workstream.id, 25)
+      .filter((event) => this.isPlanningContextRelevantEvent(event.event_type))
+      .slice(0, 10)
+      .map((event) => `${event.created_at}:${event.event_type}`)
+      .join("\n");
+    const changedFiles = this.listChangedFilesForPlanning(workstream);
+    const fingerprintInputs = {
+      projectContext: this.hashPlanningInput(projectDoc.content),
+      epicContext: this.hashPlanningInput(epicDoc.content),
+      agentsMd: this.hashPlanningInput(agentsMd),
+      projectConfig: this.hashPlanningInput(JSON.stringify({
+        id: project.id,
+        metadata: project.metadata ?? {},
+        epic,
+      })),
+      workstreamState: this.hashPlanningInput([
+        workstream.id,
+        workstream.epic_id ?? "",
+        workstream.base_branch ?? "",
+        recentEvents,
+        changedFiles.map((file) => `${file.status}:${file.path}`).join("\n"),
+      ].join("\n")),
+    };
+    const contextFingerprint = this.hashPlanningInput(JSON.stringify(fingerprintInputs));
+    const previousContextFingerprint = previousContext?.contextBundle?.contextFingerprint ?? null;
+    const fingerprintChanged = previousContextFingerprint !== contextFingerprint;
+    const changedEvidence = previousContextFingerprint
+      ? Object.entries(fingerprintInputs)
+          .filter(([key, value]) => previousContext?.contextBundle?.fingerprintInputs?.[key] !== value)
+          .map(([key]) => key)
+      : ["no previous planning context fingerprint"];
+
+    return {
+      schemaVersion: 1,
+      projectContextPath: projectDoc.path || null,
+      projectContext: this.summarizePlanningDoc(projectDoc.content, "No durable project context doc is present yet."),
+      epicContextPath: epicDoc.path || null,
+      epicContext: this.summarizePlanningDoc(epicDoc.content, "No durable epic context doc is present yet."),
+      agentsPath: existsSync(agentsMdPath) ? agentsMdPath : null,
+      agentsSummary: this.summarizePlanningDoc(agentsMd, "No AGENTS.md doctrine is present yet."),
+      contextFingerprint,
+      previousContextFingerprint,
+      fingerprintChanged,
+      fingerprintInputs,
+      changedEvidence,
+      changedFiles,
+      broaderInspectionPolicy: [
+        "Use only this bounded context bundle, changed-file summaries, and explicitly provided docs by default.",
+        "Do not perform a full repo sweep.",
+        "If the changed evidence is insufficient, return needsBroaderInspection with exact paths or search patterns and the reason.",
+      ].join(" "),
+      boundedAddDirs: this.buildPlanningAddDirs(project, this.resolveExecutionWorkspace(workstream)),
+    };
+  }
+
+  private planningAgentGuardrails(stage: "scope" | "model" | "plan") {
+    return {
+      maxBudgetUsd: stage === "plan" ? 0.75 : 0.25,
+      noSessionPersistence: true,
+      tools: ["Read", "Grep", "Glob", "Bash"],
+      disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"],
+      jsonSchema: { type: "object" },
+    };
+  }
+
+  private buildCheckpointPlanningResult(
+    instruction: string,
+    stage: string,
+    previous?: PlanningContextRecord | null,
+  ): PlanningResult {
+    return previous?.result ?? {
+      currentStateSummary: `Planning checkpoint saved after ${stage}.`,
+      recommendedNextSlice: "Continue bounded planning from the saved checkpoint.",
+      requiredAnswers: [],
+      importantDecisions: [],
+      draftExecutionPrompt: `Planning is not final yet. Original request: ${instruction}`,
+      finalExecutionPrompt: "",
+      remainingUnknowns: [],
+      steps: [],
+      risks: [],
+      dependencies: [],
+      estimatedTurns: 1,
+      testStrategy: "Verification strategy has not been finalized yet.",
+      rollbackPlan: "No implementation changes have been dispatched from this checkpoint.",
+    };
+  }
+
+  private checkpointPlanningContext(params: {
+    workstream: WorkstreamRow;
+    instruction: string;
+    stage: string;
+    contextBundle: PlanningContextBundle;
+    previous?: PlanningContextRecord | null;
+    intake?: IntakeResult | null;
+    goalFrame?: GoalFrameResult | null;
+    modeling?: ModelingResult | null;
+    testDesign?: TestDesignResult | null;
+    answers?: Record<string, PlanningAnswer>;
+  }): PlanningContextRecord {
+    const checkpoint = buildPlanningContextRecord({
+      originalInstruction: params.instruction,
+      result: this.buildCheckpointPlanningResult(params.instruction, params.stage, params.previous),
+      rawAgentOutput: `Planning checkpoint saved after ${params.stage}.`,
+      contextBundle: params.contextBundle,
+      intake: params.intake ?? params.previous?.intake ?? null,
+      goalFrame: params.goalFrame ?? params.previous?.goalFrame ?? null,
+      modeling: params.modeling ?? params.previous?.modeling ?? null,
+      testDesign: params.testDesign ?? params.previous?.testDesign ?? null,
+      answers: params.answers,
+      previous: params.previous,
+    });
+
+    workstreams.update(params.workstream.id, {
+      planning_context_json: JSON.stringify(checkpoint),
+    });
+    this.touchProgress("planning", params.workstream.id);
+    return checkpoint;
+  }
+
+  private buildDeterministicTestDesign(
+    workstream: WorkstreamRow,
+    goalFrame: GoalFrameResult,
+    contextBundle: PlanningContextBundle,
+  ): TestDesignResult {
+    const project = this.getProject(workstream.project_id);
+    const packageJson = resolve(project.repoPath, "package.json");
+    const suggestedCommands = existsSync(packageJson)
+      ? ["npm test", "npm run build"]
+      : ["git status --short"];
+    const changedFiles = contextBundle.changedFiles.map((file) => file.path);
+
+    return {
+      strategySummary: [
+        "Use the narrowest verification that proves the planned slice.",
+        "Prefer existing project scripts and only expand checks when touched files or durable context require it.",
+      ].join(" "),
+      testCases: goalFrame.successCriteria.slice(0, 5).map((criterion, index) => ({
+        name: `Acceptance criterion ${index + 1}`,
+        scope: "integration",
+        purpose: criterion,
+        files: changedFiles,
+      })),
+      verificationChecklist: [
+        "Inspect git status before dispatch.",
+        "Run project-level tests or build commands relevant to changed files.",
+        "Capture evidence before finish or promotion.",
+      ],
+      suggestedCommands,
+    };
   }
 
   private async getAgentEpicContextAnalysis(
@@ -3264,6 +3577,7 @@ export class Orchestrator {
     instruction: string,
     model?: string,
     epicContextAnalysis?: string | null,
+    contextBundle?: PlanningContextBundle,
   ): Promise<IntakeResult> {
     const project = this.getProject(workstream.project_id);
     const cwd = this.resolveExecutionWorkspace(workstream);
@@ -3291,12 +3605,18 @@ export class Orchestrator {
         epicCharter: this.getEpicCharterContext(workstream),
         agentsMd: this.readAgentsMd(project),
         extra: {
-          "Directory Tree": this.buildDirectoryTree(cwd),
+          "Bounded Project Context": contextBundle?.projectContext ?? "No bounded project context provided.",
+          "Bounded Epic Context": contextBundle?.epicContext ?? "No bounded epic context provided.",
+          "Changed Evidence": contextBundle ? JSON.stringify({
+            fingerprintChanged: contextBundle.fingerprintChanged,
+            changedEvidence: contextBundle.changedEvidence,
+            changedFiles: contextBundle.changedFiles,
+            broaderInspectionPolicy: contextBundle.broaderInspectionPolicy,
+          }, null, 2) : "No changed evidence provided.",
           "Recent Turn History": JSON.stringify(recentTurns, null, 2),
           "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
           "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
         },
       },
       {
@@ -3304,6 +3624,7 @@ export class Orchestrator {
         maxTurns: 6,
         permissionMode: "plan",
         onOutput: this.buildOperationOutputHandler("planning", workstream.id),
+        ...this.planningAgentGuardrails("scope"),
       },
     );
 
@@ -3373,6 +3694,8 @@ export class Orchestrator {
     goalFrame: GoalFrameResult,
     model?: string,
     epicContextAnalysis?: string | null,
+    contextBundle?: PlanningContextBundle,
+    previousModel?: ModelingResult | null,
   ): Promise<ModelingResult> {
     const project = this.getProject(workstream.project_id);
     const cwd = this.resolveExecutionWorkspace(workstream);
@@ -3387,7 +3710,8 @@ export class Orchestrator {
         workstreamName: workstream.name,
         workstreamState: workstream.state,
         instruction: [
-          "Model the part of the system that matters for this workstream.",
+          "Update the existing bounded project/epic model only where the supplied change evidence requires it.",
+          "Do not perform a full repo sweep. If broader inspection is necessary, explain exact files or patterns in openQuestions.",
           `Operator instruction: ${instruction}`,
         ].join("\n"),
         cwd,
@@ -3397,10 +3721,17 @@ export class Orchestrator {
         extra: {
           "Structured Intake": renderIntakeMarkdown(intake),
           "Goal Frame": renderGoalFrameMarkdown(goalFrame),
-          "Directory Tree": this.buildDirectoryTree(cwd),
+          "Previous System Model": previousModel ? renderModelingMarkdown(previousModel) : "No previous model recorded.",
+          "Bounded Project Context": contextBundle?.projectContext ?? "No bounded project context provided.",
+          "Bounded Epic Context": contextBundle?.epicContext ?? "No bounded epic context provided.",
+          "Changed Evidence": contextBundle ? JSON.stringify({
+            fingerprintChanged: contextBundle.fingerprintChanged,
+            changedEvidence: contextBundle.changedEvidence,
+            changedFiles: contextBundle.changedFiles,
+            broaderInspectionPolicy: contextBundle.broaderInspectionPolicy,
+          }, null, 2) : "No changed evidence provided.",
           "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
         },
       },
       {
@@ -3408,6 +3739,7 @@ export class Orchestrator {
         maxTurns: 4,
         permissionMode: "plan",
         onOutput: this.buildOperationOutputHandler("planning", workstream.id),
+        ...this.planningAgentGuardrails("model"),
       },
     );
 
@@ -3592,6 +3924,7 @@ export class Orchestrator {
     previousContext?: PlanningContextRecord | null,
     answers?: Record<string, PlanningAnswer>,
     epicContextAnalysis?: string | null,
+    contextBundle?: PlanningContextBundle,
   ) {
     const project = this.getProject(workstream.project_id);
     const cwd = this.resolveExecutionWorkspace(workstream);
@@ -3629,7 +3962,16 @@ export class Orchestrator {
       epicCharter: this.getEpicCharterContext(workstream),
       agentsMd: this.readAgentsMd(project),
       extra: {
-        "Directory Tree": this.buildDirectoryTree(cwd),
+        "Bounded Project Context": contextBundle?.projectContext ?? "No bounded project context provided.",
+        "Bounded Epic Context": contextBundle?.epicContext ?? "No bounded epic context provided.",
+        "Context Fingerprint": contextBundle ? JSON.stringify({
+          contextFingerprint: contextBundle.contextFingerprint,
+          previousContextFingerprint: contextBundle.previousContextFingerprint,
+          fingerprintChanged: contextBundle.fingerprintChanged,
+          changedEvidence: contextBundle.changedEvidence,
+          changedFiles: contextBundle.changedFiles,
+        }, null, 2) : "No context fingerprint provided.",
+        "Broader Inspection Policy": contextBundle?.broaderInspectionPolicy ?? "Use bounded context only unless exact missing evidence is identified.",
         "Recent Turn History": JSON.stringify(recentTurns, null, 2),
         "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
         "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
@@ -3640,7 +3982,6 @@ export class Orchestrator {
         "Previous Planning Context": previousContext ? JSON.stringify(previousContext, null, 2) : "None.",
         "Operator Answers": serializePlanningAnswers(answers ?? previousContext?.answers ?? {}),
         "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-        "Related Configured Projects": this.renderRelatedPlanningProjects(project),
       },
     };
   }
@@ -4012,12 +4353,64 @@ export class Orchestrator {
       return execFileSync("git", args, {
         cwd,
         encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       }).trim();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const result = error as { stderr?: Buffer | string; stdout?: Buffer | string };
+      const stderr = Buffer.isBuffer(result.stderr)
+        ? result.stderr.toString("utf8").trim()
+        : typeof result.stderr === "string"
+          ? result.stderr.trim()
+          : "";
+      const stdout = Buffer.isBuffer(result.stdout)
+        ? result.stdout.toString("utf8").trim()
+        : typeof result.stdout === "string"
+          ? result.stdout.trim()
+          : "";
+      const message = stderr || stdout || (error instanceof Error ? error.message : String(error));
       return `Git command failed (${args.join(" ")}): ${message}`;
     }
+  }
+
+  private pushDisposableBranchIfClean(workstream: WorkstreamRow): void {
+    if (workstream.workspace_mode !== "worktree" || !workstream.cwd || !workstream.branch) {
+      return;
+    }
+
+    if (!workstream.branch.startsWith("maverick/")) {
+      return;
+    }
+
+    const status = this.readGitOutput(["status", "--porcelain"], workstream.cwd);
+    if (status.trim() || status.startsWith("Git command failed")) {
+      eventLog.emit({
+        workstream_id: workstream.id,
+        project_id: workstream.project_id,
+        event_type: "workstream.branchPushSkipped",
+        payload: {
+          branch: workstream.branch,
+          reason: status.startsWith("Git command failed") ? status : "worktree-dirty",
+        },
+        source: "orchestrator",
+      });
+      return;
+    }
+
+    const pushOutput = this.readGitOutput(["push", "-u", "origin", `HEAD:refs/heads/${workstream.branch}`], workstream.cwd);
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: pushOutput.startsWith("Git command failed")
+        ? "workstream.branchPushFailed"
+        : "workstream.branchPushed",
+      payload: {
+        branch: workstream.branch,
+        output: pushOutput,
+        instanceId: this.instanceId,
+      },
+      source: "orchestrator",
+    });
   }
 
   private readAgentsMd(project: ProjectConfig): string {
@@ -4103,7 +4496,11 @@ export class Orchestrator {
       });
 
       const adapter = this.getAdapter(ws.project_id);
-      await adapter.resolveApproval(ws.codex_thread_id!, request.id, true);
+      const threadId = this.resolveRuntimeThreadId(ws);
+      if (!threadId) {
+        throw new Error(`Cannot auto-approve request for ${workstreamId}; no runtime thread on ${this.instanceId}.`);
+      }
+      await adapter.resolveApproval(threadId, request.id, true);
 
       eventBus.emit("approval.resolved", {
         workstreamId,
@@ -4361,15 +4758,22 @@ export class Orchestrator {
   }
 
   private async recoverActiveWorkstreams() {
+    const clearedOperations = activeWorkstreamOperations.clearForOwner(this.instanceId);
+    if (clearedOperations > 0) {
+      log.warn({ count: clearedOperations, instanceId: this.instanceId }, "Cleared stale active operations for this instance");
+    }
+
     const active = workstreams.listActive();
     if (active.length > 0) {
       log.info({ count: active.length }, "Recovering active workstreams");
       for (const ws of active) {
-        if (ws.codex_thread_id) {
+        const runtimeBinding = workstreamRuntimeBindings.get(ws.id, this.instanceId);
+        const threadId = runtimeBinding?.codex_thread_id ?? (this.instanceId === "linux" ? ws.codex_thread_id : null);
+        if (threadId) {
           const adapter = this.getAdapter(ws.project_id);
-          const thread = await adapter.resumeThread(ws.codex_thread_id);
+          const thread = await adapter.resumeThread(threadId);
           if (!thread) {
-            log.warn({ workstreamId: ws.id, threadId: ws.codex_thread_id }, "Could not resume thread");
+            log.warn({ workstreamId: ws.id, threadId }, "Could not resume thread");
             this.reconcileRecoveredWorkstream(ws, null);
             continue;
           }
@@ -4381,6 +4785,10 @@ export class Orchestrator {
   }
 
   private reconcileStoredWorkspaceMetadata(): void {
+    if (getStateBackendMode() === "remote") {
+      return;
+    }
+
     const active = workstreams.listActive();
     if (active.length === 0) {
       return;
@@ -4536,10 +4944,14 @@ export class Orchestrator {
     }
 
     this.reconcileRecoveredWorkstream(dispatchWorkstream, thread);
-    return workstreams.getById(dispatchWorkstream.id) ?? dispatchWorkstream;
+    return this.withRuntimeBinding(
+      workstreams.getById(dispatchWorkstream.id) ?? dispatchWorkstream,
+      workstreamRuntimeBindings.get(dispatchWorkstream.id, this.instanceId),
+    );
   }
 
   private async ensureDispatchThread(workstream: WorkstreamRow): Promise<WorkstreamRow> {
+    workstream = await this.ensureLocalRuntimeBinding(workstream, true);
     const adapter = this.getAdapter(workstream.project_id);
     const cwd = this.resolveExecutionWorkspace(workstream);
 
@@ -4556,15 +4968,14 @@ export class Orchestrator {
     }
 
     const replacementThread = await adapter.createThread(cwd);
-    const updated =
-      workstreams.update(workstream.id, {
-        codex_thread_id: replacementThread.id,
-        cwd,
-      }) ?? {
-        ...workstream,
-        codex_thread_id: replacementThread.id,
-        cwd,
-      };
+    const binding = workstreamRuntimeBindings.upsert({
+      workstream_id: workstream.id,
+      instance_id: this.instanceId,
+      cwd,
+      codex_thread_id: replacementThread.id,
+      runtime_status: "idle",
+    });
+    const updated = this.withRuntimeBinding(workstream, binding);
 
     eventLog.emit({
       workstream_id: workstream.id,
@@ -4581,7 +4992,89 @@ export class Orchestrator {
     return updated;
   }
 
+  private async ensureLocalRuntimeBinding(
+    workstream: WorkstreamRow,
+    requireThread: boolean,
+  ): Promise<WorkstreamRow> {
+    const existing = workstreamRuntimeBindings.get(workstream.id, this.instanceId);
+    if (existing?.cwd && (!requireThread || existing.codex_thread_id)) {
+      return this.withRuntimeBinding(workstream, existing);
+    }
+
+    const project = this.getProject(workstream.project_id);
+    const runtimeOwnerHints = workstreamRuntimeBindings
+      .listByWorkstream(workstream.id)
+      .map((binding) => binding.instance_id)
+      .filter((value) => value !== this.instanceId);
+
+    let workspace;
+    try {
+      workspace = await recoverWorktreeForBranch({
+        repoPath: project.repoPath,
+        projectId: workstream.project_id,
+        workstreamId: workstream.id,
+        name: workstream.name,
+        workspaceKind: project.workspaceKind,
+        lane: this.resolveLaneIdForWorktreeName(workstream),
+        branch: workstream.branch,
+      });
+    } catch (error) {
+      const owners = runtimeOwnerHints.length > 0 ? runtimeOwnerHints.join(", ") : "another host";
+      throw new Error(
+        [
+          `This workstream has no runtime binding for ${this.instanceId}.`,
+          `Maverick could not recover the disposable branch locally: ${error instanceof Error ? error.message : String(error)}`,
+          `Current runtime owner hint: ${owners}. Finish, cancel, or push the workstream branch from that host before taking it over here.`,
+        ].join(" ")
+      );
+    }
+
+    const adapter = this.getAdapter(workstream.project_id);
+    const thread = requireThread ? await adapter.createThread(workspace.cwd) : null;
+    const binding = workstreamRuntimeBindings.upsert({
+      workstream_id: workstream.id,
+      instance_id: this.instanceId,
+      cwd: workspace.cwd,
+      codex_thread_id: thread?.id ?? existing?.codex_thread_id ?? null,
+      runtime_status: "idle",
+    });
+
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "workstream.runtimeBound",
+      payload: {
+        instanceId: this.instanceId,
+        cwd: binding.cwd,
+        codexThreadId: binding.codex_thread_id,
+        recoveredBranch: workspace.branch,
+      },
+      source: "orchestrator",
+    });
+
+    return this.withRuntimeBinding(workstream, binding);
+  }
+
+  private withRuntimeBinding(
+    workstream: WorkstreamRow,
+    binding: { cwd: string | null; codex_thread_id: string | null } | undefined,
+  ): WorkstreamRow {
+    if (!binding) {
+      return workstream;
+    }
+
+    return {
+      ...workstream,
+      cwd: binding.cwd ?? workstream.cwd,
+      codex_thread_id: binding.codex_thread_id ?? workstream.codex_thread_id,
+    };
+  }
+
   private syncConfiguredProjects() {
+    if (getStateBackendMode() === "remote") {
+      return;
+    }
+
     for (const project of this.config.projects) {
       projects.upsert({
         id: project.id,
@@ -4595,7 +5088,10 @@ export class Orchestrator {
   private findWorkstreamByThread(threadId: string) {
     // This is a linear scan — fine for small numbers of workstreams
     const active = workstreams.listActive();
-    return active.find(ws => ws.codex_thread_id === threadId);
+    return active.find((ws) =>
+      ws.codex_thread_id === threadId ||
+      workstreamRuntimeBindings.listByWorkstream(ws.id).some((binding) => binding.codex_thread_id === threadId)
+    );
   }
 
   private reconcileRecoveredWorkstream(
@@ -4789,7 +5285,31 @@ export class Orchestrator {
   }
 
   private resolveExecutionWorkspace(workstream: WorkstreamRow): string {
-    return workstream.cwd ?? this.getProject(workstream.project_id).repoPath;
+    const runtimeBinding = workstreamRuntimeBindings.get(workstream.id, this.instanceId);
+    return runtimeBinding?.cwd ?? workstream.cwd ?? this.getProject(workstream.project_id).repoPath;
+  }
+
+  private resolveRuntimeThreadId(workstream: WorkstreamRow): string | null {
+    const runtimeBinding = workstreamRuntimeBindings.get(workstream.id, this.instanceId);
+    return runtimeBinding?.codex_thread_id ?? (this.instanceId === "linux" ? workstream.codex_thread_id : null);
+  }
+
+  private resolveLaneIdForWorktreeName(workstream: WorkstreamRow): string | null {
+    if (workstream.epic_id) {
+      const project = this.getProject(workstream.project_id);
+      const epic = project.epicBranches.find((candidate) => candidate.id === workstream.epic_id);
+      return epic ? workstreamLaneForEpic(epic) : workstream.epic_id;
+    }
+
+    if (workstream.base_branch) {
+      const project = this.getProject(workstream.project_id);
+      const lane = project.defaultLanes.find((candidate) => candidate.baseBranch === workstream.base_branch);
+      if (lane) {
+        return lane.id;
+      }
+    }
+
+    return workstream.base_branch;
   }
 
   private getAdapter(projectId: string): ExecutionBackendAdapter {

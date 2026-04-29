@@ -36,6 +36,7 @@ describe("HTTP workstream status route", () => {
           id: "maverick",
           name: "Maverick",
           repoPath,
+          workspaceKind: "notes",
           executionBackend: {
             type: "mock",
             responseDelay: 0,
@@ -82,5 +83,57 @@ describe("HTTP workstream status route", () => {
     expect(payload.workstreamName).toBe("http status");
     expect(typeof payload.health).toBe("string");
     expect(typeof payload.nextAction).toBe("string");
+  });
+
+  it("protects repository state operations with the bearer token", async () => {
+    const previousToken = process.env.MAVERICK_STATE_TOKEN;
+    process.env.MAVERICK_STATE_TOKEN = "state-secret";
+
+    try {
+      orchestrator = new Orchestrator(config);
+      await orchestrator.initialize();
+      app = await createHttpServer(orchestrator, {
+        host: "127.0.0.1",
+        port: 0,
+      });
+
+      const unauthorized = await app.inject({
+        method: "POST",
+        url: "/internal/state/operation",
+        payload: {
+          repository: "projects",
+          method: "list",
+          args: [],
+        },
+      });
+      expect(unauthorized.statusCode).toBe(401);
+
+      const authorized = await app.inject({
+        method: "POST",
+        url: "/internal/state/operation",
+        headers: {
+          authorization: "Bearer state-secret",
+        },
+        payload: {
+          repository: "projects",
+          method: "upsert",
+          args: [
+            {
+              id: "api-project",
+              name: "API Project",
+              repo_path: repoPath,
+              config_json: "{}",
+            },
+          ],
+        },
+      });
+
+      expect(authorized.statusCode).toBe(200);
+      const payload = authorized.json() as { ok: boolean; result: { id: string } };
+      expect(payload.ok).toBe(true);
+      expect(payload.result.id).toBe("api-project");
+    } finally {
+      process.env.MAVERICK_STATE_TOKEN = previousToken;
+    }
   });
 });

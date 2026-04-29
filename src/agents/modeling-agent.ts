@@ -22,6 +22,8 @@ export const modelingAgent: AgentDefinition = {
   - key entities/components
   - the critical flows that matter for this workstream
   - any open modeling questions
+- When an existing model and change evidence are supplied, update only the affected model fields.
+- Do not broaden into a full repo sweep unless the supplied change evidence is insufficient.
 
 ## Output
 
@@ -33,7 +35,14 @@ Return valid JSON matching this shape:
   "mermaid": "flowchart TD\\nA[Start] --> B[Next]",
   "keyEntities": ["Component A", "Component B"],
   "criticalFlows": ["Request path", "Persistence path"],
-  "openQuestions": ["Optional unresolved architectural question"]
+  "openQuestions": ["Optional unresolved architectural question"],
+  "needsBroaderInspection": [
+    {
+      "paths": ["optional/exact/file.ts"],
+      "patterns": ["optional search pattern"],
+      "reason": "Why the bounded context is insufficient"
+    }
+  ]
 }
 \`\`\`
 
@@ -42,7 +51,8 @@ Return valid JSON matching this shape:
 - Prefer the smallest model that meaningfully helps planning.
 - Use valid Mermaid syntax.
 - Only model the part of the system relevant to this workstream.
-- Do not hallucinate architecture that is not supported by the provided context.`,
+- Do not hallucinate architecture that is not supported by the provided context.
+- If broader inspection is needed, request exact paths or patterns in needsBroaderInspection instead of doing a broad search.`,
 
   tools: [
     {

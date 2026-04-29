@@ -4,43 +4,129 @@
     {
       "id": "maverick",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
-      "defaultLanes": [
+      "epicBranches": [
         {
           "id": "control-plane",
-          "baseBranch": "control-plane",
+          "branch": "control-plane",
+          "workstreamPrefix": "control-plane",
           "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Keep Maverick's core orchestration reliable, durable, observable, and safe across workstream lifecycle, state, routing, and execution behavior.",
+            "bullets": [
+              "Prioritize reliable AI workstreams, durable state, cost-controlled planning, verification, and production-safe lane promotion.",
+              "Use existing orchestrator patterns before adding new state or abstractions.",
+              "Preserve workstream history and never hide operator state transitions inside ad hoc Discord behavior."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/control-plane.md",
+                "purpose": "Control-plane epic scope, boundaries, and planning context."
+              }
+            ]
+          }
         },
         {
           "id": "discord-routing",
-          "baseBranch": "discord-routing",
+          "branch": "discord-routing",
+          "workstreamPrefix": "discord-routing",
           "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Make Discord the dependable operator surface for epic-thread workstreams, assistant replies, command feedback, and repair guidance.",
+            "bullets": [
+              "Every workstream command must resolve through a configured epic/thread or fail with actionable repair help.",
+              "Keep replies concise, inspectable, and explicit about background work and next actions.",
+              "Preserve thread bindings by repairing stale state from config instead of trusting old DB values."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/discord-routing.md",
+                "purpose": "Discord routing epic scope and UX rules."
+              }
+            ]
+          }
         },
         {
           "id": "assistant-infrastructure",
-          "baseBranch": "assistant-infrastructure",
+          "branch": "assistant-infrastructure",
+          "workstreamPrefix": "assistant-infrastructure",
           "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Build assistant capabilities that reuse durable state, route model work intentionally, and avoid unnecessary context rebuilds.",
+            "bullets": [
+              "Prefer deterministic state plumbing before agent calls.",
+              "Persist context, notes, reminders, and model outputs where future workstreams can reuse them.",
+              "Treat cost control and bounded context as product requirements, not afterthoughts."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/assistant-infrastructure.md",
+                "purpose": "Assistant infrastructure epic scope and context model."
+              }
+            ]
+          }
         },
         {
           "id": "git-hygiene",
-          "baseBranch": "git-hygiene",
+          "branch": "git-hygiene",
+          "workstreamPrefix": "git-hygiene",
           "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Keep Maverick-managed repos safe by enforcing epic branches, disposable workstreams, clean finish/promotion flows, and non-destructive cleanup.",
+            "bullets": [
+              "Workstreams branch from epics, finish into epics, and promote epics explicitly to production.",
+              "Never delete durable epic branches or preserved workstream history.",
+              "Prefer branch audits and repair reports before mutation."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/git-hygiene.md",
+                "purpose": "Git hygiene epic branch and cleanup rules."
+              }
+            ]
+          }
         },
         {
           "id": "deployment-ops",
-          "baseBranch": "deployment-ops",
+          "branch": "deployment-ops",
+          "workstreamPrefix": "deployment-ops",
           "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Keep Windows and Linux Maverick deployments restartable, observable, and consistent across shared config and state.",
+            "bullets": [
+              "Treat bot restarts, health checks, and cross-host state as operational work requiring clear rollback.",
+              "Avoid host-specific drift in shared project/epic config.",
+              "Surface live health and ownership clearly in Discord and HTTP checks."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/deployment-ops.md",
+                "purpose": "Deployment operations epic scope and health model."
+              }
+            ]
+          }
         }
-      ]
+      ],
+      "requireEpicForWorktree": true
     },
     {
       "id": "netwise",
@@ -165,22 +251,61 @@
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "master",
       "productionBranch": "master",
-      "defaultLanes": [
+      "epicBranches": [
         {
           "id": "portfolio",
-          "baseBranch": "portfolio",
+          "branch": "portfolio",
+          "workstreamPrefix": "portfolio",
           "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Keep the public portfolio site clean, current, simple, and useful as career proof for recruiters, managers, and technical peers.",
+            "bullets": [
+              "All projects should look maintained and intentional; current and classic work may appear higher but there should be no neglected archive.",
+              "Astra is the public name for Netwise; use Netwise only for internal repo/config references.",
+              "Optimize for clear project proof, tasteful polish, and authenticity over gimmicks."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Portfolio & Resume project-level context."
+              },
+              {
+                "path": "docs/maverick/epics/portfolio.md",
+                "purpose": "Portfolio website epic context and project presentation rules."
+              }
+            ]
+          }
         },
         {
           "id": "resume",
-          "baseBranch": "resume",
+          "branch": "resume",
+          "workstreamPrefix": "resume",
           "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Maintain official resume and cover-letter materials from a master experience inventory, with tailored outputs for software engineering job applications.",
+            "bullets": [
+              "The resume epic is a document/career-material lane, not a portfolio website coding lane.",
+              "Share career facts with the portfolio, but optimize for concise official application materials.",
+              "Tailored resumes and cover letters should select from durable inventory instead of starting from scratch."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Portfolio & Resume project-level context."
+              },
+              {
+                "path": "docs/maverick/epics/resume.md",
+                "purpose": "Resume epic context, tailoring policy, and output rules."
+              },
+              {
+                "path": "resume/MASTER_INVENTORY.md",
+                "purpose": "Durable source of career facts, accomplishments, and tailoring inputs."
+              }
+            ]
+          }
         }
       ],
+      "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 2,
       "claudeReview": {
         "enabled": true,
@@ -228,29 +353,81 @@
       "workspaceKind": "git",
       "defaultWorktreeBaseBranch": "main",
       "productionBranch": "main",
-      "defaultLanes": [
+      "epicBranches": [
         {
           "id": "job-ops",
-          "baseBranch": "job-ops",
+          "branch": "job-ops",
+          "workstreamPrefix": "job-ops",
           "description": "Operational work notes and active tasks",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Capture and organize strict notes-only job operations context without connecting to employer source code, protected systems, or secrets.",
+            "bullets": [
+              "Use sanitized personal notes only.",
+              "Manager-safe summaries are allowed when they are redacted and based on stored notes.",
+              "Do not ingest employer code, protected implementation details, or secrets."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Work project context and safety boundary."
+              },
+              {
+                "path": "docs/maverick/epics/job-ops.md",
+                "purpose": "Job operations notes epic context."
+              }
+            ]
+          }
         },
         {
           "id": "business-context-deep-dives",
-          "baseBranch": "business-context-deep-dives",
+          "branch": "business-context-deep-dives",
+          "workstreamPrefix": "business-context-deep-dives",
           "description": "Business context deep dives and supporting notes",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Build sanitized business-context understanding from personal notes and study so work decisions are better grounded.",
+            "bullets": [
+              "Keep the lane notes-only and redacted.",
+              "Connect deep dives to smart-goal progress when useful.",
+              "Avoid employer-confidential details and protected systems."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Work project context and safety boundary."
+              },
+              {
+                "path": "docs/maverick/epics/business-context-deep-dives.md",
+                "purpose": "Business context deep-dive epic context."
+              }
+            ]
+          }
         },
         {
           "id": "engineering-learning",
-          "baseBranch": "engineering-learning",
+          "branch": "engineering-learning",
+          "workstreamPrefix": "engineering-learning",
           "description": "Independent engineering learning and study notes",
-          "assistantEnabled": true,
-          "ownerInstanceId": "linux"
+          "charter": {
+            "summary": "Track independent engineering learning, reading, and study notes as durable personal development context.",
+            "bullets": [
+              "Connect learning notes to smart-goal progress when useful.",
+              "Keep study artifacts personal, organized, and reusable for future summaries.",
+              "Do not mix employer-confidential project details into learning notes."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Work project context and safety boundary."
+              },
+              {
+                "path": "docs/maverick/epics/engineering-learning.md",
+                "purpose": "Engineering learning epic context."
+              }
+            ]
+          }
         }
       ],
+      "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 2,
       "claudePlanning": {
         "enabled": true,

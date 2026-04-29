@@ -75,7 +75,7 @@ type ResolvedEpic = {
   id: string;
   branch: string;
   lane: string;
-  source: "route" | "explicit" | "default";
+  source: "route" | "explicit";
 };
 
 type ResolvedThreadContext = {
@@ -400,9 +400,9 @@ export function parsePlanningAnswerInput(text: string): {
 }
 
 export function persistedEpicIdForResolvedEpic(
-  epic: { id: string; source: "route" | "explicit" | "default" } | null
+  epic: { id: string; source: "route" | "explicit" } | null
 ): string | undefined {
-  if (!epic || epic.source === "default" || epic.id === "default") {
+  if (!epic) {
     return undefined;
   }
 
@@ -2146,9 +2146,9 @@ export class DiscordBot {
         `Created workstream \`${workstream.name}\``,
         `ID: \`${workstream.id}\``,
         `Project: \`${projectId}\``,
-        epic && epic.source !== "default" ? `Epic: \`${epic.id}\` (${epic.source})` : null,
+        epic ? `Epic: \`${epic.id}\` (${epic.source})` : null,
         epic ? `Lane: \`${epic.lane}\`` : null,
-        epic ? `Base branch: \`${epic.branch}\`${epic.source === "default" ? " (default)" : ""}` : null,
+        epic ? `Base branch: \`${epic.branch}\`` : null,
         workstream.branch ? `Branch: \`${workstream.branch}\`` : `Branch: \`${workstream.workspace_mode}\` workspace`,
         workstream.cwd ? `Workspace: \`${workstream.cwd}\`` : null,
         `Codex thread: \`${workstream.codex_thread_id}\``,
@@ -2862,21 +2862,7 @@ export class DiscordBot {
       );
     }
 
-    if (explicitEpic?.kind === "lane") {
-      const lane = project.defaultLanes.find((candidate) => candidate.id === explicitEpic.epicId);
-      if (!lane) {
-        throw new Error(`Project "${projectId}" does not define durable lane "${explicitEpic.epicId}".`);
-      }
-
-      return {
-        id: "default",
-        branch: lane.baseBranch,
-        lane: lane.id,
-        source: "default",
-      };
-    }
-
-    const explicitEpicId = explicitEpic?.kind === "epic" ? explicitEpic.epicId : undefined;
+    const explicitEpicId = explicitEpic?.epicId;
     const epicId =
       explicitEpicId ??
       (threadContext?.projectId === projectId ? threadContext.epicId ?? undefined : undefined) ??
@@ -2892,36 +2878,12 @@ export class DiscordBot {
         };
       }
 
-      const lane = project.defaultLanes.find((candidate) => candidate.id === epicId);
-      if (explicitEpic && lane) {
-        return {
-          id: "default",
-          branch: lane.baseBranch,
-          lane: lane.id,
-          source: "default",
-        };
-      }
-
       throw new Error(`Project "${projectId}" does not define epic "${epicId}".`);
     }
 
-    if (threadContext?.projectId === projectId && threadContext.baseBranch) {
-      return {
-        id: "default",
-        branch: threadContext.baseBranch,
-        lane: threadContext.lane ?? project.id,
-        source: "default",
-      };
-    }
-
-    if (project.requireEpicForWorktree) {
-      throw new Error(
-        `Project "${projectId}" requires an epic selection. Start the workstream in a routed epic channel or pass the epic option explicitly.`
-      );
-    }
-
+    const available = project.epicBranches.map((epic) => epic.id).join(", ") || "none configured";
     throw new Error(
-      `No durable lane could be inferred for project "${projectId}". Start the workstream inside a Discord thread whose name matches a configured lane or epic, or pass the epic option explicitly.`
+      `Project "${projectId}" requires a configured epic. Start the workstream in a Discord thread whose slug matches one of: ${available}. You can also pass the epic option explicitly.`
     );
   }
 
@@ -3085,18 +3047,18 @@ export class DiscordBot {
     }
 
     if (route.lane) {
-      const lane = project.defaultLanes.find((candidate) => candidate.id === route.lane);
-      if (lane) {
+      const epic = project.epicBranches.find((candidate) => candidate.id === route.lane);
+      if (epic) {
         return {
           projectId: project.id,
           route,
           parentChannelId,
           threadId: channelId,
-          lane: lane.id,
-          baseBranch: route.baseBranch ?? lane.baseBranch,
-          epicId: null,
-          assistantEnabled: route.assistantEnabled || lane.assistantEnabled,
-          ownerInstanceId: route.ownerInstanceId ?? lane.ownerInstanceId ?? null,
+          lane: workstreamLaneForEpic(epic),
+          baseBranch: route.baseBranch ?? epic.branch,
+          epicId: epic.id,
+          assistantEnabled: route.assistantEnabled,
+          ownerInstanceId: route.ownerInstanceId ?? null,
           source: "route",
           binding: null,
         };
@@ -3104,35 +3066,6 @@ export class DiscordBot {
     }
 
     if (normalizedThreadName) {
-      const matchingLane = project.defaultLanes.find((candidate) => candidate.id === normalizedThreadName);
-      if (matchingLane) {
-        const binding = this.orchestrator.upsertDiscordThreadBinding({
-          threadId: channelId,
-          parentChannelId,
-          projectId: project.id,
-          epicId: null,
-          lane: matchingLane.id,
-          baseBranch: matchingLane.baseBranch,
-          assistantEnabled: route.assistantEnabled || matchingLane.assistantEnabled,
-          ownerInstanceId: route.ownerInstanceId ?? matchingLane.ownerInstanceId ?? this.instanceId,
-          source: "thread-title",
-        });
-
-        return {
-          projectId: binding.project_id,
-          route,
-          parentChannelId,
-          threadId: channelId,
-          lane: binding.lane,
-          baseBranch: binding.base_branch,
-          epicId: binding.epic_id,
-          assistantEnabled: Boolean(binding.assistant_enabled),
-          ownerInstanceId: binding.owner_instance_id,
-          source: "thread-title",
-          binding,
-        };
-      }
-
       const matchingEpic = project.epicBranches.find((candidate) => {
         return candidate.id === normalizedThreadName || this.normalizeLaneIdCandidate(workstreamLaneForEpic(candidate)) === normalizedThreadName;
       });

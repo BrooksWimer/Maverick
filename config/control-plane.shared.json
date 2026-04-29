@@ -130,13 +130,53 @@
           "id": "laptop-wifi-scanner",
           "branch": "codex/laptop-wifi-scanner-epic",
           "workstreamPrefix": "laptop-wifi-scanner",
-          "description": "Go agent and scanner research work for laptop-based Wi-Fi discovery and labeling"
+          "description": "Go agent and scanner research work for laptop-based Wi-Fi discovery and labeling",
+          "charter": {
+            "summary": "Improve Astra's laptop/desktop Go scanner and labeling quality so home users can understand the devices on their own network.",
+            "bullets": [
+              "Astra is the public product name; Netwise is the internal repo/config name.",
+              "Treat scanner research as product support for ordinary home network users, not as an end in itself.",
+              "Do not claim scanner accuracy without tests, reports, or live-run evidence."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Astra/Netwise project context."
+              },
+              {
+                "path": "docs/maverick/epics/laptop-wifi-scanner.md",
+                "purpose": "Laptop scanner epic context and validation expectations."
+              },
+              {
+                "path": "agent/docs/WIFI_SCANNER_MAP.md",
+                "purpose": "Current scanner map and implementation orientation."
+              }
+            ]
+          }
         },
         {
           "id": "mobile-wifi-scanner",
           "branch": "codex/mobile-wifi-scanner-epic",
           "workstreamPrefix": "mobile-wifi-scanner",
-          "description": "Expo and iOS Wi-Fi scanning work for the Netwise mobile client"
+          "description": "Expo and iOS Wi-Fi scanning work for the Netwise mobile client",
+          "charter": {
+            "summary": "Build and refine Astra's mobile experience while clarifying which scanner capabilities can run directly from a phone.",
+            "bullets": [
+              "Prioritize home-user clarity over scanner-internal detail in the mobile UX.",
+              "Keep iPhone-only feasibility explicit and evidence-backed.",
+              "Coordinate with laptop scanner work only when mobile depends on scanner outputs or API shape."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Astra/Netwise project context."
+              },
+              {
+                "path": "docs/maverick/epics/mobile-wifi-scanner.md",
+                "purpose": "Mobile scanner epic context and iOS feasibility notes."
+              }
+            ]
+          }
         },
         {
           "id": "router-admin-ingestion",
@@ -152,6 +192,14 @@
               "Keep durable implementation details, discovery notes, and router-specific findings in repo-owned product docs instead of Maverick dispatch text."
             ],
             "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Astra/Netwise project context."
+              },
+              {
+                "path": "docs/maverick/epics/router-admin-ingestion.md",
+                "purpose": "Router-admin epic context and secure ingestion constraints."
+              },
               {
                 "path": "agent/docs/WIFI_STRATEGY_CATALOG.md",
                 "purpose": "Related Netwise agent strategy notes and a durable repo-owned starting point for adjacent network inventory findings."

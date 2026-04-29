@@ -4,6 +4,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { OrchestratorConfigSchema, type OrchestratorConfig } from "./schema.js";
+import { normalizeEpicFirstConfig } from "./epic-first.js";
 import { createLogger } from "../logger.js";
 import { isEpicDocPathWithinProject, resolveEpicDocPath } from "../projects/epics.js";
 
@@ -26,7 +27,7 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     throw new Error(`Config validation failed:\n${issues}`);
   }
 
-  const config = result.data;
+  const config = normalizeEpicFirstConfig(result.data);
 
   const projectById = new Map(config.projects.map((project) => [project.id, project]));
 
@@ -64,23 +65,14 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
       throw new Error(`Project "${project.id}" requires epic selection but defines no epicBranches`);
     }
 
-    const seenLaneIds = new Set<string>();
-    for (const lane of project.defaultLanes) {
-      if (seenLaneIds.has(lane.id)) {
-        throw new Error(`Project "${project.id}" declares duplicate default lane "${lane.id}"`);
-      }
-      seenLaneIds.add(lane.id);
-    }
-
     if (
       project.workspaceKind === "git" &&
       !project.requireEpicForWorktree &&
       !project.defaultWorktreeBaseBranch &&
-      project.epicBranches.length === 0 &&
-      project.defaultLanes.length === 0
+      project.epicBranches.length === 0
     ) {
       throw new Error(
-        `Project "${project.id}" must define defaultWorktreeBaseBranch or at least one defaultLane when workspaceKind is "git".`
+        `Project "${project.id}" must define defaultWorktreeBaseBranch or at least one epic when workspaceKind is "git".`
       );
     }
   }
@@ -98,9 +90,9 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
       );
     }
 
-    if (route.lane && !project.defaultLanes.some((lane) => lane.id === route.lane)) {
+    if (route.lane && !project.epicBranches.some((epic) => epic.id === route.lane)) {
       throw new Error(
-        `Discord route ${route.channelId} references unknown lane "${route.lane}" for project "${route.projectId}"`
+        `Discord route ${route.channelId} references unknown epic/lane "${route.lane}" for project "${route.projectId}"`
       );
     }
   }

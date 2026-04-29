@@ -10,6 +10,7 @@ import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantConfig } from "../config/index.js";
 import type { AssistantService } from "../assistant/index.js";
 import { validateTwilioSignature } from "../assistant/providers/sms.js";
+import { getStateBackendMode, invokeLocalStateOperation } from "../state/index.js";
 
 const log = createLogger("http");
 
@@ -40,6 +41,46 @@ export async function createHttpServer(
   // --- Health ---
 
   app.get("/health", async () => orchestrator.getHealthStatus());
+
+  // --- Internal state RPC ---
+
+  const stateToken = process.env.MAVERICK_STATE_TOKEN?.trim();
+  if (stateToken && getStateBackendMode() === "sqlite") {
+    app.post("/internal/state/operation", async (req, reply) => {
+      const authorization = req.headers.authorization;
+      if (authorization !== `Bearer ${stateToken}`) {
+        reply.code(401);
+        return { ok: false, error: "Unauthorized" };
+      }
+
+      const body = req.body as {
+        repository?: unknown;
+        method?: unknown;
+        args?: unknown;
+      };
+      if (typeof body.repository !== "string" || typeof body.method !== "string") {
+        reply.code(400);
+        return { ok: false, error: "Missing repository or method." };
+      }
+
+      try {
+        const result = invokeLocalStateOperation(
+          body.repository,
+          body.method,
+          Array.isArray(body.args) ? body.args : [],
+        );
+        return { ok: true, result };
+      } catch (error) {
+        reply.code(500);
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
+  } else if (getStateBackendMode() === "sqlite") {
+    log.warn("Internal state API disabled because MAVERICK_STATE_TOKEN is not set");
+  }
 
   // --- Projects ---
 
