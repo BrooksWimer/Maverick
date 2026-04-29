@@ -390,7 +390,8 @@ describe("Orchestrator planning agent flow", () => {
     for (const request of utilityAdapter.turnRequests) {
       expect(request.noSessionPersistence).toBe(true);
       expect(request.maxBudgetUsd).toBeGreaterThan(0);
-      expect(request.jsonSchema).toEqual({ type: "object" });
+      expect(request.jsonSchema).toMatchObject({ type: "object" });
+      expect(request.disallowedTools).toContain("Bash");
       expect(request.disallowedTools).toContain("WebSearch");
     }
     expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Bounded Project Context");
@@ -445,7 +446,7 @@ describe("Orchestrator planning agent flow", () => {
           requiredAnswers: [],
           importantDecisions: [],
           draftExecutionPrompt: "Draft one.",
-          finalExecutionPrompt: "",
+          finalExecutionPrompt: "Final prompt one.",
           remainingUnknowns: [],
           steps: [],
           risks: [],
@@ -486,7 +487,7 @@ describe("Orchestrator planning agent flow", () => {
           requiredAnswers: [],
           importantDecisions: [],
           draftExecutionPrompt: "Draft two.",
-          finalExecutionPrompt: "",
+          finalExecutionPrompt: "Final prompt two.",
           remainingUnknowns: [],
           steps: [],
           risks: [],
@@ -534,8 +535,8 @@ describe("Orchestrator planning agent flow", () => {
       resumeExisting: true,
     });
 
-    expect(firstPlan.finalExecutionPrompt).toBeNull();
-    expect(secondPlan.finalExecutionPrompt).toBeNull();
+    expect(firstPlan.finalExecutionPrompt).toBe("Final prompt one.");
+    expect(secondPlan.finalExecutionPrompt).toBe("Final prompt two.");
     expect(resumedPlan.finalExecutionPrompt).toBe("Final dispatch prompt.");
     expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
     expect(utilityAdapter.turnRequests).toHaveLength(7);
@@ -544,5 +545,161 @@ describe("Orchestrator planning agent flow", () => {
     expect(utilityAdapter.turnRequests[6]?.threadId).toBe(utilityAdapter.turnRequests[5]?.threadId);
     expect(utilityAdapter.turnRequests[6]?.instruction).toContain("Resume the stored planning flow");
     expect(new Set(utilityAdapter.turnRequests.map((request) => request.model))).toEqual(new Set(["sonnet"]));
+  });
+
+  it("rejects unstructured planning output instead of storing a false not-ready plan", async () => {
+    orchestrator = new Orchestrator(config);
+    await orchestrator.initialize();
+
+    const utilityAdapter = new QueuedAdapter("utility", [
+      intakeOutput(
+        {
+          request: "Plan a bounded implementation.",
+          scope: "Bounded implementation.",
+          outOfScope: "",
+          acceptanceCriteria: ["A structured plan exists."],
+          risks: [],
+          complexity: "small",
+          recommendation: "proceed",
+          clarificationQuestions: [],
+        },
+        "Intake.",
+      ),
+      modelingOutput(
+        {
+          systemSummary: "Bounded model.",
+          mermaid: "flowchart TD\n  A[Context] --> B[Plan]",
+          keyEntities: ["context"],
+          criticalFlows: ["planning"],
+          openQuestions: [],
+        },
+        "Model.",
+      ),
+      {
+        backendTurnId: "bad-plan",
+        status: "completed",
+        output: "Maverick is ready to dispatch with the finalExecutionPrompt above.",
+        summary: "Unstructured output.",
+      },
+    ]);
+    (orchestrator as { utilityClaudeAdapter: ExecutionBackendAdapter | null }).utilityClaudeAdapter = utilityAdapter;
+
+    const workstream = await orchestrator.createWorkstream({
+      projectId: "maverick",
+      name: "bad planning output",
+      epicId: "control-plane",
+    });
+
+    await expect(orchestrator.generatePlan(workstream.id, "Plan a bounded implementation.", "manual"))
+      .rejects
+      .toThrow("Planning agent returned unstructured output");
+  });
+
+  it("uses static-site verification for Portfolio instead of generic npm test/build", async () => {
+    const portfolioRepo = join(tempDir, "portfolio");
+    mkdirSync(join(portfolioRepo, "docs", "maverick", "epics"), { recursive: true });
+    writeFileSync(join(portfolioRepo, "AGENTS.md"), "# Portfolio doctrine", "utf8");
+    writeFileSync(
+      join(portfolioRepo, "package.json"),
+      JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }),
+      "utf8",
+    );
+    writeFileSync(join(portfolioRepo, "index.html"), "<!doctype html><title>Portfolio</title>", "utf8");
+    writeFileSync(join(portfolioRepo, "docs", "maverick", "PROJECT_CONTEXT.md"), "# Portfolio\n\nStatic HTML portfolio.", "utf8");
+    writeFileSync(join(portfolioRepo, "docs", "maverick", "epics", "portfolio.md"), "# Portfolio Epic\n\nPortfolio polish.", "utf8");
+    config.projects = [
+      {
+        id: "portfolio-resume",
+        name: "Portfolio & Resume",
+        repoPath: portfolioRepo,
+        workspaceKind: "notes",
+        productionBranch: "master",
+        defaultLanes: [],
+        epicBranches: [
+          {
+            id: "portfolio",
+            branch: "portfolio",
+            workstreamPrefix: "portfolio",
+            charter: {
+              summary: "Portfolio polish.",
+              bullets: [],
+              docs: [
+                { path: "docs/maverick/PROJECT_CONTEXT.md", purpose: "Project context." },
+                { path: "docs/maverick/epics/portfolio.md", purpose: "Epic context." },
+              ],
+            },
+          },
+        ],
+        executionBackend: {
+          type: "mock",
+          responseDelay: 0,
+        },
+        claudePlanning: {
+          enabled: true,
+          autoOnPlanningState: false,
+          model: "sonnet",
+        },
+      },
+    ];
+    orchestrator = new Orchestrator(config);
+    await orchestrator.initialize();
+
+    const utilityAdapter = new QueuedAdapter("utility", [
+      intakeOutput(
+        {
+          request: "Plan portfolio polish.",
+          scope: "Static site polish.",
+          outOfScope: "",
+          acceptanceCriteria: ["Portfolio can be reviewed locally."],
+          risks: [],
+          complexity: "medium",
+          recommendation: "proceed",
+          clarificationQuestions: [],
+        },
+        "Intake.",
+      ),
+      modelingOutput(
+        {
+          systemSummary: "Static portfolio site.",
+          mermaid: "flowchart TD\n  A[index.html] --> B[Browser]",
+          keyEntities: ["index.html"],
+          criticalFlows: ["static render"],
+          openQuestions: [],
+        },
+        "Model.",
+      ),
+      planningOutput(
+        {
+          currentStateSummary: "Portfolio context is loaded.",
+          recommendedNextSlice: "Implement the polish pass.",
+          requiredAnswers: [],
+          importantDecisions: [],
+          draftExecutionPrompt: "Implement portfolio polish.",
+          finalExecutionPrompt: "Implement portfolio polish.",
+          remainingUnknowns: [],
+          steps: [],
+          risks: [],
+          dependencies: [],
+          estimatedTurns: 1,
+          testStrategy: "Static browser review.",
+          rollbackPlan: "Revert the portfolio polish commit.",
+        },
+        "Ready.",
+      ),
+    ]);
+    (orchestrator as { utilityClaudeAdapter: ExecutionBackendAdapter | null }).utilityClaudeAdapter = utilityAdapter;
+
+    const workstream = await orchestrator.createWorkstream({
+      projectId: "portfolio-resume",
+      name: "portfolio polish",
+      epicId: "portfolio",
+    });
+
+    await orchestrator.generatePlan(workstream.id, "Plan portfolio polish.", "manual");
+
+    const planningRequest = utilityAdapter.turnRequests[2];
+    expect(planningRequest?.instruction).toContain("npx html-validate index.html");
+    expect(planningRequest?.instruction).toContain("Manual browser review at desktop and 375px mobile viewport");
+    expect(planningRequest?.instruction).not.toContain("Suggested commands: npm test");
   });
 });

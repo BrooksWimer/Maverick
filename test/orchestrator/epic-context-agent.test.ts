@@ -219,7 +219,7 @@ describe("Orchestrator epic-context agent integration", () => {
           requiredAnswers: [],
           importantDecisions: [],
           draftExecutionPrompt: "Implement the next router-admin slice without overfitting to one vendor UI.",
-          finalExecutionPrompt: "",
+          finalExecutionPrompt: "Implement the next router-admin slice without overfitting to one vendor UI.",
           remainingUnknowns: [],
           steps: [],
           risks: [],

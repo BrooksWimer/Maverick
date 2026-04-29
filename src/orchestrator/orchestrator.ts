@@ -101,6 +101,7 @@ import {
 } from "../git/lifecycle.js";
 import { getRuntimeInstanceId } from "../runtime/identity.js";
 import type {
+  AgentResult,
   ExplanationResult,
   GoalFrameResult,
   IntakeResult,
@@ -1438,6 +1439,7 @@ export class Orchestrator {
       }
 
       const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
+      this.assertPlanningAgentResultIsActionable(agentResult, planningResult);
       const basePlanningContext = buildPlanningContextRecord({
         originalInstruction: effectiveInstruction,
         result: planningResult,
@@ -1618,6 +1620,7 @@ export class Orchestrator {
       }
 
       const planningResult = parsePlanningResult(agentResult.structured, agentResult.output);
+      this.assertPlanningAgentResultIsActionable(agentResult, planningResult);
       const basePlanningContext = buildPlanningContextRecord({
         originalInstruction: existingContext.originalInstruction,
         result: planningResult,
@@ -3417,10 +3420,95 @@ export class Orchestrator {
     return {
       maxBudgetUsd: stage === "plan" ? 0.75 : 0.25,
       noSessionPersistence: true,
-      tools: ["Read", "Grep", "Glob", "Bash"],
-      disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"],
-      jsonSchema: { type: "object" },
+      tools: ["Read", "Grep", "Glob"],
+      disallowedTools: ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"],
+      jsonSchema: stage === "plan" ? this.planningResultJsonSchema() : { type: "object" },
     };
+  }
+
+  private planningResultJsonSchema(): Record<string, unknown> {
+    const decisionSchema = {
+      type: "object",
+      required: ["id", "question", "whyItMatters"],
+      properties: {
+        id: { type: "string" },
+        question: { type: "string" },
+        whyItMatters: { type: "string" },
+        options: { type: "array", items: { type: "string" } },
+      },
+    };
+    return {
+      type: "object",
+      required: [
+        "currentStateSummary",
+        "recommendedNextSlice",
+        "requiredAnswers",
+        "importantDecisions",
+        "draftExecutionPrompt",
+        "finalExecutionPrompt",
+        "remainingUnknowns",
+        "steps",
+        "risks",
+        "dependencies",
+        "estimatedTurns",
+        "testStrategy",
+        "rollbackPlan",
+      ],
+      properties: {
+        currentStateSummary: { type: "string" },
+        recommendedNextSlice: { type: "string" },
+        requiredAnswers: { type: "array", items: decisionSchema },
+        importantDecisions: { type: "array", items: decisionSchema },
+        draftExecutionPrompt: { type: "string" },
+        finalExecutionPrompt: { type: "string" },
+        remainingUnknowns: { type: "array", items: { type: "string" } },
+        steps: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["order", "description", "files", "verification", "canParallelize"],
+            properties: {
+              order: { type: "number" },
+              description: { type: "string" },
+              files: { type: "array", items: { type: "string" } },
+              verification: { type: "string" },
+              canParallelize: { type: "boolean" },
+            },
+          },
+        },
+        risks: { type: "array", items: { type: "string" } },
+        dependencies: { type: "array", items: { type: "string" } },
+        estimatedTurns: { type: "number" },
+        testStrategy: { type: "string" },
+        rollbackPlan: { type: "string" },
+      },
+    };
+  }
+
+  private assertPlanningAgentResultIsActionable(
+    agentResult: AgentResult,
+    planningResult: PlanningResult,
+  ): void {
+    if (!agentResult.structured) {
+      throw new Error(
+        [
+          "Planning agent returned unstructured output.",
+          "Maverick requires schema-shaped planning JSON before it will store or dispatch a plan.",
+          "Retry planning after fixing the agent output; raw prose was not accepted as a plan.",
+        ].join(" ")
+      );
+    }
+
+    const hasBlockingQuestions =
+      planningResult.requiredAnswers.length > 0 || planningResult.importantDecisions.length > 0;
+    if (!hasBlockingQuestions && !planningResult.finalExecutionPrompt.trim()) {
+      throw new Error(
+        [
+          "Planning agent returned structured JSON but no finalExecutionPrompt and no blocking questions.",
+          "A plan must either ask explicit requiredAnswers/importantDecisions or provide a dispatch-ready finalExecutionPrompt.",
+        ].join(" ")
+      );
+    }
   }
 
   private buildCheckpointPlanningResult(
@@ -3483,11 +3571,8 @@ export class Orchestrator {
     contextBundle: PlanningContextBundle,
   ): TestDesignResult {
     const project = this.getProject(workstream.project_id);
-    const packageJson = resolve(project.repoPath, "package.json");
-    const suggestedCommands = existsSync(packageJson)
-      ? ["npm test", "npm run build"]
-      : ["git status --short"];
     const changedFiles = contextBundle.changedFiles.map((file) => file.path);
+    const suggestedCommands = this.resolvePlanningVerificationCommands(project, contextBundle);
 
     return {
       strategySummary: [
@@ -3507,6 +3592,76 @@ export class Orchestrator {
       ],
       suggestedCommands,
     };
+  }
+
+  private resolvePlanningVerificationCommands(
+    project: ProjectConfig,
+    contextBundle: PlanningContextBundle,
+  ): string[] {
+    if (project.id === "portfolio-resume") {
+      return [
+        "git status --short",
+        "npx html-validate index.html projects/maverick/maverick.html projects/syncsonic/syncsonic.html projects/astra/astra.html projects/kitbash/kitbash.html projects/foodpal/foodpal.html",
+        "npx serve . --listen 8080",
+        "Manual browser review at desktop and 375px mobile viewport",
+      ];
+    }
+
+    const packageJsonPath = resolve(project.repoPath, "package.json");
+    const scripts = this.readPackageScripts(packageJsonPath);
+    const commands = ["git status --short"];
+    if (this.isMeaningfulPackageScript(scripts.test)) {
+      commands.push("npm test");
+    }
+    if (this.isMeaningfulPackageScript(scripts.build)) {
+      commands.push("npm run build");
+    }
+    if (commands.length > 1) {
+      return commands;
+    }
+
+    if (
+      contextBundle.projectContext.toLowerCase().includes("static html") ||
+      contextBundle.epicContext.toLowerCase().includes("portfolio")
+    ) {
+      return [
+        "git status --short",
+        "npx html-validate index.html",
+        "Manual browser review of changed pages",
+      ];
+    }
+
+    return commands;
+  }
+
+  private readPackageScripts(packageJsonPath: string): Record<string, string> {
+    if (!existsSync(packageJsonPath)) {
+      return {};
+    }
+
+    try {
+      const parsed = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+        scripts?: Record<string, unknown>;
+      };
+      if (!parsed.scripts) {
+        return {};
+      }
+      return Object.fromEntries(
+        Object.entries(parsed.scripts)
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+      );
+    } catch {
+      return {};
+    }
+  }
+
+  private isMeaningfulPackageScript(script: string | undefined): boolean {
+    if (!script) {
+      return false;
+    }
+
+    const normalized = script.toLowerCase();
+    return !normalized.includes("no test specified") && !normalized.includes("exit 1");
   }
 
   private async getAgentEpicContextAnalysis(

@@ -28,6 +28,9 @@ export const planningAgent: AgentDefinition = {
 - Always provide \`draftExecutionPrompt\` as the best current prompt draft.
 - Only provide \`finalExecutionPrompt\` when Maverick is genuinely ready to dispatch without further operator input or prompt synthesis.
 - If questions are still unresolved, leave \`finalExecutionPrompt\` as an empty string.
+- If no questions are unresolved, \`finalExecutionPrompt\` is required. Do not claim dispatch readiness unless it is populated.
+- Do not write or update files during planning. This includes \`.claude/plans\`, repo docs, scratch files, or any path outside the execution workspace.
+- If a durable planning/context document should be updated, include that as an explicit Codex implementation step and file path. Planning itself persists only through Maverick's structured response.
 
 ## Doctrine cues
 
@@ -49,7 +52,7 @@ Use that evidence to determine:
 
 ## Output requirements
 
-Return JSON that matches this structure exactly:
+Return JSON that matches this structure exactly. The JSON object is the source of truth; do not refer to content "above" or in a separate plan file.
 
 \`\`\`json
 {
@@ -99,6 +102,7 @@ Return JSON that matches this structure exactly:
 - Preserve working Maverick behavior unless the requested slice intentionally extends it.
 - Keep the plan inspectable: explicit files, explicit checks, explicit risks.
 - Do not claim that the work is dispatch-ready unless \`finalExecutionPrompt\` is populated with a concrete Codex prompt.
+- Do not use Claude's plan-file feature, do not create \`.claude/plans\` files, and do not ask Maverick to retrieve plan content from a global Claude folder.
 - If the prior planning context included answered questions, treat them as resolved inputs when regenerating the plan.
 
 After the JSON block, add a short natural-language summary that explains whether Maverick is ready to dispatch or is waiting on operator input.`,

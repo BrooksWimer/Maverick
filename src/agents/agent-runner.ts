@@ -162,11 +162,18 @@ function assembleInstruction(
   if (agent.structuredOutput) {
     parts.push("");
     parts.push("## Output Format");
-    parts.push(
-      "Respond with a JSON object inside a ```json code fence. " +
-      "The JSON must conform to the structured output schema described in your system prompt. " +
-      "Include a brief natural-language summary AFTER the JSON block.",
-    );
+    if (agent.id === "planning") {
+      parts.push(
+        "Respond with only one JSON object that conforms to the structured output schema described in your system prompt. " +
+        "Do not include prose before or after it, do not refer to content above, and do not write plan files.",
+      );
+    } else {
+      parts.push(
+        "Respond with a JSON object inside a ```json code fence. " +
+        "The JSON must conform to the structured output schema described in your system prompt. " +
+        "Include a brief natural-language summary AFTER the JSON block.",
+      );
+    }
   }
 
   return parts.join("\n");
@@ -181,6 +188,7 @@ function parseStructuredOutput(
 ): Record<string, unknown> | null {
   const candidates = [
     output.match(/```(?:json)?\s*([\s\S]+?)\s*```/i)?.[1],
+    extractJsonObjectByKnownKeys(output),
     output.trim(),
   ].filter((candidate): candidate is string => Boolean(candidate));
 
@@ -196,6 +204,61 @@ function parseStructuredOutput(
   }
 
   log.warn("Failed to parse structured agent output");
+
+  return null;
+}
+
+function extractJsonObjectByKnownKeys(output: string): string | null {
+  const knownKeys = [
+    '"currentStateSummary"',
+    '"request"',
+    '"systemSummary"',
+    '"status"',
+    '"verdict"',
+    '"sections"',
+  ];
+  const keyIndex = knownKeys
+    .map((key) => output.indexOf(key))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  if (keyIndex === undefined) {
+    return null;
+  }
+
+  const startIndex = output.lastIndexOf("{", keyIndex);
+  if (startIndex < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = startIndex; index < output.length; index += 1) {
+    const char = output[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return output.slice(startIndex, index + 1);
+      }
+    }
+  }
 
   return null;
 }
