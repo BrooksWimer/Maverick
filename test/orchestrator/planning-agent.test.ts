@@ -388,7 +388,9 @@ describe("Orchestrator planning agent flow", () => {
     expect(utilityAdapter.turnRequests[3]?.model).toBe("sonnet");
     expect(utilityAdapter.turnRequests[4]?.model).toBe("sonnet");
     for (const request of utilityAdapter.turnRequests) {
-      expect(request.noSessionPersistence).toBe(true);
+      // Planning calls now opt INTO Claude session persistence so successive turns
+      // can benefit from automatic prompt caching on the cached prefix.
+      expect(request.noSessionPersistence).toBe(false);
       expect(request.maxBudgetUsd).toBeGreaterThan(0);
       expect(request.jsonSchema).toMatchObject({ type: "object" });
       expect(request.disallowedTools).toContain("Bash");

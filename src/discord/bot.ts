@@ -3230,16 +3230,22 @@ export class DiscordBot {
       return null;
     } catch (error) {
       if (isDiscordApiError(error, 50001)) {
-        log.warn({ channelId, err: error }, "Discord bot is missing access to channel");
+        log.error(
+          { channelId, err: error, code: 50001 },
+          "Discord bot is missing access to channel; notifications targeted at this channel will be dropped"
+        );
         return null;
       }
 
       if (isDiscordApiError(error, 50013)) {
-        log.warn({ channelId, err: error }, "Discord bot is missing permissions to use channel");
+        log.error(
+          { channelId, err: error, code: 50013 },
+          "Discord bot is missing permissions to use channel; notifications targeted at this channel will be dropped"
+        );
         return null;
       }
 
-      log.warn({ channelId, err: error }, "Failed to fetch Discord channel");
+      log.error({ channelId, err: error }, "Failed to fetch Discord channel");
       return null;
     }
   }
@@ -3272,14 +3278,17 @@ export class DiscordBot {
       await channel.send(options);
     } catch (error) {
       if (isDiscordApiError(error, 50001)) {
-        log.warn({ channelId: channel.id, err: error }, "Discord bot lost access before sending message");
+        log.error(
+          { channelId: channel.id, err: error, code: 50001 },
+          "Discord bot lost access before sending message; notification was dropped silently. Operator action required to restore channel access."
+        );
         return;
       }
 
       if (isDiscordApiError(error, 50013)) {
-        log.warn(
-          { channelId: channel.id, err: error },
-          "Discord bot lacks permission to send into channel"
+        log.error(
+          { channelId: channel.id, err: error, code: 50013 },
+          "Discord bot lacks permission to send into channel; notification was dropped. Grant Send Messages permission to restore."
         );
         return;
       }

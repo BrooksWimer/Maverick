@@ -30,7 +30,11 @@ export function deriveWorktreeNames(params: {
 }) {
   const slug = slugify(params.name);
   const shortId = params.workstreamId.split("-")[0] ?? params.workstreamId;
-  const laneSegment = params.lane ? slugify(params.lane) : null;
+  const projectSlug = slugify(params.projectId);
+  const rawLane = params.lane ? slugify(params.lane) : null;
+  // Skip the lane segment when it would just duplicate the project id (which produced
+  // branches like maverick/<project>/<project>/<workstream> in the past).
+  const laneSegment = rawLane && rawLane !== projectSlug ? rawLane : null;
   const leafName = `${slug}-${shortId}`;
   const relativeSegments = [params.projectId, ...(laneSegment ? [laneSegment] : []), leafName];
   const branch = ["maverick", params.projectId, ...(laneSegment ? [laneSegment] : []), leafName].join("/");
@@ -97,7 +101,9 @@ async function fetchRemoteBranch(repoPath: string, branch: string): Promise<void
 
 async function resolveWorktreeBaseRef(repoPath: string, baseRef?: string): Promise<string> {
   if (!baseRef) {
-    return "HEAD";
+    throw new Error(
+      "Cannot provision a workstream worktree without a base ref. Pass baseBranch or epicId so the worktree branches from a configured durable lane instead of falling back to the current HEAD."
+    );
   }
 
   await fetchRemoteBranchIfAvailable(repoPath, baseRef);
