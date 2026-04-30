@@ -10,8 +10,12 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "lint": "tsc --noEmit",
+    "oauth:google-calendar": "node scripts/google-calendar-oauth.mjs",
     "bootstrap:projects": "npm run build && node dist/projects/bootstrap-cli.js",
     "db:migrate": "npm run build && node dist/state/migrate.js",
+    "db:merge-state": "node scripts/merge-state-databases.mjs",
+    "branches:audit": "npm run build && node dist/git/branch-audit-cli.js",
+    "branches:repair": "npm run build && node dist/git/branch-audit-cli.js --repair",
     "smoke:app-server": "npm run build && node dist/codex/smoke-test.js"
   },
   "dependencies": {

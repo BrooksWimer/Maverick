@@ -1,100 +1,141 @@
 {
-  "version": 1,
-  "defaults": {
-    "workflow": {
-      "name": "standard",
-      "states": ["intake", "planning", "implementation", "verification", "review", "done", "blocked"],
-      "initialState": "intake",
-      "terminalStates": ["done"],
-      "transitions": [
-        { "from": "intake", "to": "planning", "trigger": "scope-defined", "autoAdvance": true },
-        { "from": "intake", "to": "blocked", "trigger": "missing-info", "autoAdvance": false },
-        { "from": "blocked", "to": "intake", "trigger": "info-supplied", "autoAdvance": false },
-        { "from": "planning", "to": "implementation", "trigger": "plan-approved", "autoAdvance": false },
-        { "from": "implementation", "to": "verification", "trigger": "implementation-complete", "autoAdvance": true },
-        { "from": "verification", "to": "review", "trigger": "verification-passed", "autoAdvance": true },
-        { "from": "verification", "to": "implementation", "trigger": "verification-failed", "autoAdvance": true },
-        { "from": "review", "to": "done", "trigger": "review-approved", "autoAdvance": false },
-        { "from": "review", "to": "implementation", "trigger": "changes-requested", "autoAdvance": true }
-      ]
-    },
-    "executionBackend": {
-      "type": "codex-app-server",
-      "transport": "stdio",
-      "sandboxMode": "workspace-write",
-      "approvalPolicy": "on-request",
-      "persistExtendedHistory": true,
-      "experimentalRawEvents": false
-    },
-    "escalationRules": [
-      { "pattern": "rm -rf", "tier": "human-decision", "description": "Destructive filesystem operations" },
-      { "pattern": "git push --force", "tier": "human-decision", "description": "Force pushes" },
-      { "pattern": "DROP TABLE", "tier": "human-decision", "description": "Destructive database operations" },
-      { "pattern": "npm install", "tier": "approval-gated", "description": "Installing dependencies" },
-      { "pattern": "git checkout", "tier": "auto", "description": "Branch operations" },
-      { "pattern": "npm test", "tier": "auto", "description": "Running tests" }
-    ],
-    "maxConcurrentWorkstreams": 6
-  },
+  "extends": "./control-plane.shared.json",
   "projects": [
     {
       "id": "maverick",
-      "name": "Maverick",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Maverick",
-      "maxConcurrentWorkstreams": 3,
-      "metadata": {
-        "description": "Personal assistant and control-plane home project"
-      }
-    },
-    {
-      "id": "netwise",
-      "name": "Netwise",
-      "repoPath": "C:\\Users\\wimer\\Desktop\\Sentry\\netwise",
       "epicBranches": [
         {
-          "id": "laptop-wifi-scanner",
-          "branch": "codex/laptop-wifi-scanner-epic",
-          "workstreamPrefix": "laptop-wifi-scanner",
-          "description": "Go agent and scanner research work for laptop-based Wi-Fi discovery and labeling"
-        },
-        {
-          "id": "mobile-wifi-scanner",
-          "branch": "codex/mobile-wifi-scanner-epic",
-          "workstreamPrefix": "mobile-wifi-scanner",
-          "description": "Expo and iOS Wi-Fi scanning work for the Netwise mobile client"
-        },
-        {
-          "id": "router-admin-ingestion",
-          "branch": "codex/router-admin-ingestion-epic",
-          "workstreamPrefix": "router-admin-ingestion",
-          "description": "Authenticated router admin ingestion and router-only inventory extraction",
+          "id": "control-plane",
+          "branch": "control-plane",
+          "workstreamPrefix": "control-plane",
+          "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
           "charter": {
-            "summary": "Router admin ingestion is a real Netwise product capability for authenticated collection of router-native network and device data so users can access their own data and receive tailored insights.",
+            "summary": "Keep Maverick's core orchestration reliable, durable, observable, and safe across workstream lifecycle, state, routing, and execution behavior.",
             "bullets": [
-              "Let users enter router admin credentials in the app, authenticate against router admin UIs, extract router-native network and device data, and turn that into free user-visible value plus tailored insights.",
-              "Use Xfinity at http://10.0.0.1 as the first live target while keeping the design adaptable to other router and network-information UIs.",
-              "Do not treat this as a one-off experiment or hardcode the solution around one vendor's markup, navigation flow, or naming.",
-              "Keep durable implementation details, discovery notes, and router-specific findings in repo-owned product docs instead of Maverick dispatch text."
+              "Prioritize reliable AI workstreams, durable state, cost-controlled planning, verification, and production-safe lane promotion.",
+              "Use existing orchestrator patterns before adding new state or abstractions.",
+              "Preserve workstream history and never hide operator state transitions inside ad hoc Discord behavior."
             ],
             "docs": [
               {
-                "path": "agent/docs/WIFI_STRATEGY_CATALOG.md",
-                "purpose": "Related Netwise agent strategy notes and a durable repo-owned starting point for adjacent network inventory findings."
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/control-plane.md",
+                "purpose": "Control-plane epic scope, boundaries, and planning context."
+              }
+            ]
+          }
+        },
+        {
+          "id": "discord-routing",
+          "branch": "discord-routing",
+          "workstreamPrefix": "discord-routing",
+          "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
+          "charter": {
+            "summary": "Make Discord the dependable operator surface for epic-thread workstreams, assistant replies, command feedback, and repair guidance.",
+            "bullets": [
+              "Every workstream command must resolve through a configured epic/thread or fail with actionable repair help.",
+              "Keep replies concise, inspectable, and explicit about background work and next actions.",
+              "Preserve thread bindings by repairing stale state from config instead of trusting old DB values."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/discord-routing.md",
+                "purpose": "Discord routing epic scope and UX rules."
+              }
+            ]
+          }
+        },
+        {
+          "id": "assistant-infrastructure",
+          "branch": "assistant-infrastructure",
+          "workstreamPrefix": "assistant-infrastructure",
+          "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
+          "charter": {
+            "summary": "Build assistant capabilities that reuse durable state, route model work intentionally, and avoid unnecessary context rebuilds.",
+            "bullets": [
+              "Prefer deterministic state plumbing before agent calls.",
+              "Persist context, notes, reminders, and model outputs where future workstreams can reuse them.",
+              "Treat cost control and bounded context as product requirements, not afterthoughts."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/assistant-infrastructure.md",
+                "purpose": "Assistant infrastructure epic scope and context model."
+              }
+            ]
+          }
+        },
+        {
+          "id": "git-hygiene",
+          "branch": "git-hygiene",
+          "workstreamPrefix": "git-hygiene",
+          "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
+          "charter": {
+            "summary": "Keep Maverick-managed repos safe by enforcing epic branches, disposable workstreams, clean finish/promotion flows, and non-destructive cleanup.",
+            "bullets": [
+              "Workstreams branch from epics, finish into epics, and promote epics explicitly to production.",
+              "Never delete durable epic branches or preserved workstream history.",
+              "Prefer branch audits and repair reports before mutation."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/git-hygiene.md",
+                "purpose": "Git hygiene epic branch and cleanup rules."
+              }
+            ]
+          }
+        },
+        {
+          "id": "deployment-ops",
+          "branch": "deployment-ops",
+          "workstreamPrefix": "deployment-ops",
+          "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
+          "charter": {
+            "summary": "Keep Windows and Linux Maverick deployments restartable, observable, and consistent across shared config and state.",
+            "bullets": [
+              "Treat bot restarts, health checks, and cross-host state as operational work requiring clear rollback.",
+              "Avoid host-specific drift in shared project/epic config.",
+              "Surface live health and ownership clearly in Discord and HTTP checks."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Maverick project context and cross-epic operating model."
+              },
+              {
+                "path": "docs/maverick/epics/deployment-ops.md",
+                "purpose": "Deployment operations epic scope and health model."
               }
             ]
           }
         }
       ],
-      "requireEpicForWorktree": true,
-      "maxConcurrentWorkstreams": 3,
-      "metadata": {
-        "description": "First onboarded project for orchestrator validation"
-      }
+      "requireEpicForWorktree": true
+    },
+    {
+      "id": "netwise",
+      "repoPath": "C:\\Users\\wimer\\Desktop\\Sentry\\netwise"
     },
     {
       "id": "syncsonic",
-      "name": "SyncSonic",
       "repoPath": "C:\\Users\\wimer\\Desktop\\SyncSonicPi",
+      "defaultWorktreeBaseBranch": "foundation/neutral-minimal",
       "epicBranches": [
         {
           "id": "pipewire-transport-stability",
@@ -201,27 +242,215 @@
           }
         }
       ],
-      "requireEpicForWorktree": true,
-      "maxConcurrentWorkstreams": 3,
-      "remoteHosts": [
+      "requireEpicForWorktree": true
+    },
+    {
+      "id": "portfolio-resume",
+      "name": "Portfolio & Resume",
+      "repoPath": "C:\\Users\\wimer\\Desktop\\portfolio",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "master",
+      "productionBranch": "master",
+      "epicBranches": [
         {
-          "host": "10.0.0.89",
-          "user": "syncsonic",
-          "remotePath": "/home/syncsonic/SyncSonicPi",
-          "autoApproveReadOnlySsh": true
+          "id": "portfolio",
+          "branch": "portfolio",
+          "workstreamPrefix": "portfolio",
+          "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
+          "charter": {
+            "summary": "Keep the public portfolio site clean, current, simple, and useful as career proof for recruiters, managers, and technical peers.",
+            "bullets": [
+              "All projects should look maintained and intentional; current and classic work may appear higher but there should be no neglected archive.",
+              "Astra is the public name for Netwise; use Netwise only for internal repo/config references.",
+              "Optimize for clear project proof, tasteful polish, and authenticity over gimmicks."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Portfolio & Resume project-level context."
+              },
+              {
+                "path": "docs/maverick/epics/portfolio.md",
+                "purpose": "Portfolio website epic context and project presentation rules."
+              }
+            ]
+          }
+        },
+        {
+          "id": "resume",
+          "branch": "resume",
+          "workstreamPrefix": "resume",
+          "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
+          "charter": {
+            "summary": "Maintain official resume and cover-letter materials from a master experience inventory, with tailored outputs for software engineering job applications.",
+            "bullets": [
+              "The resume epic is a document/career-material lane, not a portfolio website coding lane.",
+              "Share career facts with the portfolio, but optimize for concise official application materials.",
+              "Tailored resumes and cover letters should select from durable inventory instead of starting from scratch."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Portfolio & Resume project-level context."
+              },
+              {
+                "path": "docs/maverick/epics/resume.md",
+                "purpose": "Resume epic context, tailoring policy, and output rules."
+              },
+              {
+                "path": "resume/MASTER_INVENTORY.md",
+                "purpose": "Durable source of career facts, accomplishments, and tailoring inputs."
+              }
+            ]
+          }
         }
       ],
+      "requireEpicForWorktree": true,
+      "maxConcurrentWorkstreams": 2,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "claudeVerification": {
+        "enabled": true,
+        "autoAfterTurn": true,
+        "model": "sonnet"
+      },
       "metadata": {
-        "description": "Raspberry Pi BLE audio hub with Expo frontend, epic-lane worktrees, and hardware validation via Pi SSH",
-        "foundation_branch": "foundation/neutral-minimal",
-        "workstream_model_doc": "docs/maverick/WORKSTREAM_MODEL.md"
+        "description": "Portfolio website and resume refresh workspace for presenting recent projects, work experience, and proof artifacts",
+        "primary_focus": "portfolio,resume",
+        "featured_projects": "maverick,netwise,syncsonic",
+        "project_naming": "For portfolio content, use Astra as the public-facing project name for the configured netwise project. Netwise, Sentry, and Astra refer to the same local project lineage; the active repo is C:\\Users\\wimer\\Desktop\\Sentry\\netwise."
       }
     },
     {
       "id": "work",
       "name": "Work",
       "repoPath": "C:\\Users\\wimer\\Desktop\\Work",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "main",
+      "productionBranch": "main",
+      "epicBranches": [
+        {
+          "id": "job-ops",
+          "branch": "job-ops",
+          "workstreamPrefix": "job-ops",
+          "description": "Operational work notes and active tasks",
+          "charter": {
+            "summary": "Capture and organize strict notes-only job operations context without connecting to employer source code, protected systems, or secrets.",
+            "bullets": [
+              "Use sanitized personal notes only.",
+              "Manager-safe summaries are allowed when they are redacted and based on stored notes.",
+              "Do not ingest employer code, protected implementation details, or secrets."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Work project context and safety boundary."
+              },
+              {
+                "path": "docs/maverick/epics/job-ops.md",
+                "purpose": "Job operations notes epic context."
+              }
+            ]
+          }
+        },
+        {
+          "id": "business-context-deep-dives",
+          "branch": "business-context-deep-dives",
+          "workstreamPrefix": "business-context-deep-dives",
+          "description": "Business context deep dives and supporting notes",
+          "charter": {
+            "summary": "Build sanitized business-context understanding from personal notes and study so work decisions are better grounded.",
+            "bullets": [
+              "Keep the lane notes-only and redacted.",
+              "Connect deep dives to smart-goal progress when useful.",
+              "Avoid employer-confidential details and protected systems."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Work project context and safety boundary."
+              },
+              {
+                "path": "docs/maverick/epics/business-context-deep-dives.md",
+                "purpose": "Business context deep-dive epic context."
+              }
+            ]
+          }
+        },
+        {
+          "id": "engineering-learning",
+          "branch": "engineering-learning",
+          "workstreamPrefix": "engineering-learning",
+          "description": "Independent engineering learning and study notes",
+          "charter": {
+            "summary": "Track independent engineering learning, reading, and study notes as durable personal development context.",
+            "bullets": [
+              "Connect learning notes to smart-goal progress when useful.",
+              "Keep study artifacts personal, organized, and reusable for future summaries.",
+              "Do not mix employer-confidential project details into learning notes."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Work project context and safety boundary."
+              },
+              {
+                "path": "docs/maverick/epics/engineering-learning.md",
+                "purpose": "Engineering learning epic context."
+              }
+            ]
+          }
+        }
+      ],
+      "requireEpicForWorktree": true,
       "maxConcurrentWorkstreams": 2,
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
       "metadata": {
         "description": "Private work-note workspace for job progress, project notes, acceptance criteria, and active learning",
         "note_workspace": "work",
@@ -233,109 +462,39 @@
     }
   ],
   "discord": {
-    "enabled": true,
     "routes": [
       {
-        "projectId": "maverick",
-        "channelId": "1490188914861019197",
-        "purpose": "workstreams"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490049872089452584",
-        "purpose": "workstreams"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490049953211482455",
-        "purpose": "workstreams"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490449866642690220",
-        "purpose": "workstreams",
-        "epicId": "router-admin-ingestion"
-      },
-      {
         "projectId": "syncsonic",
-        "channelId": "1490171093615513742",
-        "purpose": "workstreams"
+        "channelId": "1498137470699569262",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       },
       {
-        "projectId": "syncsonic",
-        "channelId": "1491257893012635648",
+        "projectId": "portfolio-resume",
+        "channelId": "1498138271493132369",
         "purpose": "workstreams",
-        "epicId": "pipewire-transport-stability"
-      },
-      {
-        "projectId": "syncsonic",
-        "channelId": "1491258451026907426",
-        "purpose": "workstreams",
-        "epicId": "startup-mic-auto-alignment"
-      },
-      {
-        "projectId": "syncsonic",
-        "channelId": "1491258814475800637",
-        "purpose": "workstreams",
-        "epicId": "runtime-ultrasonic-auto-alignment"
-      },
-      {
-        "projectId": "syncsonic",
-        "channelId": "1491259320686346260",
-        "purpose": "workstreams",
-        "epicId": "wifi-speakers-manual-alignment"
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       },
       {
         "projectId": "work",
-        "channelId": "1490549869625081896",
-        "purpose": "workstreams"
+        "channelId": "1498139409680302180",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       }
-    ],
-    "defaultNotificationChannelId": null
+    ]
   },
-  "http": {
-    "enabled": true,
-    "port": 3847,
-    "host": "127.0.0.1"
+  "brief": {
+    "storagePath": "./data/briefs"
   },
   "assistant": {
-    "enabled": true,
-    "agentProjectId": "maverick",
-    "timeZone": "America/New_York",
-    "allowedPhoneNumbers": [],
     "discord": {
-      "enabled": true,
-      "channelIds": ["1490188914861019197", "1490549869625081896"],
-      "allowedUserIds": [],
-      "replyInThread": true
-    },
-    "sms": {
-      "provider": "disabled",
-      "replyToInbound": true,
-      "requireSignatureValidation": false
-    },
-    "calendar": {
-      "provider": "google",
-      "calendarId": "primary",
-      "defaultEventDurationMinutes": 30
-    },
-    "reminders": {
-      "enabled": true,
-      "pollIntervalMs": 60000,
-      "defaultChannel": "discord",
-      "requireTimeForReminders": false
+      "channelIds": ["1490188914861019197"]
     }
   },
   "dailyBrief": {
-    "enabled": true,
-    "timeZone": "America/New_York",
-    "deliveryHour": 21,
-    "deliveryMinute": 0,
-    "pollIntervalMs": 300000,
-    "channelId": "1490188914861019197",
-    "artifactDirectory": "./data/daily-briefs",
-    "maxProjectsInDigest": 10,
-    "maxNotesInDigest": 8,
-    "maxRemindersInDigest": 5
+    "artifactDirectory": "./data/daily-briefs"
   }
 }

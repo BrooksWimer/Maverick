@@ -1,0 +1,419 @@
+{
+  "version": 1,
+  "defaults": {
+    "workflow": {
+      "name": "standard",
+      "states": ["intake", "planning", "awaiting-decisions", "implementation", "verification", "review", "done", "blocked"],
+      "initialState": "intake",
+      "terminalStates": ["done"],
+      "transitions": [
+        { "from": "intake", "to": "planning", "trigger": "scope-defined", "autoAdvance": true },
+        { "from": "intake", "to": "blocked", "trigger": "missing-info", "autoAdvance": false },
+        { "from": "blocked", "to": "intake", "trigger": "info-supplied", "autoAdvance": false },
+        { "from": "planning", "to": "awaiting-decisions", "trigger": "operator-input-required", "autoAdvance": true },
+        { "from": "awaiting-decisions", "to": "planning", "trigger": "operator-input-received", "autoAdvance": true },
+        { "from": "planning", "to": "implementation", "trigger": "plan-approved", "autoAdvance": false },
+        { "from": "implementation", "to": "verification", "trigger": "implementation-complete", "autoAdvance": true },
+        { "from": "verification", "to": "review", "trigger": "verification-passed", "autoAdvance": true },
+        { "from": "verification", "to": "implementation", "trigger": "verification-failed", "autoAdvance": true },
+        { "from": "review", "to": "done", "trigger": "review-approved", "autoAdvance": false },
+        { "from": "review", "to": "implementation", "trigger": "changes-requested", "autoAdvance": true }
+      ]
+    },
+    "executionBackend": {
+      "type": "codex-app-server",
+      "transport": "stdio",
+      "sandboxMode": "workspace-write",
+      "approvalPolicy": "on-request",
+      "persistExtendedHistory": true,
+      "experimentalRawEvents": false
+    },
+    "escalationRules": [
+      { "pattern": "rm -rf", "tier": "human-decision", "description": "Destructive filesystem operations" },
+      { "pattern": "git push --force", "tier": "human-decision", "description": "Force pushes" },
+      { "pattern": "DROP TABLE", "tier": "human-decision", "description": "Destructive database operations" },
+      { "pattern": "npm install", "tier": "approval-gated", "description": "Installing dependencies" },
+      { "pattern": "git checkout", "tier": "auto", "description": "Branch operations" },
+      { "pattern": "npm test", "tier": "auto", "description": "Running tests" }
+    ],
+    "maxConcurrentWorkstreams": 6
+  },
+  "projects": [
+    {
+      "id": "maverick",
+      "name": "Maverick",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "main",
+      "productionBranch": "main",
+      "defaultLanes": [
+        {
+          "id": "control-plane",
+          "baseBranch": "control-plane",
+          "description": "Core orchestrator, workstream lifecycle, state management, audit, routing, and execution behavior",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "discord-routing",
+          "baseBranch": "discord-routing",
+          "description": "Discord command UX, forum/thread routing, bot ownership, message formatting, buttons, and interaction flows",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "assistant-infrastructure",
+          "baseBranch": "assistant-infrastructure",
+          "description": "Code-level assistant capabilities, memory plumbing, note handling, reminders, and model routing",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "git-hygiene",
+          "baseBranch": "git-hygiene",
+          "description": "Worktree safety, branch policy, repo cleanup, bootstrap doctrine, and project git-management hardening",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "deployment-ops",
+          "baseBranch": "deployment-ops",
+          "description": "Windows/Linux bot deployment, runtime health, service restarts, CLI/runtime upgrades, and cross-host coordination",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        }
+      ],
+      "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "claudeVerification": {
+        "enabled": true,
+        "autoAfterTurn": true,
+        "model": "sonnet"
+      },
+      "metadata": {
+        "description": "Maverick self-update coding project. The global Maverick Assistant text channel is a separate assistant surface and does not create self-update branches by default."
+      }
+    },
+    {
+      "id": "netwise",
+      "name": "Astra",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "master",
+      "productionBranch": "master",
+      "epicBranches": [
+        {
+          "id": "laptop-wifi-scanner",
+          "branch": "codex/laptop-wifi-scanner-epic",
+          "workstreamPrefix": "laptop-wifi-scanner",
+          "description": "Go agent and scanner research work for laptop-based Wi-Fi discovery and labeling",
+          "charter": {
+            "summary": "Improve Astra's laptop/desktop Go scanner and labeling quality so home users can understand the devices on their own network.",
+            "bullets": [
+              "Astra is the public product name; Netwise is the internal repo/config name.",
+              "Treat scanner research as product support for ordinary home network users, not as an end in itself.",
+              "Do not claim scanner accuracy without tests, reports, or live-run evidence."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Astra/Netwise project context."
+              },
+              {
+                "path": "docs/maverick/epics/laptop-wifi-scanner.md",
+                "purpose": "Laptop scanner epic context and validation expectations."
+              },
+              {
+                "path": "agent/docs/WIFI_SCANNER_MAP.md",
+                "purpose": "Current scanner map and implementation orientation."
+              }
+            ]
+          }
+        },
+        {
+          "id": "mobile-wifi-scanner",
+          "branch": "codex/mobile-wifi-scanner-epic",
+          "workstreamPrefix": "mobile-wifi-scanner",
+          "description": "Expo and iOS Wi-Fi scanning work for the Netwise mobile client",
+          "charter": {
+            "summary": "Build and refine Astra's mobile experience while clarifying which scanner capabilities can run directly from a phone.",
+            "bullets": [
+              "Prioritize home-user clarity over scanner-internal detail in the mobile UX.",
+              "Keep iPhone-only feasibility explicit and evidence-backed.",
+              "Coordinate with laptop scanner work only when mobile depends on scanner outputs or API shape."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Astra/Netwise project context."
+              },
+              {
+                "path": "docs/maverick/epics/mobile-wifi-scanner.md",
+                "purpose": "Mobile scanner epic context and iOS feasibility notes."
+              }
+            ]
+          }
+        },
+        {
+          "id": "router-admin-ingestion",
+          "branch": "codex/router-admin-ingestion-epic",
+          "workstreamPrefix": "router-admin-ingestion",
+          "description": "Authenticated router admin ingestion and router-only inventory extraction",
+          "charter": {
+            "summary": "Router admin ingestion is a real Netwise product capability for authenticated collection of router-native network and device data so users can access their own data and receive tailored insights.",
+            "bullets": [
+              "Let users enter router admin credentials in the app, authenticate against router admin UIs, extract router-native network and device data, and turn that into free user-visible value plus tailored insights.",
+              "Use Xfinity at http://10.0.0.1 as the first live target while keeping the design adaptable to other router and network-information UIs.",
+              "Do not treat this as a one-off experiment or hardcode the solution around one vendor's markup, navigation flow, or naming.",
+              "Keep durable implementation details, discovery notes, and router-specific findings in repo-owned product docs instead of Maverick dispatch text."
+            ],
+            "docs": [
+              {
+                "path": "docs/maverick/PROJECT_CONTEXT.md",
+                "purpose": "Durable Astra/Netwise project context."
+              },
+              {
+                "path": "docs/maverick/epics/router-admin-ingestion.md",
+                "purpose": "Router-admin epic context and secure ingestion constraints."
+              },
+              {
+                "path": "agent/docs/WIFI_STRATEGY_CATALOG.md",
+                "purpose": "Related Netwise agent strategy notes and a durable repo-owned starting point for adjacent network inventory findings."
+              }
+            ]
+          }
+        }
+      ],
+      "requireEpicForWorktree": true,
+      "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "metadata": {
+        "description": "First onboarded project for orchestrator validation"
+      }
+    },
+    {
+      "id": "syncsonic",
+      "name": "SyncSonic",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "foundation/neutral-minimal",
+      "productionBranch": "foundation/neutral-minimal",
+      "epicBranches": [
+        {
+          "id": "pipewire-transport-stability",
+          "branch": "epic/01-pipewire-transport-stability",
+          "workstreamPrefix": "pipewire-stability",
+          "description": "PipeWire delay-node transport and latency-application stability work"
+        },
+        {
+          "id": "startup-mic-auto-alignment",
+          "branch": "epic/02-startup-mic-auto-alignment",
+          "workstreamPrefix": "startup-mic",
+          "description": "Startup-only audible microphone calibration for end-to-end latency measurement"
+        },
+        {
+          "id": "runtime-ultrasonic-auto-alignment",
+          "branch": "epic/03-runtime-ultrasonic-auto-alignment",
+          "workstreamPrefix": "runtime-ultrasonic",
+          "description": "Runtime ultrasonic measurement and correction while playback is active"
+        },
+        {
+          "id": "wifi-speakers-manual-alignment",
+          "branch": "epic/04-wifi-speakers-manual-alignment",
+          "workstreamPrefix": "wifi-manual",
+          "description": "Wi-Fi speaker discovery, playback, and manual alignment before automation"
+        }
+      ],
+      "requireEpicForWorktree": true,
+      "maxConcurrentWorkstreams": 3,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "remoteHosts": [
+        {
+          "host": "10.0.0.89",
+          "user": "syncsonic",
+          "remotePath": "/home/syncsonic/SyncSonicPi",
+          "autoApproveReadOnlySsh": true
+        }
+      ],
+      "metadata": {
+        "description": "Raspberry Pi BLE audio hub with Expo frontend, epic-lane worktrees, and hardware validation via Pi SSH",
+        "foundation_branch": "foundation/neutral-minimal",
+        "workstream_model_doc": "docs/maverick/WORKSTREAM_MODEL.md"
+      }
+    }
+  ],
+  "discord": {
+    "enabled": true,
+    "routes": [
+      {
+        "projectId": "maverick",
+        "channelId": "1498437201103421582",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
+      },
+      {
+        "projectId": "netwise",
+        "channelId": "1498135799475081307",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
+      },
+      {
+        "projectId": "syncsonic",
+        "channelId": "1498137470699569262",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
+      }
+    ],
+    "defaultNotificationChannelId": null
+  },
+  "http": {
+    "enabled": true,
+    "port": 3847,
+    "host": "127.0.0.1"
+  },
+  "brief": {
+    "enabled": true,
+    "discordChannelId": null,
+    "model": "sonnet"
+  },
+  "assistant": {
+    "enabled": true,
+    "agentProjectId": "maverick",
+    "timeZone": "America/New_York",
+    "allowedPhoneNumbers": [],
+    "discord": {
+      "enabled": true,
+      "channelIds": ["1490188914861019197"],
+      "allowedUserIds": [],
+      "replyInThread": true
+    },
+    "sms": {
+      "provider": "disabled",
+      "replyToInbound": true,
+      "requireSignatureValidation": false
+    },
+    "calendar": {
+      "provider": "google",
+      "calendarId": "primary",
+      "defaultEventDurationMinutes": 30
+    },
+    "reminders": {
+      "enabled": true,
+      "pollIntervalMs": 60000,
+      "defaultChannel": "discord",
+      "requireTimeForReminders": false
+    },
+    "modelRouting": {
+      "profiles": {
+        "cheap": "gpt-5.4-mini",
+        "default": "gpt-5.4",
+        "deep": "gpt-5.2"
+      },
+      "defaults": {
+        "classification": "cheap",
+        "query": "cheap",
+        "summary": "default",
+        "planning": "deep",
+        "verification": "deep",
+        "review": "deep"
+      },
+      "allowMessagePrefixes": true
+    },
+    "drive": {
+      "enabled": true,
+      "provider": "local",
+      "exportPath": "./data/life-os-drive",
+      "googleRootFolderId": null,
+      "syncOnChange": true
+    }
+  },
+  "dailyBrief": {
+    "enabled": false,
+    "timeZone": "America/New_York",
+    "deliveryHour": 21,
+    "deliveryMinute": 0,
+    "pollIntervalMs": 300000,
+    "channelId": "1490188914861019197",
+    "maxProjectsInDigest": 10,
+    "maxNotesInDigest": 8,
+    "maxRemindersInDigest": 5
+  }
+}

@@ -12,6 +12,7 @@ export type BootstrapStatus = {
   agentsMdPath: string;
   skillsPath: string;
   createdFiles: string[];
+  missingFiles: string[];
 };
 
 const DEFAULT_AGENTS_RELATIVE_PATH = "AGENTS.md";
@@ -96,7 +97,26 @@ function copyDirectoryIfMissing(sourceDir: string, destinationDir: string, creat
   }
 }
 
-function ensureBootstrapAtRoot(
+function collectMissingBootstrapFiles(sourcePath: string, destinationPath: string, missingFiles: string[]): void {
+  const stats = statSync(sourcePath);
+  if (stats.isDirectory()) {
+    if (!existsSync(destinationPath)) {
+      missingFiles.push(destinationPath);
+      return;
+    }
+
+    for (const entry of readdirSync(sourcePath)) {
+      collectMissingBootstrapFiles(resolve(sourcePath, entry), resolve(destinationPath, entry), missingFiles);
+    }
+    return;
+  }
+
+  if (!existsSync(destinationPath)) {
+    missingFiles.push(destinationPath);
+  }
+}
+
+function inspectBootstrapAtRoot(
   project: ProjectConfig,
   rootPath: string,
   scope: BootstrapScope
@@ -119,9 +139,10 @@ function ensureBootstrapAtRoot(
     DEFAULT_SKILLS_RELATIVE_PATH
   );
   const createdFiles: string[] = [];
+  const missingFiles: string[] = [];
 
-  copyFileIfMissing(resolve(templateRoot, "AGENTS.md"), agentsMdPath, createdFiles);
-  copyDirectoryIfMissing(resolve(templateRoot, ".agents", "skills"), skillsPath, createdFiles);
+  collectMissingBootstrapFiles(resolve(templateRoot, "AGENTS.md"), agentsMdPath, missingFiles);
+  collectMissingBootstrapFiles(resolve(templateRoot, ".agents", "skills"), skillsPath, missingFiles);
 
   return {
     projectId: project.id,
@@ -130,7 +151,30 @@ function ensureBootstrapAtRoot(
     agentsMdPath,
     skillsPath,
     createdFiles,
+    missingFiles,
   };
+}
+
+function ensureBootstrapAtRoot(
+  project: ProjectConfig,
+  rootPath: string,
+  scope: BootstrapScope
+): BootstrapStatus {
+  const status = inspectBootstrapAtRoot(project, rootPath, scope);
+  copyFileIfMissing(resolve(resolveTemplateRoot(), "AGENTS.md"), status.agentsMdPath, status.createdFiles);
+  copyDirectoryIfMissing(resolve(resolveTemplateRoot(), ".agents", "skills"), status.skillsPath, status.createdFiles);
+  return {
+    ...status,
+    missingFiles: status.missingFiles.filter((path) => !status.createdFiles.includes(path)),
+  };
+}
+
+export function inspectProjectBootstrap(project: ProjectConfig): BootstrapStatus {
+  return inspectBootstrapAtRoot(project, project.repoPath, "project");
+}
+
+export function inspectWorktreeBootstrap(project: ProjectConfig, worktreePath: string): BootstrapStatus {
+  return inspectBootstrapAtRoot(project, worktreePath, "worktree");
 }
 
 export function ensureProjectBootstrap(project: ProjectConfig): BootstrapStatus {
@@ -143,6 +187,9 @@ export function ensureWorktreeBootstrap(project: ProjectConfig, worktreePath: st
 
 export function bootstrapSummary(status: BootstrapStatus): string {
   if (status.createdFiles.length === 0) {
+    if (status.missingFiles.length > 0) {
+      return `Bootstrap missing ${status.missingFiles.length} file(s) in ${status.scope} root`;
+    }
     return `Bootstrap already present in ${status.scope} root`;
   }
 

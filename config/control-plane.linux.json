@@ -1,189 +1,173 @@
 {
-  "version": 1,
-  "defaults": {
-    "workflow": {
-      "name": "standard",
-      "states": ["intake", "planning", "implementation", "verification", "review", "done", "blocked"],
-      "initialState": "intake",
-      "terminalStates": ["done"],
-      "transitions": [
-        { "from": "intake", "to": "planning", "trigger": "scope-defined", "autoAdvance": true },
-        { "from": "intake", "to": "blocked", "trigger": "missing-info", "autoAdvance": false },
-        { "from": "blocked", "to": "intake", "trigger": "info-supplied", "autoAdvance": false },
-        { "from": "planning", "to": "implementation", "trigger": "plan-approved", "autoAdvance": false },
-        { "from": "implementation", "to": "verification", "trigger": "implementation-complete", "autoAdvance": true },
-        { "from": "verification", "to": "review", "trigger": "verification-passed", "autoAdvance": true },
-        { "from": "verification", "to": "implementation", "trigger": "verification-failed", "autoAdvance": true },
-        { "from": "review", "to": "done", "trigger": "review-approved", "autoAdvance": false },
-        { "from": "review", "to": "implementation", "trigger": "changes-requested", "autoAdvance": true }
-      ]
-    },
-    "executionBackend": {
-      "type": "codex-app-server",
-      "transport": "stdio",
-      "sandboxMode": "workspace-write",
-      "approvalPolicy": "on-request",
-      "persistExtendedHistory": true,
-      "experimentalRawEvents": false
-    },
-    "escalationRules": [
-      { "pattern": "rm -rf", "tier": "human-decision", "description": "Destructive filesystem operations" },
-      { "pattern": "git push --force", "tier": "human-decision", "description": "Force pushes" },
-      { "pattern": "DROP TABLE", "tier": "human-decision", "description": "Destructive database operations" },
-      { "pattern": "npm install", "tier": "approval-gated", "description": "Installing dependencies" },
-      { "pattern": "git checkout", "tier": "auto", "description": "Branch operations" },
-      { "pattern": "npm test", "tier": "auto", "description": "Running tests" }
-    ],
-    "maxConcurrentWorkstreams": 6
-  },
+  "extends": "./control-plane.shared.json",
   "projects": [
     {
       "id": "maverick",
-      "name": "Maverick",
-      "repoPath": "/srv/maverick/app",
-      "maxConcurrentWorkstreams": 3,
-      "metadata": {
-        "description": "Personal assistant and control-plane home project"
-      }
+      "repoPath": "/srv/maverick/app"
     },
     {
       "id": "netwise",
-      "name": "Netwise",
-      "repoPath": "/srv/maverick/repos/netwise",
-      "epicBranches": [
-        {
-          "id": "laptop-wifi-scanner",
-          "branch": "codex/laptop-wifi-scanner-epic",
-          "workstreamPrefix": "laptop-wifi-scanner",
-          "description": "Go agent and scanner research work for laptop-based Wi-Fi discovery and labeling"
-        },
-        {
-          "id": "mobile-wifi-scanner",
-          "branch": "codex/mobile-wifi-scanner-epic",
-          "workstreamPrefix": "mobile-wifi-scanner",
-          "description": "Expo and iOS Wi-Fi scanning work for the Netwise mobile client"
-        },
-        {
-          "id": "router-admin-ingestion",
-          "branch": "codex/router-admin-ingestion-epic",
-          "workstreamPrefix": "router-admin-ingestion",
-          "description": "Authenticated router admin ingestion and router-only inventory extraction",
-          "charter": {
-            "summary": "Router admin ingestion is a real Netwise product capability for authenticated collection of router-native network and device data so users can access their own data and receive tailored insights.",
-            "bullets": [
-              "Let users enter router admin credentials in the app, authenticate against router admin UIs, extract router-native network and device data, and turn that into free user-visible value plus tailored insights.",
-              "Use Xfinity at http://10.0.0.1 as the first live target while keeping the design adaptable to other router and network-information UIs.",
-              "Do not treat this as a one-off experiment or hardcode the solution around one vendor's markup, navigation flow, or naming.",
-              "Keep durable implementation details, discovery notes, and router-specific findings in repo-owned product docs instead of Maverick dispatch text."
-            ],
-            "docs": [
-              {
-                "path": "agent/docs/WIFI_STRATEGY_CATALOG.md",
-                "purpose": "Related Netwise agent strategy notes and a durable repo-owned starting point for adjacent network inventory findings."
-              }
-            ]
-          }
-        }
-      ],
-      "requireEpicForWorktree": true,
-      "maxConcurrentWorkstreams": 3,
-      "metadata": {
-        "description": "First onboarded project for orchestrator validation"
-      }
+      "repoPath": "/srv/maverick/repos/netwise"
     },
     {
       "id": "syncsonic",
-      "name": "SyncSonic",
-      "repoPath": "/srv/maverick/repos/syncsonic",
-      "maxConcurrentWorkstreams": 3,
-      "remoteHosts": [
+      "repoPath": "/srv/maverick/repos/syncsonic"
+    },
+    {
+      "id": "portfolio-resume",
+      "name": "Portfolio & Resume",
+      "repoPath": "/srv/maverick/repos/portfolio",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "master",
+      "productionBranch": "master",
+      "defaultLanes": [
         {
-          "host": "10.0.0.89",
-          "user": "syncsonic",
-          "remotePath": "/home/syncsonic/SyncSonicPi",
-          "autoApproveReadOnlySsh": true
+          "id": "portfolio",
+          "baseBranch": "portfolio",
+          "description": "Portfolio website content, project pages, screenshots, visual polish, project cards, and public-facing narrative",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "resume",
+          "baseBranch": "resume",
+          "description": "Resume PDF/content updates, role descriptions, accomplishments, bullets, formatting, and export-ready resume work",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
         }
       ],
+      "maxConcurrentWorkstreams": 2,
+      "claudeReview": {
+        "enabled": true,
+        "autoAfterTurn": false,
+        "model": "sonnet"
+      },
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "claudeVerification": {
+        "enabled": true,
+        "autoAfterTurn": true,
+        "model": "sonnet"
+      },
       "metadata": {
-        "description": "Raspberry Pi BLE audio hub with Expo frontend and hardware validation via Pi SSH"
+        "description": "Portfolio website and resume refresh workspace for presenting recent projects, work experience, and proof artifacts",
+        "primary_focus": "portfolio,resume",
+        "featured_projects": "maverick,netwise,syncsonic",
+        "project_naming": "For portfolio content, use Astra as the public-facing project name for the configured netwise project. Netwise, Sentry, and Astra refer to the same local project lineage; the active repo is /srv/maverick/repos/netwise."
+      }
+    },
+    {
+      "id": "work",
+      "name": "Work",
+      "repoPath": "/srv/maverick/repos/work",
+      "workspaceKind": "git",
+      "defaultWorktreeBaseBranch": "main",
+      "productionBranch": "main",
+      "defaultLanes": [
+        {
+          "id": "job-ops",
+          "baseBranch": "job-ops",
+          "description": "Operational work notes and active tasks",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "business-context-deep-dives",
+          "baseBranch": "business-context-deep-dives",
+          "description": "Business context deep dives and supporting notes",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        },
+        {
+          "id": "engineering-learning",
+          "baseBranch": "engineering-learning",
+          "description": "Independent engineering learning and study notes",
+          "assistantEnabled": true,
+          "ownerInstanceId": "linux"
+        }
+      ],
+      "maxConcurrentWorkstreams": 2,
+      "claudePlanning": {
+        "enabled": true,
+        "autoOnPlanningState": false,
+        "model": "sonnet",
+        "routing": {
+          "profiles": {
+            "cheap": "haiku",
+            "default": "sonnet",
+            "deep": "sonnet"
+          },
+          "agents": {
+            "intake": "cheap",
+            "goalFraming": "cheap",
+            "modeling": "default",
+            "testDesign": "cheap",
+            "planning": "deep",
+            "operatorFeedback": "cheap",
+            "responseFormatting": "cheap",
+            "epicContext": "default"
+          }
+        }
+      },
+      "metadata": {
+        "description": "Private work-note workspace for job progress, project notes, acceptance criteria, and active learning",
+        "note_workspace": "work",
+        "work_smart_goal_business_title": "Business Context Deep Dives",
+        "work_smart_goal_business_description": "Do a deep dive into facets of the business that come up through work to build stronger business understanding.",
+        "work_smart_goal_learning_title": "Independent Engineering Learning",
+        "work_smart_goal_learning_description": "Do independent software engineering reading, make notes on it, and keep track of active learning."
       }
     }
   ],
   "discord": {
-    "enabled": true,
     "routes": [
       {
         "projectId": "maverick",
-        "channelId": "1490188914861019197",
-        "purpose": "workstreams"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490049872089452584",
-        "purpose": "workstreams"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490049953211482455",
-        "purpose": "workstreams"
-      },
-      {
-        "projectId": "netwise",
-        "channelId": "1490449866642690220",
+        "channelId": "1498437201103421582",
         "purpose": "workstreams",
-        "epicId": "router-admin-ingestion"
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       },
       {
-        "projectId": "syncsonic",
-        "channelId": "1490171093615513742",
-        "purpose": "workstreams"
+        "projectId": "portfolio-resume",
+        "channelId": "1498138271493132369",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
+      },
+      {
+        "projectId": "work",
+        "channelId": "1498139409680302180",
+        "purpose": "workstreams",
+        "assistantEnabled": true,
+        "ownerInstanceId": "linux"
       }
-    ],
-    "defaultNotificationChannelId": null
+    ]
   },
-  "http": {
-    "enabled": true,
-    "port": 3847,
-    "host": "127.0.0.1"
-  },
-  "assistant": {
-    "enabled": true,
-    "agentProjectId": "maverick",
-    "timeZone": "America/New_York",
-    "allowedPhoneNumbers": [],
-    "discord": {
-      "enabled": true,
-      "channelIds": ["1490188914861019197"],
-      "allowedUserIds": [],
-      "replyInThread": true
-    },
-    "sms": {
-      "provider": "disabled",
-      "replyToInbound": true,
-      "requireSignatureValidation": false
-    },
-    "calendar": {
-      "provider": "google",
-      "calendarId": "primary",
-      "defaultEventDurationMinutes": 30
-    },
-    "reminders": {
-      "enabled": true,
-      "pollIntervalMs": 60000,
-      "defaultChannel": "discord",
-      "requireTimeForReminders": false
-    }
+  "brief": {
+    "storagePath": "/var/lib/maverick/briefs"
   },
   "dailyBrief": {
-    "enabled": true,
-    "timeZone": "America/New_York",
-    "deliveryHour": 21,
-    "deliveryMinute": 0,
-    "pollIntervalMs": 300000,
-    "channelId": "1490188914861019197",
-    "artifactDirectory": "/var/lib/maverick/daily-briefs",
-    "maxProjectsInDigest": 10,
-    "maxNotesInDigest": 8,
-    "maxRemindersInDigest": 5
+    "artifactDirectory": "/var/lib/maverick/daily-briefs"
   }
 }

@@ -26,13 +26,15 @@ export const WorkflowSchema = z.object({
 // Default workflow matching the research report's state machine
 export const DEFAULT_WORKFLOW: z.infer<typeof WorkflowSchema> = {
   name: "standard",
-  states: ["intake", "planning", "implementation", "verification", "review", "done", "blocked"],
+  states: ["intake", "planning", "awaiting-decisions", "implementation", "verification", "review", "done", "blocked"],
   initialState: "intake",
   terminalStates: ["done"],
   transitions: [
     { from: "intake", to: "planning", trigger: "scope-defined", autoAdvance: true },
     { from: "intake", to: "blocked", trigger: "missing-info", autoAdvance: false },
     { from: "blocked", to: "intake", trigger: "info-supplied", autoAdvance: false },
+    { from: "planning", to: "awaiting-decisions", trigger: "operator-input-required", autoAdvance: true },
+    { from: "awaiting-decisions", to: "planning", trigger: "operator-input-received", autoAdvance: true },
     { from: "planning", to: "implementation", trigger: "plan-approved", autoAdvance: false },
     { from: "implementation", to: "verification", trigger: "implementation-complete", autoAdvance: true },
     { from: "verification", to: "review", trigger: "verification-passed", autoAdvance: true },
@@ -71,6 +73,13 @@ export const ExecutionBackendSchema = z.discriminatedUnion("type", [
     type: z.literal("codex-cli"),
     model: z.string().default("gpt-5.4"),
     approvalMode: z.enum(["auto-edit", "full-auto", "suggest"]).default("auto-edit"),
+  }),
+  z.object({
+    type: z.literal("claude-code"),
+    model: z.string().default("sonnet"),
+    claudePath: z.string().optional(),
+    permissionMode: z.enum(["plan", "auto", "default"]).default("plan"),
+    maxTurns: z.number().int().min(1).max(50).default(10),
   }),
   z.object({
     type: z.literal("mock"),
@@ -116,10 +125,60 @@ export const EpicBranchSchema = z.object({
   ),
 });
 
+export const WorkspaceKindSchema = z.enum(["git", "notes"]);
+
+export const DefaultLaneSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/).describe("Stable lane identifier, e.g. 'portfolio-resume'"),
+  baseBranch: z.string().min(1).describe("Durable base branch used for workstreams in this lane"),
+  description: z.string().optional().describe("Human-readable description of the lane"),
+  assistantEnabled: z.boolean().default(true).describe("Whether the ambient assistant should answer in this lane"),
+  ownerInstanceId: z.string().min(1).optional().describe(
+    "Optional Maverick runtime instance id that owns ambient assistant replies for this lane"
+  ),
+});
+
+export const PlanningModelProfileNameSchema = z.enum(["cheap", "default", "deep"]);
+
+export const PlanningAgentRoutingSchema = z.object({
+  intake: PlanningModelProfileNameSchema.default("cheap"),
+  goalFraming: PlanningModelProfileNameSchema.default("cheap"),
+  modeling: PlanningModelProfileNameSchema.default("default"),
+  testDesign: PlanningModelProfileNameSchema.default("cheap"),
+  planning: PlanningModelProfileNameSchema.default("deep"),
+  operatorFeedback: PlanningModelProfileNameSchema.default("cheap"),
+  responseFormatting: PlanningModelProfileNameSchema.default("cheap"),
+  epicContext: PlanningModelProfileNameSchema.default("default"),
+}).default({
+  intake: "cheap",
+  goalFraming: "cheap",
+  modeling: "default",
+  testDesign: "cheap",
+  planning: "deep",
+  operatorFeedback: "cheap",
+  responseFormatting: "cheap",
+  epicContext: "default",
+});
+
+export const PlanningModelRoutingConfigSchema = z.object({
+  profiles: z.object({
+    cheap: z.string().default("haiku"),
+    default: z.string().default("sonnet"),
+    deep: z.string().default("sonnet"),
+  }).default({
+    cheap: "haiku",
+    default: "sonnet",
+    deep: "sonnet",
+  }),
+  agents: PlanningAgentRoutingSchema,
+});
+
 export const ProjectSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   name: z.string(),
   repoPath: z.string().describe("Absolute path to the project repo root"),
+  workspaceKind: WorkspaceKindSchema.default("git").describe(
+    "Whether this project uses git worktrees for implementation or acts as a notes-only workspace"
+  ),
   workflow: WorkflowSchema.optional().describe("Override the default workflow for this project"),
   executionBackend: ExecutionBackendSchema.optional().describe("Override the default execution backend"),
   escalationRules: z.array(EscalationRuleSchema).optional(),
@@ -129,13 +188,41 @@ export const ProjectSchema = z.object({
   defaultWorktreeBaseBranch: z.string().optional().describe(
     "Default git ref for new Maverick worktrees when no epic branch is explicitly selected"
   ),
+  productionBranch: z.string().min(1).optional().describe(
+    "Stable production branch that explicit lane promotion pushes to"
+  ),
+  autoFinishAfterVerification: z.boolean().default(true).describe(
+    "Whether a passing auto-verification should finish the workstream into its durable lane branch"
+  ),
+  promoteRequiresExplicitCommand: z.boolean().default(true).describe(
+    "Whether production promotion must be invoked explicitly instead of happening during verification"
+  ),
   epicBranches: z.array(EpicBranchSchema).default([]).describe(
     "Long-lived epic branches that Maverick workstreams should merge back into"
+  ),
+  defaultLanes: z.array(DefaultLaneSchema).default([]).describe(
+    "Named non-epic routing lanes that map Discord threads to durable base branches"
   ),
   requireEpicForWorktree: z.boolean().default(false).describe(
     "When true, Maverick must resolve an epic branch via route or explicit selection before creating a worktree"
   ),
   maxConcurrentWorkstreams: z.number().min(1).max(20).default(3),
+  claudeReview: z.object({
+    enabled: z.boolean().default(false),
+    autoAfterTurn: z.boolean().default(false),
+    model: z.string().optional(),
+  }).optional(),
+  claudeVerification: z.object({
+    enabled: z.boolean().default(false),
+    autoAfterTurn: z.boolean().default(false),
+    model: z.string().optional(),
+  }).optional(),
+  claudePlanning: z.object({
+    enabled: z.boolean().default(false),
+    autoOnPlanningState: z.boolean().default(false),
+    model: z.string().optional(),
+    routing: PlanningModelRoutingConfigSchema.optional(),
+  }).optional(),
   metadata: z.record(z.string()).optional().describe("Arbitrary key-value pairs for project-specific config"),
 });
 
@@ -147,6 +234,18 @@ export const DiscordRouteSchema = z.object({
   purpose: z.enum(["workstreams", "notifications", "approvals", "logs"]).default("workstreams"),
   epicId: z.string().regex(/^[a-z0-9-]+$/).optional().describe(
     "Optional epic id that new workstreams in this route should branch from"
+  ),
+  lane: z.string().regex(/^[a-z0-9-]+$/).optional().describe(
+    "Optional default lane id that thread conversations under this route should resolve to"
+  ),
+  baseBranch: z.string().min(1).optional().describe(
+    "Optional default durable base branch for this route when it is not using an epic"
+  ),
+  assistantEnabled: z.boolean().default(false).describe(
+    "Whether ambient assistant chat is enabled for bound threads under this route"
+  ),
+  ownerInstanceId: z.string().min(1).optional().describe(
+    "Optional Maverick runtime instance id that owns ambient assistant replies for this route"
   ),
 });
 
@@ -179,6 +278,44 @@ export const AssistantReminderConfigSchema = z.object({
   requireTimeForReminders: z.boolean().default(false),
 });
 
+export const AssistantModelProfileNameSchema = z.enum(["cheap", "default", "deep"]);
+
+export const AssistantModelRoutingConfigSchema = z.object({
+  profiles: z.object({
+    cheap: z.string().default("gpt-5.4-mini"),
+    default: z.string().default("gpt-5.4"),
+    deep: z.string().default("gpt-5.2"),
+  }).default({
+    cheap: "gpt-5.4-mini",
+    default: "gpt-5.4",
+    deep: "gpt-5.2",
+  }),
+  defaults: z.object({
+    classification: AssistantModelProfileNameSchema.default("cheap"),
+    query: AssistantModelProfileNameSchema.default("cheap"),
+    summary: AssistantModelProfileNameSchema.default("default"),
+    planning: AssistantModelProfileNameSchema.default("deep"),
+    verification: AssistantModelProfileNameSchema.default("deep"),
+    review: AssistantModelProfileNameSchema.default("deep"),
+  }).default({
+    classification: "cheap",
+    query: "cheap",
+    summary: "default",
+    planning: "deep",
+    verification: "deep",
+    review: "deep",
+  }),
+  allowMessagePrefixes: z.boolean().default(true),
+});
+
+export const AssistantDriveConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: z.enum(["disabled", "local", "google"]).default("disabled"),
+  exportPath: z.string().default("./data/life-os-drive"),
+  googleRootFolderId: z.string().nullable().optional(),
+  syncOnChange: z.boolean().default(true),
+});
+
 export const AssistantConfigSchema = z.object({
   enabled: z.boolean().default(false),
   agentProjectId: z.string().default("maverick"),
@@ -205,6 +342,29 @@ export const AssistantConfigSchema = z.object({
     pollIntervalMs: 60_000,
     defaultChannel: "sms",
     requireTimeForReminders: false,
+  }),
+  modelRouting: AssistantModelRoutingConfigSchema.default({
+    profiles: {
+      cheap: "gpt-5.4-mini",
+      default: "gpt-5.4",
+      deep: "gpt-5.2",
+    },
+    defaults: {
+      classification: "cheap",
+      query: "cheap",
+      summary: "default",
+      planning: "deep",
+      verification: "deep",
+      review: "deep",
+    },
+    allowMessagePrefixes: true,
+  }),
+  drive: AssistantDriveConfigSchema.default({
+    enabled: false,
+    provider: "disabled",
+    exportPath: "./data/life-os-drive",
+    googleRootFolderId: null,
+    syncOnChange: true,
   }),
 });
 
@@ -235,6 +395,14 @@ export const DailyBriefConfigSchema = z.object({
   maxRemindersInDigest: z.number().int().min(0).max(20).default(5).describe(
     "Maximum scheduled reminders to include in the generated report"
   ),
+});
+
+export const BriefConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  schedule: z.string().optional().describe("Five-field cron expression interpreted in the assistant time zone"),
+  discordChannelId: z.string().nullable().optional(),
+  storagePath: z.string().default("./data/briefs"),
+  model: z.string().optional(),
 });
 
 // --- Top-level config ---
@@ -303,6 +471,29 @@ export const OrchestratorConfigSchema = z.object({
       defaultChannel: "sms",
       requireTimeForReminders: false,
     },
+    modelRouting: {
+      profiles: {
+        cheap: "gpt-5.4-mini",
+        default: "gpt-5.4",
+        deep: "gpt-5.2",
+      },
+      defaults: {
+        classification: "cheap",
+        query: "cheap",
+        summary: "default",
+        planning: "deep",
+        verification: "deep",
+        review: "deep",
+      },
+      allowMessagePrefixes: true,
+    },
+    drive: {
+      enabled: false,
+      provider: "disabled",
+      exportPath: "./data/life-os-drive",
+      googleRootFolderId: null,
+      syncOnChange: true,
+    },
   }),
 
   dailyBrief: DailyBriefConfigSchema.default({
@@ -315,6 +506,12 @@ export const OrchestratorConfigSchema = z.object({
     maxNotesInDigest: 8,
     maxRemindersInDigest: 5,
   }),
+
+  brief: BriefConfigSchema.default({
+    enabled: false,
+    discordChannelId: null,
+    storagePath: "./data/briefs",
+  }),
 });
 
 // Type exports
@@ -324,6 +521,8 @@ export type RemoteHostConfig = z.infer<typeof RemoteHostSchema>;
 export type EpicCharterConfig = z.infer<typeof EpicCharterSchema>;
 export type EpicCharterDocConfig = z.infer<typeof EpicCharterDocSchema>;
 export type EpicBranchConfig = z.infer<typeof EpicBranchSchema>;
+export type DefaultLaneConfig = z.infer<typeof DefaultLaneSchema>;
+export type WorkspaceKind = z.infer<typeof WorkspaceKindSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowSchema>;
 export type StateTransition = z.infer<typeof StateTransitionSchema>;
 export type EscalationRule = z.infer<typeof EscalationRuleSchema>;
@@ -335,4 +534,11 @@ export type AssistantDiscordConfig = z.infer<typeof AssistantDiscordConfigSchema
 export type AssistantSmsConfig = z.infer<typeof AssistantSmsConfigSchema>;
 export type AssistantCalendarConfig = z.infer<typeof AssistantCalendarConfigSchema>;
 export type AssistantReminderConfig = z.infer<typeof AssistantReminderConfigSchema>;
+export type AssistantModelProfileName = z.infer<typeof AssistantModelProfileNameSchema>;
+export type AssistantModelRoutingConfig = z.infer<typeof AssistantModelRoutingConfigSchema>;
+export type PlanningModelProfileName = z.infer<typeof PlanningModelProfileNameSchema>;
+export type PlanningAgentRoutingConfig = z.infer<typeof PlanningAgentRoutingSchema>;
+export type PlanningModelRoutingConfig = z.infer<typeof PlanningModelRoutingConfigSchema>;
+export type AssistantDriveConfig = z.infer<typeof AssistantDriveConfigSchema>;
 export type DailyBriefConfig = z.infer<typeof DailyBriefConfigSchema>;
+export type BriefConfig = z.infer<typeof BriefConfigSchema>;

@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLogger } from "../logger.js";
+import { configureStateBackendFromEnv } from "./backend.js";
 
 const log = createLogger("database");
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -58,7 +59,14 @@ export function getDatabase(): SqliteDatabase {
   return db;
 }
 
-export function initDatabase(dbPath?: string): SqliteDatabase {
+export function initDatabase(dbPath?: string): SqliteDatabase | null {
+  const backend = configureStateBackendFromEnv();
+  if (backend === "remote") {
+    log.info({ url: process.env.MAVERICK_STATE_URL }, "Using remote Maverick state backend");
+    db = null;
+    return null;
+  }
+
   const resolvedPath = dbPath ?? process.env.DATABASE_PATH ?? "./data/orchestrator.db";
 
   // Ensure parent directory exists
@@ -76,6 +84,51 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
   const schema = readFileSync(schemaPath, "utf-8");
   db.exec(schema);
   ensureColumn(db, "workstreams", "epic_id", "ALTER TABLE workstreams ADD COLUMN epic_id TEXT");
+  ensureColumn(db, "workstreams", "base_branch", "ALTER TABLE workstreams ADD COLUMN base_branch TEXT");
+  ensureColumn(
+    db,
+    "workstreams",
+    "discord_parent_channel_id",
+    "ALTER TABLE workstreams ADD COLUMN discord_parent_channel_id TEXT"
+  );
+  ensureColumn(
+    db,
+    "workstreams",
+    "workspace_mode",
+    "ALTER TABLE workstreams ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'legacy-root'"
+  );
+  ensureColumn(db, "workstreams", "plan", "ALTER TABLE workstreams ADD COLUMN plan TEXT");
+  ensureColumn(
+    db,
+    "workstreams",
+    "planning_context_json",
+    "ALTER TABLE workstreams ADD COLUMN planning_context_json TEXT"
+  );
+  ensureColumn(
+    db,
+    "workstreams",
+    "verification_context_json",
+    "ALTER TABLE workstreams ADD COLUMN verification_context_json TEXT"
+  );
+  ensureColumn(db, "turns", "last_progress_at", "ALTER TABLE turns ADD COLUMN last_progress_at TEXT");
+  ensureColumn(
+    db,
+    "assistant_messages",
+    "project_id",
+    "ALTER TABLE assistant_messages ADD COLUMN project_id TEXT"
+  );
+  ensureColumn(
+    db,
+    "assistant_messages",
+    "lane_id",
+    "ALTER TABLE assistant_messages ADD COLUMN lane_id TEXT"
+  );
+  ensureColumn(
+    db,
+    "assistant_messages",
+    "thread_id",
+    "ALTER TABLE assistant_messages ADD COLUMN thread_id TEXT"
+  );
   ensureColumn(
     db,
     "assistant_notes",
@@ -106,6 +159,17 @@ export function initDatabase(dbPath?: string): SqliteDatabase {
     db,
     "idx_assistant_notes_project_name",
     "CREATE INDEX IF NOT EXISTS idx_assistant_notes_project_name ON assistant_notes(project_name)"
+  );
+  ensureColumn(
+    db,
+    "assistant_calendar_events",
+    "recurrence_rule",
+    "ALTER TABLE assistant_calendar_events ADD COLUMN recurrence_rule TEXT"
+  );
+  ensureIndex(
+    db,
+    "idx_turns_one_running_per_workstream",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_one_running_per_workstream ON turns(workstream_id) WHERE status = 'running'"
   );
 
   log.info({ schemaPath }, "Database schema applied");

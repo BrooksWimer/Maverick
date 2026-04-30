@@ -18,22 +18,38 @@ type AgentEnvelope = {
   note?: {
     title?: string;
     content?: string;
-    context?: "general" | "work";
+    context?: "work" | "personal" | "home" | "errands" | "health" | "planning";
     noteKind?: "general" | "project" | "study" | "acceptance-criteria";
     projectName?: string | null;
     smartGoalIds?: string[];
   } | null;
+  task?: {
+    title?: string;
+    details?: string;
+    primaryContext?: "work" | "personal" | "home" | "errands" | "health" | "planning";
+    status?: "inbox" | "open" | "scheduled";
+    dueAtIso?: string | null;
+    scheduledForIso?: string | null;
+  } | null;
   reminder?: {
     body?: string;
     remindAtIso?: string;
+    primaryContext?: "work" | "personal" | "home" | "errands" | "health" | "planning";
   } | null;
   calendar?: {
     title?: string;
     startsAtIso?: string;
     endsAtIso?: string | null;
     isAllDay?: boolean;
+    recurrenceRule?: string | null;
     details?: string | null;
     location?: string | null;
+    primaryContext?: "work" | "personal" | "home" | "errands" | "health" | "planning";
+  } | null;
+  query?: {
+    queryType?: "agenda" | "inbox" | "search";
+    query?: string;
+    primaryContext?: "work" | "personal" | "home" | "errands" | "health" | "planning" | null;
   } | null;
   clarification?: {
     message?: string;
@@ -58,6 +74,7 @@ export class CodexAssistantInterpreter implements AssistantInterpreter {
     now: Date;
     timeZone: string;
     attachments?: AssistantAttachment[];
+    model?: string;
   }): Promise<ParsedAssistantIntent | null> {
     const thread = await this.ensureThread();
     const prompt = buildInterpretationPrompt(
@@ -72,6 +89,7 @@ export class CodexAssistantInterpreter implements AssistantInterpreter {
       cwd: this.project.repoPath,
       instruction: prompt,
       inputItems: buildInterpreterInputItems(prompt, input.attachments ?? []),
+      model: input.model,
     });
 
     if (result.status !== "completed") {
@@ -125,11 +143,11 @@ function buildInterpretationPrompt(
   const workNoteGuidance = workNotes
     ? [
         "For notes, distinguish between generic notes and work notes.",
-        'If a note is work-related, return "context":"work" and classify it into one of:',
-        '- "general": a general work-progress or job note',
-        '- "project": a note tied to a named project or ticket',
-        '- "study": reading, study, or active learning for work',
-        '- "acceptance-criteria": screenshots or notes about ticket requirements or acceptance criteria',
+        "If a note is work-related, return \"context\":\"work\" and classify it into one of:",
+        "- \"general\": a general work-progress or job note",
+        "- \"project\": a note tied to a named project or ticket",
+        "- \"study\": reading, study, or active learning for work",
+        "- \"acceptance-criteria\": screenshots or notes about ticket requirements or acceptance criteria",
         "When a work note clearly belongs to a named project or ticket, set projectName.",
         "When a work note supports one of these smart goals, include the matching ids in smartGoalIds:",
         ...workNotes.smartGoals.map((goal) => `- ${goal.id}: ${goal.description}`),
@@ -138,26 +156,32 @@ function buildInterpretationPrompt(
 
   return [
     "You are Maverick's personal assistant interpreter.",
-    "Your job is to understand the user's message and return one JSON object only.",
+    "Understand the user's message and return one JSON object only.",
     "Do not use tools. Do not inspect files. Do not ask for permission. Do not wrap the JSON in markdown fences.",
     `Current time: ${now.toISOString()}`,
     `User timezone: ${timeZone}`,
     "Supported intents:",
     '- "note": save a note or memory',
+    '- "task": create a task with one primary context and a status of inbox, open, or scheduled',
     '- "reminder": schedule a reminder at a specific future ISO timestamp',
-    '- "calendar": create a calendar item with ISO timestamps',
+    '- "calendar": create a calendar item with ISO timestamps and an optional Google-style RRULE recurrenceRule when the user asks for a repeating event',
+    '- "query": one of agenda, inbox, or search',
     '- "clarification": ask a concise question if required information is missing',
+    "Primary contexts: work, personal, home, errands, health, planning.",
+    "Only use the query intent when the user is clearly asking Maverick to show agenda/inbox/search information, not when they are capturing something.",
     ...workNoteGuidance,
-    "Interpret natural language flexibly, including phrases like 'in 15 minutes', 'later tonight', 'next Monday at 9', and casual wording.",
+    "Interpret natural language flexibly, including casual wording and implied tasks.",
     "Return shape:",
-    '{' +
-      '"intent":"note|reminder|calendar|clarification",' +
-      '"confidence":0.0,' +
-      '"note":{"title":"...","content":"...","context":"general|work","noteKind":"general|project|study|acceptance-criteria","projectName":"...","smartGoalIds":["..."]}|null,' +
-      '"reminder":{"body":"...","remindAtIso":"..."}|null,' +
-      '"calendar":{"title":"...","startsAtIso":"...","endsAtIso":"...","isAllDay":false,"details":"...","location":null}|null,' +
-      '"clarification":{"message":"..."}|null' +
-    '}',
+    "{" +
+      "\"intent\":\"note|task|reminder|calendar|query|clarification\"," +
+      "\"confidence\":0.0," +
+      "\"note\":{\"title\":\"...\",\"content\":\"...\",\"context\":\"work|personal|home|errands|health|planning\",\"noteKind\":\"general|project|study|acceptance-criteria\",\"projectName\":\"...\",\"smartGoalIds\":[\"...\"]}|null," +
+      "\"task\":{\"title\":\"...\",\"details\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\",\"status\":\"inbox|open|scheduled\",\"dueAtIso\":\"...\",\"scheduledForIso\":\"...\"}|null," +
+      "\"reminder\":{\"body\":\"...\",\"remindAtIso\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
+      "\"calendar\":{\"title\":\"...\",\"startsAtIso\":\"...\",\"endsAtIso\":\"...\",\"isAllDay\":false,\"recurrenceRule\":\"RRULE:FREQ=DAILY|RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR|RRULE:FREQ=WEEKLY;BYDAY=MO,...\",\"details\":\"...\",\"location\":null,\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
+      "\"query\":{\"queryType\":\"agenda|inbox|search\",\"query\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
+      "\"clarification\":{\"message\":\"...\"}|null" +
+    "}",
     ...attachmentSummaries,
     `User message: ${text}`,
   ].join("\n");
@@ -219,12 +243,26 @@ function toParsedIntent(envelope: AgentEnvelope): ParsedAssistantIntent | null {
         title: envelope.note.title?.trim() || envelope.note.content.trim().slice(0, 72),
         content: envelope.note.content.trim(),
         confidence,
-        context: envelope.note.context === "work" ? "work" : "general",
+        context: normalizeContext(envelope.note.context),
         noteKind: envelope.note.noteKind,
         projectName: envelope.note.projectName ?? null,
         smartGoalIds: Array.isArray(envelope.note.smartGoalIds)
           ? envelope.note.smartGoalIds.filter((value): value is string => typeof value === "string")
           : [],
+      };
+    case "task":
+      if (!envelope.task?.details) {
+        return null;
+      }
+      return {
+        kind: "task",
+        title: envelope.task.title?.trim() || envelope.task.details.trim().slice(0, 72),
+        details: envelope.task.details.trim(),
+        primaryContext: normalizeContext(envelope.task.primaryContext),
+        status: normalizeTaskStatus(envelope.task.status),
+        dueAt: envelope.task.dueAtIso ?? null,
+        scheduledFor: envelope.task.scheduledForIso ?? null,
+        confidence,
       };
     case "reminder":
       if (!envelope.reminder?.body || !envelope.reminder?.remindAtIso) {
@@ -236,6 +274,7 @@ function toParsedIntent(envelope: AgentEnvelope): ParsedAssistantIntent | null {
         remindAt: envelope.reminder.remindAtIso,
         parsedFrom: "agent",
         confidence,
+        primaryContext: normalizeContext(envelope.reminder.primaryContext),
       };
     case "calendar":
       if (!envelope.calendar?.title || !envelope.calendar?.startsAtIso) {
@@ -247,9 +286,22 @@ function toParsedIntent(envelope: AgentEnvelope): ParsedAssistantIntent | null {
         startsAt: envelope.calendar.startsAtIso,
         endsAt: envelope.calendar.endsAtIso ?? null,
         isAllDay: Boolean(envelope.calendar.isAllDay),
+        recurrenceRule: envelope.calendar.recurrenceRule ?? null,
         parsedFrom: "agent",
         details: envelope.calendar.details ?? null,
         location: envelope.calendar.location ?? null,
+        confidence,
+        primaryContext: normalizeContext(envelope.calendar.primaryContext),
+      };
+    case "query":
+      if (!envelope.query?.queryType) {
+        return null;
+      }
+      return {
+        kind: "query",
+        queryType: envelope.query.queryType,
+        query: envelope.query.query?.trim() || envelope.query.queryType,
+        primaryContext: envelope.query.primaryContext ? normalizeContext(envelope.query.primaryContext) : null,
         confidence,
       };
     case "clarification":
@@ -262,5 +314,32 @@ function toParsedIntent(envelope: AgentEnvelope): ParsedAssistantIntent | null {
       };
     default:
       return null;
+  }
+}
+
+function normalizeContext(
+  context: AgentEnvelope["note"] extends { context?: infer T } ? T : string | undefined
+) {
+  switch (context) {
+    case "work":
+    case "home":
+    case "errands":
+    case "health":
+    case "planning":
+      return context;
+    case "personal":
+    default:
+      return "personal";
+  }
+}
+
+function normalizeTaskStatus(value: string | undefined): "inbox" | "open" | "scheduled" {
+  switch (value) {
+    case "open":
+    case "scheduled":
+      return value;
+    case "inbox":
+    default:
+      return "inbox";
   }
 }

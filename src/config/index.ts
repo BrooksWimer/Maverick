@@ -1,4 +1,5 @@
 export { loadConfig } from "./loader.js";
+export { normalizeEpicFirstConfig } from "./epic-first.js";
 export {
   OrchestratorConfigSchema,
   ProjectSchema,
@@ -10,6 +11,8 @@ export {
   type EpicCharterConfig,
   type EpicCharterDocConfig,
   type EpicBranchConfig,
+  type DefaultLaneConfig,
+  type WorkspaceKind,
   type WorkflowConfig,
   type StateTransition,
   type EscalationRule,
@@ -21,6 +24,14 @@ export {
   type AssistantSmsConfig,
   type AssistantCalendarConfig,
   type AssistantReminderConfig,
+  type AssistantModelProfileName,
+  type AssistantModelRoutingConfig,
+  type PlanningModelProfileName,
+  type PlanningAgentRoutingConfig,
+  type PlanningModelRoutingConfig,
+  type AssistantDriveConfig,
   type DailyBriefConfig,
   DailyBriefConfigSchema,
+  type BriefConfig,
+  BriefConfigSchema,
 } from "./schema.js";

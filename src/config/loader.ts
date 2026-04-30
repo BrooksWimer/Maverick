@@ -2,8 +2,9 @@
  * Config loader: reads control-plane.json, validates with Zod, merges env overrides.
  */
 import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { OrchestratorConfigSchema, type OrchestratorConfig } from "./schema.js";
+import { normalizeEpicFirstConfig } from "./epic-first.js";
 import { createLogger } from "../logger.js";
 import { isEpicDocPathWithinProject, resolveEpicDocPath } from "../projects/epics.js";
 
@@ -18,14 +19,7 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
   const resolvedPath = resolveConfigPath(configPath);
   log.info({ path: resolvedPath }, "Loading configuration");
 
-  const raw = readFileSync(resolvedPath, "utf-8");
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Invalid JSON in config file ${resolvedPath}: ${err}`);
-  }
+  const parsed = loadConfigWithExtends(resolvedPath, new Set<string>());
 
   const result = OrchestratorConfigSchema.safeParse(parsed);
   if (!result.success) {
@@ -33,7 +27,7 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     throw new Error(`Config validation failed:\n${issues}`);
   }
 
-  const config = result.data;
+  const config = normalizeEpicFirstConfig(result.data);
 
   const projectById = new Map(config.projects.map((project) => [project.id, project]));
 
@@ -70,6 +64,17 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     if (project.requireEpicForWorktree && project.epicBranches.length === 0) {
       throw new Error(`Project "${project.id}" requires epic selection but defines no epicBranches`);
     }
+
+    if (
+      project.workspaceKind === "git" &&
+      !project.requireEpicForWorktree &&
+      !project.defaultWorktreeBaseBranch &&
+      project.epicBranches.length === 0
+    ) {
+      throw new Error(
+        `Project "${project.id}" must define defaultWorktreeBaseBranch or at least one epic when workspaceKind is "git".`
+      );
+    }
   }
 
   // Validate discord route references
@@ -82,6 +87,12 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     if (route.epicId && !project.epicBranches.some((epic) => epic.id === route.epicId)) {
       throw new Error(
         `Discord route ${route.channelId} references unknown epic "${route.epicId}" for project "${route.projectId}"`
+      );
+    }
+
+    if (route.lane && !project.epicBranches.some((epic) => epic.id === route.lane)) {
+      throw new Error(
+        `Discord route ${route.channelId} references unknown epic/lane "${route.lane}" for project "${route.projectId}"`
       );
     }
   }
@@ -122,4 +133,188 @@ function resolveConfigPath(explicit?: string): string {
     `No config file found. Searched: ${DEFAULT_CONFIG_PATHS.join(", ")}. ` +
     `Create config/control-plane.json or pass --config <path>.`
   );
+}
+
+function loadConfigWithExtends(configPath: string, seenPaths: Set<string>): unknown {
+  const resolvedPath = resolve(configPath);
+  if (seenPaths.has(resolvedPath)) {
+    throw new Error(`Config inheritance cycle detected at ${resolvedPath}`);
+  }
+
+  seenPaths.add(resolvedPath);
+
+  try {
+    const parsed = parseConfigFile(resolvedPath);
+    if (!isJsonObject(parsed)) {
+      throw new Error(`Config file ${resolvedPath} must contain a top-level JSON object.`);
+    }
+
+    const extendsValue = parsed.extends;
+    const currentConfig = { ...parsed };
+    delete currentConfig.extends;
+
+    let mergedConfig: unknown = {};
+    for (const basePath of resolveInheritedConfigPaths(resolvedPath, extendsValue)) {
+      mergedConfig = mergeConfigValues(mergedConfig, loadConfigWithExtends(basePath, seenPaths), []);
+    }
+
+    return mergeConfigValues(mergedConfig, currentConfig, []);
+  } finally {
+    seenPaths.delete(resolvedPath);
+  }
+}
+
+function parseConfigFile(configPath: string): unknown {
+  const raw = readFileSync(configPath, "utf-8");
+
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch (err) {
+    throw new Error(`Invalid JSON in config file ${configPath}: ${err}`);
+  }
+}
+
+function resolveInheritedConfigPaths(configPath: string, extendsValue: unknown): string[] {
+  if (extendsValue === undefined) {
+    return [];
+  }
+
+  const entries = Array.isArray(extendsValue) ? extendsValue : [extendsValue];
+  if (!entries.every((entry) => typeof entry === "string" && entry.trim().length > 0)) {
+    throw new Error(`Config file ${configPath} must declare "extends" as a non-empty string or string array.`);
+  }
+
+  const configDir = dirname(configPath);
+  return entries.map((entry) => resolve(configDir, entry));
+}
+
+function mergeConfigValues(base: unknown, override: unknown, path: string[]): unknown {
+  if (override === undefined) {
+    return cloneConfigValue(base);
+  }
+
+  if (base === undefined) {
+    return cloneConfigValue(override);
+  }
+
+  if (Array.isArray(base) && Array.isArray(override)) {
+    const pathKey = path.join(".");
+    if (pathKey === "projects") {
+      return mergeNamedObjects(base, override, path, "id");
+    }
+    if (pathKey === "discord.routes") {
+      return mergeDiscordRoutes(base, override, path);
+    }
+
+    return cloneConfigValue(override);
+  }
+
+  if (isJsonObject(base) && isJsonObject(override)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(base)) {
+      result[key] = cloneConfigValue(value);
+    }
+    for (const [key, value] of Object.entries(override)) {
+      result[key] = mergeConfigValues(base[key], value, [...path, key]);
+    }
+    return result;
+  }
+
+  return cloneConfigValue(override);
+}
+
+function mergeNamedObjects(
+  base: unknown[],
+  override: unknown[],
+  path: string[],
+  identityKey: string
+): unknown[] {
+  const result = base.map((entry) => cloneConfigValue(entry));
+  const indexesById = new Map<string, number>();
+
+  base.forEach((entry, index) => {
+    if (isJsonObject(entry) && typeof entry[identityKey] === "string") {
+      indexesById.set(entry[identityKey], index);
+    }
+  });
+
+  for (const entry of override) {
+    if (isJsonObject(entry) && typeof entry[identityKey] === "string") {
+      const existingIndex = indexesById.get(entry[identityKey]);
+      if (existingIndex !== undefined) {
+        result[existingIndex] = mergeConfigValues(base[existingIndex], entry, [...path, entry[identityKey]]);
+        continue;
+      }
+    }
+
+    result.push(cloneConfigValue(entry));
+  }
+
+  return result;
+}
+
+function mergeDiscordRoutes(base: unknown[], override: unknown[], path: string[]): unknown[] {
+  const result = base.map((entry) => cloneConfigValue(entry));
+  const indexesByKey = new Map<string, number>();
+
+  base.forEach((entry, index) => {
+    const key = getDiscordRouteKey(entry);
+    if (key) {
+      indexesByKey.set(key, index);
+    }
+  });
+
+  for (const entry of override) {
+    const key = getDiscordRouteKey(entry);
+    if (key) {
+      const existingIndex = indexesByKey.get(key);
+      if (existingIndex !== undefined) {
+        result[existingIndex] = mergeConfigValues(base[existingIndex], entry, [...path, key]);
+        continue;
+      }
+
+      indexesByKey.set(key, result.length);
+    }
+
+    result.push(cloneConfigValue(entry));
+  }
+
+  return result;
+}
+
+function getDiscordRouteKey(value: unknown): string | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  const projectId = typeof value.projectId === "string" ? value.projectId : null;
+  const channelId = typeof value.channelId === "string" ? value.channelId : null;
+  const purpose = typeof value.purpose === "string" ? value.purpose : "workstreams";
+  const epicId = typeof value.epicId === "string" ? value.epicId : "";
+
+  if (!projectId || !channelId) {
+    return null;
+  }
+
+  return `${projectId}:${channelId}:${purpose}:${epicId}`;
+}
+
+function cloneConfigValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneConfigValue(entry));
+  }
+
+  if (isJsonObject(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      result[key] = cloneConfigValue(entry);
+    }
+    return result;
+  }
+
+  return value;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

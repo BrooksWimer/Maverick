@@ -1,4 +1,10 @@
-import type { AssistantAttachment, ParsedAssistantIntent, WorkSmartGoal } from "./types.js";
+import type {
+  AssistantAttachment,
+  AssistantPrimaryContext,
+  AssistantTaskStatus,
+  ParsedAssistantIntent,
+  WorkSmartGoal,
+} from "./types.js";
 
 const WEEKDAY_INDEX: Record<string, number> = {
   sunday: 0,
@@ -23,6 +29,13 @@ type ScheduleParseResult = {
   startsAt: string;
   endsAt: string | null;
   isAllDay: boolean;
+  recurrenceRule?: string | null;
+  parsedFrom: string;
+};
+
+type TaskScheduleParseResult = {
+  dueAt: string | null;
+  scheduledFor: string | null;
   parsedFrom: string;
 };
 
@@ -39,7 +52,7 @@ export function parseAssistantIntent(
   if (!normalized && !hasAttachments) {
     return {
       kind: "clarification",
-      message: "Send a note, reminder, or calendar item with some text so I can store it.",
+      message: "Send a note, task, reminder, calendar item, or question with some text so I can help.",
       confidence: 0.2,
     };
   }
@@ -52,6 +65,16 @@ export function parseAssistantIntent(
   const calendar = parseCalendarIntent(normalized, options);
   if (calendar) {
     return calendar;
+  }
+
+  const query = parseQueryIntent(normalized);
+  if (query) {
+    return query;
+  }
+
+  const task = parseTaskIntent(normalized, options);
+  if (task) {
+    return task;
   }
 
   return parseNoteIntent(normalized, options);
@@ -70,7 +93,7 @@ function parseReminderIntent(
   if (!split.description) {
     return {
       kind: "clarification",
-      message: "I can set that reminder, but I need to know what you want me to remind you about.",
+      message: "I can set that reminder, but I need to know what you want me to remember.",
       confidence: 0.5,
     };
   }
@@ -104,6 +127,7 @@ function parseReminderIntent(
     remindAt: scheduled.startsAt,
     parsedFrom: scheduled.parsedFrom,
     confidence: 0.86,
+    primaryContext: inferPrimaryContext(split.description, options.attachments ?? []),
   };
 }
 
@@ -117,7 +141,7 @@ function parseCalendarIntent(
   }
 
   const remainder = match[1].trim();
-  const split = splitDescriptionAndSchedule(remainder);
+  const split = splitCalendarDescriptionAndSchedule(remainder);
   if (!split.scheduleText) {
     return {
       kind: "clarification",
@@ -126,7 +150,7 @@ function parseCalendarIntent(
     };
   }
 
-  const scheduled = parseScheduleText(split.scheduleText, {
+  const scheduled = parseCalendarScheduleText(split.scheduleText, {
     referenceDate: options.referenceDate,
     defaultHour: 9,
     defaultDurationMinutes: options.defaultEventDurationMinutes ?? 30,
@@ -148,10 +172,99 @@ function parseCalendarIntent(
     startsAt: scheduled.startsAt,
     endsAt: scheduled.endsAt,
     isAllDay: scheduled.isAllDay,
+    recurrenceRule: scheduled.recurrenceRule ?? null,
     parsedFrom: scheduled.parsedFrom,
     details: text,
     location: null,
     confidence: 0.83,
+    primaryContext: inferPrimaryContext(split.description, options.attachments ?? []),
+  };
+}
+
+function parseQueryIntent(text: string): ParsedAssistantIntent | null {
+  const normalized = text.toLowerCase();
+
+  if (
+    /^(?:show|open|give me)\s+(?:my\s+)?inbox\b/.test(normalized) ||
+    /^(?:what(?:'s| is)\s+in\s+my\s+inbox)\b/.test(normalized)
+  ) {
+    return {
+      kind: "query",
+      queryType: "inbox",
+      query: "inbox",
+      primaryContext: extractContextHint(text),
+      confidence: 0.86,
+    };
+  }
+
+  if (
+    /^(?:show|open|give me)\s+(?:my\s+)?agenda\b/.test(normalized) ||
+    /^(?:what do i need to do(?: today)?|what(?:'s| is) due(?: today)?|resume me)\b/.test(normalized)
+  ) {
+    return {
+      kind: "query",
+      queryType: "agenda",
+      query: "agenda",
+      primaryContext: extractContextHint(text),
+      confidence: 0.88,
+    };
+  }
+
+  const searchMatch = text.match(
+    /^(?:find|search(?: for)?|look up|what did i say about|what do i have about)\s+(.+)$/i
+  );
+  if (searchMatch?.[1]) {
+    return {
+      kind: "query",
+      queryType: "search",
+      query: cleanupSentence(searchMatch[1]),
+      primaryContext: extractContextHint(text),
+      confidence: 0.84,
+    };
+  }
+
+  return null;
+}
+
+function parseTaskIntent(
+  text: string,
+  options: ParseAssistantIntentOptions
+): ParsedAssistantIntent | null {
+  const content = cleanupSentence(text);
+  if (!content) {
+    return null;
+  }
+
+  const normalized = content.toLowerCase();
+  const explicitTaskPrefix = /^(?:task|todo|to-do|follow up|follow-up)[:\s-]+/i.test(content);
+  const actionable = explicitTaskPrefix || looksActionable(normalized);
+  if (!actionable) {
+    return null;
+  }
+
+  const cleanedContent = cleanupSentence(content.replace(/^(?:task|todo|to-do)[:\s-]+/i, ""));
+  const split = splitDescriptionAndSchedule(cleanedContent);
+  const schedule = split.scheduleText
+    ? parseTaskScheduleText(split.scheduleText, {
+        referenceDate: options.referenceDate,
+        defaultHour: options.defaultReminderHour ?? 9,
+        defaultDurationMinutes: options.defaultEventDurationMinutes ?? 30,
+      })
+    : null;
+
+  const details = split.description || cleanedContent;
+  const primaryContext = inferPrimaryContext(details, options.attachments ?? []);
+  const status = inferTaskStatus(details, schedule, explicitTaskPrefix);
+
+  return {
+    kind: "task",
+    title: summarizeTitle(details),
+    details,
+    primaryContext,
+    status,
+    dueAt: schedule?.dueAt ?? null,
+    scheduledFor: schedule?.scheduledFor ?? null,
+    confidence: status === "inbox" ? 0.7 : 0.78,
   };
 }
 
@@ -183,17 +296,93 @@ function parseNoteIntent(text: string, options: ParseAssistantIntentOptions): Pa
       : text;
   const content = text.replace(/^(?:note|remember|memo)[:\s-]*/i, "").trim() || fallbackContent;
   const workMetadata = inferWorkNoteMetadata(content, attachments, options.workSmartGoals ?? []);
+  const context = workMetadata.context === "work"
+    ? "work"
+    : inferPrimaryContext(content, attachments);
 
   return {
     kind: "note",
     title: summarizeTitle(content),
     content,
-    confidence: workMetadata.context === "work" ? 0.72 : 0.75,
-    context: workMetadata.context,
+    confidence: context === "work" ? 0.72 : 0.75,
+    context,
     noteKind: workMetadata.noteKind,
     projectName: workMetadata.projectName,
     smartGoalIds: workMetadata.smartGoalIds,
   };
+}
+
+function inferTaskStatus(
+  description: string,
+  schedule: TaskScheduleParseResult | null,
+  explicitTaskPrefix: boolean
+): AssistantTaskStatus {
+  if (schedule?.dueAt || schedule?.scheduledFor) {
+    return "scheduled";
+  }
+
+  if (explicitTaskPrefix || /^(?:finish|write|review|submit|call|email|schedule|book|renew|pay|draft|update|prepare)\b/i.test(description)) {
+    return "open";
+  }
+
+  return "inbox";
+}
+
+function looksActionable(text: string): boolean {
+  return [
+    /^(?:i need to|need to|i should|should|remember to)\b/,
+    /^(?:pick up|drop off|buy|call|email|text|schedule|book|renew|pay|ask|check|finish|plan|research|figure out|review|write|send|submit|follow up|clean|organize|order)\b/,
+    /\b(?:todo|to do|follow up|errand|task)\b/,
+  ].some((pattern) => pattern.test(text));
+}
+
+export function inferPrimaryContext(
+  content: string,
+  attachments: AssistantAttachment[] = []
+): AssistantPrimaryContext {
+  const normalized = normalizeAssistantText(content).toLowerCase();
+  const attachmentLabel = attachments
+    .map((attachment) => `${attachment.name ?? ""} ${attachment.contentType ?? ""}`.trim().toLowerCase())
+    .join(" ");
+
+  if (
+    /\b(work|project|ticket|workstream|repo|deploy|deployment|codex|claude|discord bot|client|sprint|retro|standup|feature|bug|pr|pull request|server|production|meeting with team)\b/.test(normalized)
+  ) {
+    return "work";
+  }
+
+  if (/\b(dentist|doctor|therapy|medication|medicine|vitamin|workout|gym|health|appointment|prescription)\b/.test(normalized)) {
+    return "health";
+  }
+
+  if (/\b(grocery|dry cleaning|pharmacy|bank|store|post office|shipping|mail|errand|pickup|dropoff|buy|return|shopping)\b/.test(normalized)) {
+    return "errands";
+  }
+
+  if (/\b(home|house|apartment|rent|landlord|contractor|plumber|electrician|laundry|cleaning|yard|garage|kitchen)\b/.test(normalized)) {
+    return "home";
+  }
+
+  if (/\b(plan|planning|review week|roadmap|brainstorm|organize|triage|decide|research)\b/.test(normalized)) {
+    return "planning";
+  }
+
+  if (/\b(work|ticket|study|acceptance|criteria)\b/.test(attachmentLabel)) {
+    return "work";
+  }
+
+  return "personal";
+}
+
+function extractContextHint(text: string): AssistantPrimaryContext | null {
+  const lowered = normalizeAssistantText(text).toLowerCase();
+  for (const context of ["work", "personal", "home", "errands", "health", "planning"] as AssistantPrimaryContext[]) {
+    if (new RegExp(`\\b${context}\\b`).test(lowered)) {
+      return context;
+    }
+  }
+
+  return null;
 }
 
 function inferWorkNoteMetadata(
@@ -201,7 +390,7 @@ function inferWorkNoteMetadata(
   attachments: AssistantAttachment[],
   workSmartGoals: WorkSmartGoal[]
 ): {
-  context: "general" | "work";
+  context: "personal" | "work";
   noteKind: "general" | "project" | "study" | "acceptance-criteria" | undefined;
   projectName: string | null;
   smartGoalIds: string[];
@@ -213,7 +402,7 @@ function inferWorkNoteMetadata(
 
   const smartGoalIds = new Set<string>();
   const allowedSmartGoals = new Set(workSmartGoals.map((goal) => goal.id));
-  let context: "general" | "work" = "general";
+  let context: "personal" | "work" = "personal";
   let noteKind: "general" | "project" | "study" | "acceptance-criteria" | undefined;
   let projectName: string | null = null;
 
@@ -253,14 +442,14 @@ function inferWorkNoteMetadata(
   }
 
   if (
-    context === "general" &&
+    context === "personal" &&
     /\b(work note|manager|standup|sprint|retro|ticket|acceptance criteria|project|prod|production)\b/.test(lowered)
   ) {
     context = "work";
     noteKind = projectName ? "project" : "general";
   }
 
-  if (context === "general" && attachments.length > 0 && /\b(ticket|criteria|work|study)\b/.test(attachmentLabel)) {
+  if (context === "personal" && attachments.length > 0 && /\b(ticket|criteria|work|study)\b/.test(attachmentLabel)) {
     context = "work";
     noteKind = noteKind ?? "general";
   }
@@ -281,7 +470,8 @@ function splitDescriptionAndSchedule(text: string): {
     /\b(?:on\s+)?\d{4}-\d{2}-\d{2}\b/i,
     /\b(?:on\s+)?(?:today|tomorrow)\b/i,
     /\b(?:on\s+)?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i,
-    /\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i,
+    /\b(?:by|at)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i,
+    /\bby\s+\d{4}-\d{2}-\d{2}\b/i,
   ];
 
   let earliest: RegExpMatchArray | null = null;
@@ -308,6 +498,60 @@ function splitDescriptionAndSchedule(text: string): {
   };
 }
 
+function splitCalendarDescriptionAndSchedule(text: string): {
+  description: string;
+  scheduleText: string | null;
+} {
+  const recurringIndex = findRecurringScheduleIndex(text);
+  if (recurringIndex >= 0) {
+    return {
+      description: cleanupSentence(text.slice(0, recurringIndex)),
+      scheduleText: cleanupSentence(text.slice(recurringIndex)),
+    };
+  }
+
+  return splitDescriptionAndSchedule(text);
+}
+
+function parseTaskScheduleText(
+  raw: string,
+  options: {
+    referenceDate?: Date;
+    defaultHour: number;
+    defaultDurationMinutes: number;
+  }
+): TaskScheduleParseResult | null {
+  const normalized = cleanupSentence(raw).replace(/^by\s+/i, "");
+  const scheduled = parseScheduleText(normalized, {
+    referenceDate: options.referenceDate,
+    defaultHour: options.defaultHour,
+    defaultDurationMinutes: options.defaultDurationMinutes,
+    allowAllDay: true,
+  });
+
+  if (!scheduled) {
+    return null;
+  }
+
+  return {
+    dueAt: scheduled.startsAt,
+    scheduledFor: scheduled.isAllDay ? null : scheduled.startsAt,
+    parsedFrom: scheduled.parsedFrom,
+  };
+}
+
+function parseCalendarScheduleText(
+  raw: string,
+  options: {
+    referenceDate?: Date;
+    defaultHour: number;
+    defaultDurationMinutes: number;
+    allowAllDay: boolean;
+  }
+): ScheduleParseResult | null {
+  return parseRecurringScheduleText(raw, options) ?? parseScheduleText(raw, options);
+}
+
 function parseScheduleText(
   raw: string,
   options: {
@@ -319,7 +563,7 @@ function parseScheduleText(
 ): ScheduleParseResult | null {
   const reference = options.referenceDate ?? new Date();
   const duration = extractDurationMinutes(raw, options.defaultDurationMinutes);
-  const text = cleanupSentence(duration.text);
+  const text = cleanupSentence(duration.text).replace(/^by\s+/i, "");
 
   const relativeMatch = text.match(
     /^(?:on\s+)?(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)(?:\s+(?:at\s+)?)?(\d{1,2})?(?::(\d{2}))?\s*(am|pm)?$/i
@@ -377,6 +621,91 @@ function parseScheduleText(
   return null;
 }
 
+function parseRecurringScheduleText(
+  raw: string,
+  options: {
+    referenceDate?: Date;
+    defaultHour: number;
+    defaultDurationMinutes: number;
+    allowAllDay: boolean;
+  }
+): ScheduleParseResult | null {
+  const reference = options.referenceDate ?? new Date();
+  const duration = extractDurationMinutes(raw, options.defaultDurationMinutes);
+  const text = cleanupSentence(duration.text);
+  const timeMatch = text.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  const explicitTime = timeMatch ? parseTimeParts(timeMatch[1], timeMatch[2], timeMatch[3]) : null;
+  const normalized = cleanupSentence(
+    text.replace(/\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i, "")
+  ).toLowerCase();
+
+  if (normalized === "daily" || normalized === "every day") {
+    const firstDate = resolveRecurringDate(reference, null, explicitTime, options.defaultHour);
+    return buildRecurringScheduleResult(
+      firstDate,
+      explicitTime,
+      text,
+      options.defaultHour,
+      duration.minutes,
+      options.allowAllDay,
+      "RRULE:FREQ=DAILY"
+    );
+  }
+
+  if (["every weekday", "every workday", "every workweek"].includes(normalized)) {
+    const firstDate = resolveRecurringDate(reference, [1, 2, 3, 4, 5], explicitTime, options.defaultHour);
+    return buildRecurringScheduleResult(
+      firstDate,
+      explicitTime,
+      text,
+      options.defaultHour,
+      duration.minutes,
+      options.allowAllDay,
+      "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+    );
+  }
+
+  if (normalized === "every weekend") {
+    const firstDate = resolveRecurringDate(reference, [0, 6], explicitTime, options.defaultHour);
+    return buildRecurringScheduleResult(
+      firstDate,
+      explicitTime,
+      text,
+      options.defaultHour,
+      duration.minutes,
+      options.allowAllDay,
+      "RRULE:FREQ=WEEKLY;BYDAY=SA,SU"
+    );
+  }
+
+  const weekdayListMatch = normalized.match(
+    /^every\s+((?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)(?:\s*(?:,|and)\s*(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))*)$/
+  );
+  if (weekdayListMatch?.[1]) {
+    const weekdayNames = weekdayListMatch[1]
+      .split(/\s*(?:,|and)\s*/i)
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const weekdayNumbers = weekdayNames
+      .map((name) => WEEKDAY_INDEX[name])
+      .filter((value): value is number => value !== undefined);
+    if (weekdayNumbers.length > 0) {
+      const firstDate = resolveRecurringDate(reference, weekdayNumbers, explicitTime, options.defaultHour);
+      return buildRecurringScheduleResult(
+        firstDate,
+        explicitTime,
+        text,
+        options.defaultHour,
+        duration.minutes,
+        options.allowAllDay,
+        `RRULE:FREQ=WEEKLY;BYDAY=${weekdayNumbers.map(toRruleDay).join(",")}`
+      );
+    }
+  }
+
+  return null;
+}
+
 function buildScheduleResult(
   date: Date,
   explicitTime: { hour: number; minute: number } | null,
@@ -407,6 +736,51 @@ function buildScheduleResult(
     isAllDay: false,
     parsedFrom,
   };
+}
+
+function buildRecurringScheduleResult(
+  date: Date,
+  explicitTime: { hour: number; minute: number } | null,
+  parsedFrom: string,
+  defaultHour: number,
+  durationMinutes: number,
+  allowAllDay: boolean,
+  recurrenceRule: string
+): ScheduleParseResult {
+  return {
+    ...buildScheduleResult(date, explicitTime, parsedFrom, defaultHour, durationMinutes, allowAllDay),
+    recurrenceRule,
+  };
+}
+
+function resolveRecurringDate(
+  reference: Date,
+  allowedDays: number[] | null,
+  explicitTime: { hour: number; minute: number } | null,
+  defaultHour: number
+): Date {
+  const hour = explicitTime?.hour ?? defaultHour;
+  const minute = explicitTime?.minute ?? 0;
+
+  for (let offset = 0; offset < 14; offset += 1) {
+    const candidate = new Date(reference);
+    candidate.setHours(0, 0, 0, 0);
+    candidate.setDate(candidate.getDate() + offset);
+
+    if (allowedDays && !allowedDays.includes(candidate.getDay())) {
+      continue;
+    }
+
+    candidate.setHours(hour, minute, 0, 0);
+    if (offset > 0 || candidate.getTime() > reference.getTime()) {
+      return candidate;
+    }
+  }
+
+  const fallback = new Date(reference);
+  fallback.setHours(hour, minute, 0, 0);
+  fallback.setDate(fallback.getDate() + 1);
+  return fallback;
 }
 
 function resolveRelativeDate(anchor: string, reference: Date): Date {
@@ -460,6 +834,56 @@ function parseTimeParts(
   }
 
   return { hour, minute };
+}
+
+function toRruleDay(day: number): string {
+  switch (day) {
+    case 0:
+      return "SU";
+    case 1:
+      return "MO";
+    case 2:
+      return "TU";
+    case 3:
+      return "WE";
+    case 4:
+      return "TH";
+    case 5:
+      return "FR";
+    case 6:
+      return "SA";
+    default:
+      return "MO";
+  }
+}
+
+function findRecurringScheduleIndex(text: string): number {
+  const normalized = text.toLowerCase();
+  const literalPhrases = [
+    " daily",
+    " every day",
+    " every weekday",
+    " every workday",
+    " every workweek",
+    " every weekend",
+  ];
+
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const phrase of literalPhrases) {
+    const index = normalized.indexOf(phrase);
+    if (index >= 0) {
+      earliest = Math.min(earliest, index + 1);
+    }
+  }
+
+  const weekdayPattern =
+    /\bevery\s+(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)(?:\s*(?:,|and)\s*(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))*(?:\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm))?/i;
+  const weekdayMatch = weekdayPattern.exec(text);
+  if (weekdayMatch?.index !== undefined) {
+    earliest = Math.min(earliest, weekdayMatch.index);
+  }
+
+  return Number.isFinite(earliest) ? earliest : -1;
 }
 
 function extractDurationMinutes(text: string, defaultMinutes: number): { text: string; minutes: number } {

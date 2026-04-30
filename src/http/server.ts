@@ -10,6 +10,7 @@ import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantConfig } from "../config/index.js";
 import type { AssistantService } from "../assistant/index.js";
 import { validateTwilioSignature } from "../assistant/providers/sms.js";
+import { getStateBackendMode, invokeLocalStateOperation } from "../state/index.js";
 
 const log = createLogger("http");
 
@@ -41,6 +42,46 @@ export async function createHttpServer(
 
   app.get("/health", async () => orchestrator.getHealthStatus());
 
+  // --- Internal state RPC ---
+
+  const stateToken = process.env.MAVERICK_STATE_TOKEN?.trim();
+  if (stateToken && getStateBackendMode() === "sqlite") {
+    app.post("/internal/state/operation", async (req, reply) => {
+      const authorization = req.headers.authorization;
+      if (authorization !== `Bearer ${stateToken}`) {
+        reply.code(401);
+        return { ok: false, error: "Unauthorized" };
+      }
+
+      const body = req.body as {
+        repository?: unknown;
+        method?: unknown;
+        args?: unknown;
+      };
+      if (typeof body.repository !== "string" || typeof body.method !== "string") {
+        reply.code(400);
+        return { ok: false, error: "Missing repository or method." };
+      }
+
+      try {
+        const result = invokeLocalStateOperation(
+          body.repository,
+          body.method,
+          Array.isArray(body.args) ? body.args : [],
+        );
+        return { ok: true, result };
+      } catch (error) {
+        reply.code(500);
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
+  } else if (getStateBackendMode() === "sqlite") {
+    log.warn("Internal state API disabled because MAVERICK_STATE_TOKEN is not set");
+  }
+
   // --- Projects ---
 
   app.get("/api/projects/:projectId/status", async (req) => {
@@ -49,6 +90,11 @@ export async function createHttpServer(
   });
 
   // --- Workstreams ---
+
+  app.get("/api/maverick/audit", async (req) => {
+    const { scope } = req.query as { scope?: "git" | "discord" | "state" | "all" };
+    return orchestrator.getAuditReport(scope ?? "all");
+  });
 
   app.get("/api/workstreams", async () => {
     return orchestrator.listActiveWorkstreams();
@@ -61,6 +107,15 @@ export async function createHttpServer(
       return { error: "Workstream not found" };
     }
     return ws;
+  });
+
+  app.get("/api/workstreams/:id/status", async (req) => {
+    const { id } = req.params as { id: string };
+    const snapshot = orchestrator.getWorkstreamStatusSnapshot(id);
+    if (!snapshot) {
+      return { error: "Workstream not found" };
+    }
+    return snapshot;
   });
 
   app.post("/api/workstreams", async (req) => {
@@ -114,6 +169,33 @@ export async function createHttpServer(
     return result;
   });
 
+  app.post("/api/workstreams/:id/verify", async (req) => {
+    const { id } = req.params as { id: string };
+    return orchestrator.verify(id, {
+      trigger: "manual",
+    });
+  });
+
+  app.post("/api/workstreams/:id/finish", async (req) => {
+    const { id } = req.params as { id: string };
+    const { finishedBy } = (req.body as { finishedBy?: string }) ?? {};
+    return orchestrator.finishWorkstream(id, {
+      trigger: "manual",
+      finishedBy: finishedBy ?? "http",
+    });
+  });
+
+  app.post("/api/projects/:projectId/lanes/:laneId/verify", async (req) => {
+    const { projectId, laneId } = req.params as { projectId: string; laneId: string };
+    return orchestrator.verifyLane(projectId, laneId);
+  });
+
+  app.post("/api/projects/:projectId/lanes/:laneId/promote", async (req) => {
+    const { projectId, laneId } = req.params as { projectId: string; laneId: string };
+    const { promotedBy } = (req.body as { promotedBy?: string }) ?? {};
+    return orchestrator.promoteLane(projectId, laneId, promotedBy ?? "http");
+  });
+
   // --- Turns ---
 
   app.get("/api/workstreams/:id/turns", async (req) => {
@@ -158,9 +240,64 @@ export async function createHttpServer(
       return options.assistant!.listReminders(limit ? parseInt(limit, 10) : undefined);
     });
 
+    app.get("/api/assistant/tasks", async (req) => {
+      const { limit, status, context } = req.query as { limit?: string; status?: string; context?: string };
+      const parsedLimit = limit ? parseInt(limit, 10) : undefined;
+      if (status === "inbox") {
+        return options.assistant!.listInbox(parsedLimit, context as
+          | "work"
+          | "personal"
+          | "home"
+          | "errands"
+          | "health"
+          | "planning"
+          | undefined);
+      }
+      return options.assistant!.listTasks(parsedLimit);
+    });
+
     app.get("/api/assistant/calendar", async (req) => {
       const { limit } = req.query as { limit?: string };
       return options.assistant!.listCalendarEvents(limit ? parseInt(limit, 10) : undefined);
+    });
+
+    app.get("/api/assistant/agenda", async (req) => {
+      const { context } = req.query as { context?: string };
+      return options.assistant!.getAgenda(context as
+        | "work"
+        | "personal"
+        | "home"
+        | "errands"
+        | "health"
+        | "planning"
+        | undefined);
+    });
+
+    app.get("/api/assistant/search", async (req) => {
+      const { q, context, limit } = req.query as { q?: string; context?: string; limit?: string };
+      if (!q) {
+        return { error: "Missing q parameter" };
+      }
+
+      return options.assistant!.search(q, {
+        context: context as
+          | "work"
+          | "personal"
+          | "home"
+          | "errands"
+          | "health"
+          | "planning"
+          | undefined,
+        limit: limit ? parseInt(limit, 10) : undefined,
+      });
+    });
+
+    app.get("/api/assistant/models", async (req) => {
+      const { channelId } = req.query as { channelId?: string };
+      return options.assistant!.getModelState({
+        source: "discord",
+        channelId: channelId ?? null,
+      });
     });
 
     app.post("/api/assistant/messages", async (req) => {
@@ -191,6 +328,45 @@ export async function createHttpServer(
         },
       });
       return result;
+    });
+
+    app.post("/api/assistant/tasks/:id/done", async (req) => {
+      const { id } = req.params as { id: string };
+      return options.assistant!.completeTask(id);
+    });
+
+    app.post("/api/assistant/tasks/:id/snooze", async (req) => {
+      const { id } = req.params as { id: string };
+      const { when } = req.body as { when: string };
+      return options.assistant!.snoozeTask(id, when);
+    });
+
+    app.post("/api/assistant/items/:id/retag", async (req) => {
+      const { id } = req.params as { id: string };
+      const { context } = req.body as {
+        context: "work" | "personal" | "home" | "errands" | "health" | "planning";
+      };
+      return options.assistant!.retagItem(id, context);
+    });
+
+    app.post("/api/assistant/models", async (req) => {
+      const body = req.body as {
+        scope: "global" | "discord-channel";
+        scopeId?: string;
+        feature: "classification" | "query" | "summary" | "planning" | "verification" | "review";
+        profile: "cheap" | "default" | "deep";
+      };
+      const scopeId = body.scope === "global" ? "global" : body.scopeId ?? "";
+      if (!scopeId) {
+        return { error: "Missing scopeId" };
+      }
+
+      return options.assistant!.setModelOverride({
+        scope: body.scope,
+        scopeId,
+        feature: body.feature,
+        profile: body.profile,
+      });
     });
 
     app.post("/api/assistant/reminders/process-due", async () => {

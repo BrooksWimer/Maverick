@@ -5,6 +5,8 @@
  * This is what makes it possible to build core logic first and wire Discord later.
  */
 import EventEmitter from "eventemitter3";
+import type { BriefTrigger } from "../claude/types.js";
+import type { PendingPlanningDecision } from "../agents/types.js";
 
 // --- Event types ---
 
@@ -19,6 +21,14 @@ export interface WorkstreamStateChangedEvent {
   from: string;
   to: string;
   trigger: string;
+}
+
+export interface WorkstreamFinishedEvent {
+  workstreamId: string;
+  projectId: string;
+  durableBranch: string;
+  workstreamBranch: string;
+  trigger: "manual" | "auto";
 }
 
 export interface TurnStartedEvent {
@@ -59,8 +69,21 @@ export interface ApprovalResolvedEvent {
 
 export interface DecisionNeededEvent {
   workstreamId: string;
-  question: string;
-  options: string[];
+  trigger: "manual" | "auto" | "resume";
+  instruction: string;
+  questions: PendingPlanningDecision[];
+  renderedPlan: string;
+  formattedMarkdown: string;
+}
+
+export interface PlanGeneratedEvent {
+  workstreamId: string;
+  trigger: "manual" | "auto" | "resume";
+  instruction: string;
+  renderedPlan: string;
+  formattedMarkdown: string;
+  finalExecutionPrompt: string | null;
+  needsAnswers: boolean;
 }
 
 export interface ErrorEvent {
@@ -69,17 +92,49 @@ export interface ErrorEvent {
   context?: string;
 }
 
+export interface BriefGeneratedEvent {
+  trigger: BriefTrigger;
+  generatedAt: string;
+  content: string;
+  markdown: string;
+  summary: string;
+  storagePath: string | null;
+  channelId: string | null;
+}
+
+export interface ReviewCompletedEvent {
+  workstreamId: string;
+  reviewer: "claude";
+  severity: "clean" | "minor" | "major" | "critical";
+  findings: string;
+  suggestions: string[];
+  target: string;
+}
+
+export interface VerificationCompletedEvent {
+  workstreamId: string;
+  trigger: "manual" | "auto";
+  status: "pass" | "fail";
+  recommendation: "ready-for-review" | "needs-fixes";
+  renderedVerification: string;
+}
+
 // --- Event map ---
 
 export interface OrchestratorEvents {
   "workstream.created": (event: WorkstreamCreatedEvent) => void;
   "workstream.stateChanged": (event: WorkstreamStateChangedEvent) => void;
+  "workstream.finished": (event: WorkstreamFinishedEvent) => void;
   "turn.started": (event: TurnStartedEvent) => void;
   "turn.completed": (event: TurnCompletedEvent) => void;
   "turn.output": (event: TurnOutputEvent) => void;
   "approval.requested": (event: ApprovalRequestedEvent) => void;
   "approval.resolved": (event: ApprovalResolvedEvent) => void;
   "decision.needed": (event: DecisionNeededEvent) => void;
+  "plan.generated": (event: PlanGeneratedEvent) => void;
+  "brief.generated": (event: BriefGeneratedEvent) => void;
+  "verification.completed": (event: VerificationCompletedEvent) => void;
+  "review.completed": (event: ReviewCompletedEvent) => void;
   "error": (event: ErrorEvent) => void;
 }
 

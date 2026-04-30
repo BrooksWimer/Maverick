@@ -13,6 +13,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+Write-Warning "sync-linux-state.ps1 is an offline recovery/import tool. Do not use it for routine Windows/Linux state sharing."
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $LocalDatabasePath) {
     $LocalDatabasePath = Join-Path $repoRoot "data\orchestrator.db"
@@ -33,13 +35,22 @@ function Invoke-NativeCommand {
     }
 }
 
+function Quote-BashString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return "'" + ($Value -replace "'", "'""'""'") + "'"
+}
+
 function Invoke-SshCommand {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Command
     )
 
-    Invoke-NativeCommand -FilePath "ssh" -Arguments @($SshHost, "bash", "-lc", $Command)
+    Invoke-NativeCommand -FilePath "ssh" -Arguments @($SshHost, "bash", "-lc", (Quote-BashString -Value $Command))
 }
 
 function Copy-ToRemote {

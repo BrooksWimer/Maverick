@@ -2,7 +2,8 @@ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:c
 import { randomUUID } from "node:crypto";
 import { createInterface, type Interface as ReadLineInterface } from "node:readline";
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
+import { homedir } from "node:os";
 import { createLogger } from "../logger.js";
 import type {
   ApprovalRequest,
@@ -239,7 +240,35 @@ function summarizeOutput(output: string): string {
 }
 
 function isCodexStateDbWarning(line: string): boolean {
-  return /failed to open state db/i.test(line) || /migration \d+ missing/i.test(line);
+  return (
+    /failed to open state db/i.test(line) ||
+    /migration .*missing in the resolved migrations/i.test(line) ||
+    /migration \d+ (?:missing|was previously applied)/i.test(line)
+  );
+}
+
+const CODEX_STATE_DB_FILES = ["state_5.sqlite", "state_5.sqlite-shm", "state_5.sqlite-wal"];
+
+function archiveCorruptCodexStateDb(logger: ReturnType<typeof createLogger>): string[] {
+  const codexDir = resolve(homedir(), ".codex");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archived: string[] = [];
+
+  for (const filename of CODEX_STATE_DB_FILES) {
+    const source = resolve(codexDir, filename);
+    if (!existsSync(source)) {
+      continue;
+    }
+    const target = `${source}.broken-${stamp}`;
+    try {
+      renameSync(source, target);
+      archived.push(target);
+    } catch (error) {
+      logger.error({ err: error, source, target }, "Failed to archive corrupt codex state db file");
+    }
+  }
+
+  return archived;
 }
 
 export class CodexAppServerAdapter implements ExecutionBackendAdapter {
@@ -261,6 +290,8 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
   private threads = new Map<string, ExecutionThread>();
   private outputCallbacks: Array<(threadId: string, content: string, isPartial: boolean) => void> = [];
   private approvalCallbacks: Array<(threadId: string, request: ApprovalRequest) => void> = [];
+  private stateDbHealAttempted = false;
+  private stateDbHealing: Promise<void> | null = null;
 
   constructor(options: AppServerOptions = {}) {
     this.options = {
@@ -580,12 +611,58 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
     this.stderrLines = createInterface({ input: this.process.stderr });
     this.stderrLines.on("line", (line) => {
       if (isCodexStateDbWarning(line)) {
-        log.error({ line }, "codex app-server state database issue");
+        if (!this.stateDbHealAttempted && !this.stateDbHealing) {
+          this.stateDbHealAttempted = true;
+          log.error({ line }, "codex app-server state database is corrupt; archiving and recreating");
+          this.stateDbHealing = this.healStateDatabase().catch((error) => {
+            log.error({ err: error }, "Failed to heal codex state database");
+          });
+          return;
+        }
+
+        if (this.stateDbHealAttempted) {
+          log.error({ line }, "codex state db error persists after heal attempt");
+        }
         return;
       }
 
       log.warn({ line }, "codex app-server stderr");
     });
+  }
+
+  private async healStateDatabase(): Promise<void> {
+    if (this.process && !this.process.killed) {
+      try {
+        this.process.kill("SIGTERM");
+      } catch (error) {
+        log.warn({ err: error }, "Failed to terminate codex process before state db heal");
+      }
+    }
+
+    this.process = null;
+    this.initialized = false;
+
+    for (const pending of this.pendingRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Codex state database is being recreated; retry once heal completes"));
+    }
+    this.pendingRequests.clear();
+
+    for (const turn of this.pendingTurns.values()) {
+      turn.reject(new Error("Codex state database is being recreated; retry once heal completes"));
+    }
+    this.pendingTurns.clear();
+    this.pendingApprovals.clear();
+    this.activeTurnByThread.clear();
+
+    const archived = archiveCorruptCodexStateDb(log);
+    if (archived.length > 0) {
+      log.warn({ archived }, "Archived corrupt codex state database files");
+    } else {
+      log.warn("No codex state database files found to archive (already removed?)");
+    }
+
+    this.stateDbHealing = null;
   }
 
   private async handleIncomingLine(line: string): Promise<void> {
@@ -1017,13 +1094,18 @@ export class CodexAppServerAdapter implements ExecutionBackendAdapter {
   }
 
   private async ensureProcessRunning(): Promise<void> {
-    if (!this.process || this.process.killed) {
-      const needsHandshake = this.initialized;
-      this.startProcess();
-      if (needsHandshake) {
-        this.initialized = false;
-        await this.performInitializeHandshake();
+    if (this.stateDbHealing) {
+      try {
+        await this.stateDbHealing;
+      } catch {
+        // heal errors are already logged; we still try to start fresh
       }
+    }
+
+    if (!this.process || this.process.killed) {
+      this.startProcess();
+      this.initialized = false;
+      await this.performInitializeHandshake();
     }
   }
 

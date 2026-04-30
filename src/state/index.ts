@@ -1,23 +1,42 @@
 export { initDatabase, closeDatabase, getDatabase } from "./database.js";
 export {
+  configureRemoteStateBackend,
+  configureSqliteStateBackend,
+  configureStateBackendFromEnv,
+  getStateBackendMode,
+} from "./backend.js";
+export {
   projects,
   workstreams,
   turns,
+  artifacts,
   approvals,
+  discordThreadBindings,
   events,
   assistantMessages,
   assistantNotes,
+  assistantTasks,
   assistantCalendarEvents,
   assistantReminders,
+  assistantSettings,
+  workstreamRuntimeBindings,
+  activeWorkstreamOperations,
+  invokeLocalStateOperation,
 } from "./repositories.js";
 export type {
   ProjectRow,
   WorkstreamRow,
   TurnRow,
+  ArtifactRow,
   ApprovalRow,
+  DiscordThreadBindingRow,
   EventRow,
   AssistantMessageRow,
   AssistantNoteRow,
+  AssistantTaskRow,
   AssistantCalendarEventRow,
   AssistantReminderRow,
+  AssistantSettingRow,
+  WorkstreamRuntimeBindingRow,
+  ActiveWorkstreamOperationRow,
 } from "./repositories.js";

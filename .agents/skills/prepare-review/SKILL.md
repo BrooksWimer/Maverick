@@ -1,59 +1,33 @@
 ---
 name: prepare-review
-description: Compile a comprehensive review package for human evaluation when a workstream is moving from verification to review.
----
-
----
-name: prepare-review
-description: Compile a comprehensive review package for human evaluation when a workstream is moving from verification to review.
----
-
----
-name: prepare-review
-description: Compile a comprehensive review package for human evaluation when a workstream is moving from verification to review.
+description: Assemble a durable review package that makes the work legible to an operator or reviewer.
 ---
 
 # Prepare Review
 
-Compile a comprehensive review package for human evaluation.
+Use this skill when a workstream is transitioning from verification to review.
 
-## When to use
-Use this skill when a workstream is transitioning from Verification to Review state.
+## Doctrine
+
+- Summaries should make operator decisions easier, not force the reader to reconstruct the work.
+- Review packages should be structured around concerns, risks, validation, and next action.
+- If caveats remain, state them explicitly instead of burying them in prose.
 
 ## Process
 
-1. **Gather all changes**: Collect diffs, new files, modified files, deleted files.
-2. **Summarize changes**: Group changes by concern (feature, fix, refactor, config, test).
-3. **Include verification evidence**: Reference the verification report.
-4. **Highlight decisions made**: List any decisions made during implementation with rationale.
-5. **Flag items needing attention**: Anything unusual, risky, or that deviates from the plan.
-6. **Produce the review package**: Structured document ready for human review.
+1. Summarize what changed and why.
+2. Group the changed files by concern instead of listing an unstructured dump.
+3. Include the verification evidence that supports review readiness.
+4. Call out notable decisions, caveats, and follow-up work.
+5. End with an explicit recommendation and next action.
 
-## Output format
+## Output Expectations
 
-```markdown
-## Review Package: [workstream name]
+A good review package makes these items obvious:
 
-### Summary
-[2-3 sentence overview of what was done and why]
-
-### Changes
-**Files modified**: [count]
-**Files added**: [count]
-**Files deleted**: [count]
-
-#### By concern:
-- **[concern]**: [brief description of changes]
-
-### Verification
-[Reference verification report - all checks passing / details of any exceptions]
-
-### Decisions made
-- [decision]: [rationale]
-
-### Items needing attention
-- [item]: [why it needs attention]
-
-### Recommendation
-[Ship as-is / Ship with noted caveats / Needs changes before shipping]
-```
+- headline summary
+- files changed
+- validation evidence
+- remaining risks or caveats
+- recommendation
+- exact next action

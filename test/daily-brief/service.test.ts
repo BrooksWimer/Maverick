@@ -110,7 +110,7 @@ describe("DailyBriefService", () => {
   afterEach(async () => {
     await orchestrator.shutdown();
     closeDatabase();
-    rmSync(tempDir, { recursive: true, force: true });
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("collects project activity, fallbacks, hygiene, notes, and reminders into one report", async () => {

@@ -18,7 +18,9 @@ Tracked server assets:
 - Linux service unit: `deploy/systemd/maverick.service`
 - Windows first-time bootstrap wrapper: `scripts/bootstrap-linux-server.ps1`
 - Windows ongoing deploy script: `scripts/deploy-linux.ps1`
-- Windows state sync script: `scripts/sync-linux-state.ps1`
+- Windows state tunnel helper: `scripts/start-state-tunnel.ps1`
+- Offline state recovery/import helper: `scripts/sync-linux-state.ps1`
+- SQLite merge helper: `scripts/merge-state-databases.mjs`
 
 ## One-Time Physical Linux Steps
 
@@ -40,21 +42,20 @@ Before the first bootstrap:
 
 1. Create a private Git remote for Maverick.
 2. Add the remote to the local Maverick repo.
-3. Push the clean Maverick `master` baseline.
-4. Push a dedicated Maverick `server` branch for the Linux host.
-5. Push the Netwise epic branches Maverick depends on:
+3. Push the clean Maverick `main` branch.
+4. Push the Netwise epic branches Maverick depends on:
    - `codex/laptop-wifi-scanner-epic`
    - `codex/mobile-wifi-scanner-epic`
    - `codex/router-admin-ingestion-epic`
-6. Push SyncSonic `pi-stable-baseline-2026-04-05`.
+5. Push SyncSonic `pi-stable-baseline-2026-04-05`.
 
-`master` stays clean and is not used as the Linux deploy branch. The Linux host pulls Maverick from `server` by default.
+The Linux host now deploys Maverick directly from `main`.
 
 ## First-Time Bootstrap From Windows
 
 Use an SSH host alias such as `maverick-server` in `C:\Users\<you>\.ssh\config`.
 
-The bootstrap and deploy scripts use Git for Windows' user-space SSH tools when they are available. They forward your local GitHub SSH key from Windows into the Linux session for `git clone` and `git pull`, so Maverick can stay private without storing a separate GitHub deploy key on the Linux host. By default the forwarded GitHub key path is `C:\Users\<you>\.ssh\id_ed25519`.
+The bootstrap script now installs a GitHub SSH key for the Linux `maverick` service user so the server can pull from GitHub directly on its own. By default it copies `C:\Users\<you>\.ssh\id_ed25519` and `C:\Users\<you>\.ssh\id_ed25519.pub`. If you prefer a dedicated deploy key, pass `-GitHubPrivateKeyPath` and `-GitHubPublicKeyPath` explicitly.
 
 Then run:
 
@@ -69,20 +70,73 @@ The wrapper will:
 - render a Linux env file from the local `.env`
 - upload and run the Linux bootstrap script
 - clone Maverick, Netwise, and SyncSonic
-- install Node 20, build tools, SQLite tools, and Codex
+- install Node 20, build tools, SQLite tools, Go, `libpcap` headers for Netwise, and Codex
 - install and enable the `maverick` `systemd` service
-- sync the local SQLite state to `/var/lib/maverick`
+- leave Linux as the canonical SQLite owner at `/var/lib/maverick`
 - start Maverick and run a localhost health check
 
-If you want to bootstrap without copying the SQLite state yet:
+If you explicitly need to import the local SQLite file during first-time recovery work:
 
 ```powershell
-.\scripts\bootstrap-linux-server.ps1 -SshHost maverick-server -MaverickRepoUrl git@github.com:YOUR_USER/Maverick.git -SkipDatabaseSync
+.\scripts\bootstrap-linux-server.ps1 `
+  -SshHost maverick-server `
+  -MaverickRepoUrl git@github.com:YOUR_USER/Maverick.git `
+  -ImportLocalDatabase
 ```
+
+Routine Windows/Linux operation should not copy SQLite files. Windows should use the Linux-owned state API through the SSH tunnel below.
+
+## Shared State Model
+
+Linux owns the SQLite file directly:
+
+```dotenv
+MAVERICK_INSTANCE_ID=linux
+STATE_BACKEND=sqlite
+DATABASE_PATH=/var/lib/maverick/orchestrator.db
+MAVERICK_STATE_TOKEN=<same-long-secret-on-linux-and-windows>
+```
+
+The HTTP server is already bound to `127.0.0.1` by default in the shared control-plane config. The internal state API is only enabled when `MAVERICK_STATE_TOKEN` is set.
+
+Windows keeps the existing Discord command routing and instance behavior, but uses the Linux state service:
+
+```dotenv
+MAVERICK_INSTANCE_ID=windows
+STATE_BACKEND=remote
+MAVERICK_STATE_URL=http://127.0.0.1:3848
+MAVERICK_STATE_TOKEN=<same-long-secret-on-linux-and-windows>
+```
+
+Start the tunnel before starting the Windows bot:
+
+```powershell
+.\scripts\start-state-tunnel.ps1 -SshHost maverick-server
+```
+
+This forwards `127.0.0.1:3848` on Windows to the Linux service on `127.0.0.1:3847`. If the tunnel or Linux state API is unavailable, Windows remote state calls fail closed instead of opening its own SQLite database.
+
+## State Migration
+
+For the first shared-state migration:
+
+1. Stop both bots.
+2. Back up both SQLite files, including matching `-wal` and `-shm` files.
+3. Apply the new schema on Linux with `npm run db:migrate`.
+4. Merge Windows-only rows into the Linux database:
+
+```powershell
+node .\scripts\merge-state-databases.mjs `
+  --canonical C:\path\to\linux\orchestrator.db `
+  --source C:\Users\wimer\Desktop\Maverick\data\orchestrator.db `
+  --report .\maverick-state-merge-report.json
+```
+
+The merge script keeps Linux rows on duplicate primary keys, imports missing rows, remaps conflicting event ids so source events are not lost, and converts legacy `workstreams.cwd` / `workstreams.codex_thread_id` values into per-instance `workstream_runtime_bindings`.
 
 ## Ongoing Deploys From Windows
 
-Deploy the current `server` branch to Linux with:
+Deploy the current `main` branch to Linux with:
 
 ```powershell
 .\scripts\deploy-linux.ps1 -SshHost maverick-server
@@ -92,7 +146,7 @@ By default the deploy script:
 
 - runs local `npm test`
 - runs local `npm run build`
-- pushes `server`
+- pushes `main`
 - SSHes into Linux
 - updates the Linux clone
 - runs `npm ci --include=dev`
@@ -100,15 +154,26 @@ By default the deploy script:
 - restarts `systemd`
 - checks `http://127.0.0.1:3847/health`
 
-If your GitHub SSH key lives somewhere other than `C:\Users\<you>\.ssh\id_ed25519`, pass it explicitly:
+## Dogfooding Maverick Self-Updates
 
-```powershell
-.\scripts\deploy-linux.ps1 -SshHost maverick-server -ForwardedGitHubKeyPath C:\Users\<you>\.ssh\your-github-key
-```
+Changes made in the local Windows Maverick repo do not automatically reach the live Linux bot.
+Until you deploy, Discord is still talking to whichever Maverick instance is currently running.
 
-## Re-Syncing State Later
+When testing Maverick changes that affect Discord routing, workstream creation, approvals, or other operator-facing behavior:
 
-To re-copy the local SQLite state:
+1. Stop or disable the Linux Maverick service first so Discord traffic does not hit stale server code during the test.
+2. Run Maverick locally on Windows from the branch you are validating.
+3. Use the real Discord interface as the integration test surface.
+4. Validate the specific behavior you changed, not just local build/test output.
+5. Stop the Windows Maverick process after validation so there is only one active Discord-connected Maverick instance again.
+6. Then deploy the validated branch to Linux and restart the Linux Maverick service.
+
+Restarting the `systemd` service is the normal path.
+Reboot the Linux host only when the change actually requires a full machine restart.
+
+## Offline State Recovery
+
+Do not use SQLite copying for routine state sharing. The sync script is retained for explicit offline recovery/import only, after stopping the local bot and the Linux service:
 
 ```powershell
 .\scripts\sync-linux-state.ps1 -SshHost maverick-server

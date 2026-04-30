@@ -128,7 +128,7 @@ describe("Orchestrator epic charter propagation", () => {
 
   afterEach(async () => {
     closeDatabase();
-    rmSync(tempDir, { recursive: true, force: true });
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("injects durable epic context into dispatched turns", async () => {
