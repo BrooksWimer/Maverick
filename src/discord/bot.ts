@@ -770,6 +770,18 @@ function subcommandBuilder(config: OrchestratorConfig) {
             .setRequired(false)
             .addChoices(...projectChoices)
         )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("bootstrap")
+        .setDescription("Draft an initial PROJECT_ROADMAP.md from repo signals")
+        .addStringOption((option) =>
+          option
+            .setName("project")
+            .setDescription("Project id")
+            .setRequired(false)
+            .addChoices(...projectChoices)
+        )
     );
 
   const lane = new SlashCommandBuilder()
@@ -1521,7 +1533,8 @@ export class DiscordBot {
 
   private async handleProjectCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const subcommand = interaction.options.getSubcommand();
-    if (subcommand !== "status") {
+
+    if (subcommand !== "status" && subcommand !== "bootstrap") {
       await interaction.reply({
         content: `Unsupported project subcommand: ${subcommand}`,
         flags: MessageFlags.Ephemeral,
@@ -1542,6 +1555,34 @@ export class DiscordBot {
 
     if (!projectId) {
       await interaction.editReply("No project could be inferred for this channel. Pass a project explicitly.");
+      return;
+    }
+
+    if (subcommand === "bootstrap") {
+      try {
+        const result = await this.orchestrator.bootstrapProjectRoadmap(projectId);
+        await interaction.editReply(
+          [
+            `Drafted PROJECT_ROADMAP.md at \`${result.filePath}\`.`,
+            "",
+            "Snippet:",
+            "```markdown",
+            result.snippet,
+            "```",
+            "",
+            "Edit this draft to refine before planning. Maverick treats it as the project north star.",
+          ].join("\n"),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("already exists")) {
+          await interaction.editReply(
+            `PROJECT_ROADMAP.md already exists. Edit or delete it manually before re-running bootstrap.\n\n${message}`,
+          );
+        } else {
+          await interaction.editReply(`Bootstrap failed: ${message}`);
+        }
+      }
       return;
     }
 

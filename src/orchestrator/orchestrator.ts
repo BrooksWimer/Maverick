@@ -1111,6 +1111,130 @@ export class Orchestrator {
     return newState;
   }
 
+  async bootstrapProjectRoadmap(projectId: string): Promise<{ filePath: string; snippet: string }> {
+    const project = this.getProject(projectId);
+    const filePath = this.projectRoadmapPath(project);
+    if (existsSync(filePath)) {
+      throw new Error(
+        `PROJECT_ROADMAP.md already exists at ${filePath}. Delete or edit it manually before re-running bootstrap.`,
+      );
+    }
+
+    const readme = this.readPlanningDoc(project, "README.md").content || "(no README.md found)";
+    const packageJson = this.readPlanningDoc(project, "package.json").content || "(no package.json found)";
+    const agents = this.readAgentsMd(project) || "(no AGENTS.md found)";
+    const srcListing = this.readSrcLayout(project);
+    const recentCommits = this.readGitOutput(
+      ["log", "-10", "--pretty=format:%h %ad %s", "--date=short"],
+      project.repoPath,
+    );
+
+    const adapter = await this.getUtilityClaudeAdapter();
+    const cwd = project.repoPath;
+    const thread = await adapter.createThread(cwd);
+
+    const promptHeader = [
+      "You are drafting the initial PROJECT_ROADMAP.md for a project. Use the provided repo signals (README, package.json, top-level src layout, AGENTS doctrine, recent commits) to draft a forward-looking roadmap with 3-7 milestones. Each milestone should have:",
+      "- A clear name (verb + noun)",
+      "- 2-4 sentences of intent",
+      "- Concrete success criteria",
+      "- Optional dependencies on other milestones",
+      "",
+      "This is a DRAFT for the operator to edit. Do not invent business goals you can't ground in the signals. If a section is genuinely unknowable from signals, mark it with TODO and ask the operator (in a final \"Questions for the operator\" section).",
+      "",
+      "Output as plain markdown.",
+    ].join("\n");
+
+    const promptBody = [
+      "# Repo signals",
+      "",
+      "## README.md",
+      "",
+      readme,
+      "",
+      "## package.json",
+      "",
+      packageJson,
+      "",
+      "## AGENTS.md",
+      "",
+      agents,
+      "",
+      "## src/ layout (top 2 levels)",
+      "",
+      srcListing,
+      "",
+      "## Recent commits (last 10)",
+      "",
+      recentCommits,
+    ].join("\n");
+
+    const result = await adapter.startTurn({
+      threadId: thread.id,
+      instruction: `${promptHeader}\n\n${promptBody}`,
+      cwd,
+      maxTurns: 4,
+      permissionMode: "plan",
+      maxBudgetUsd: 0.75,
+      noSessionPersistence: true,
+      tools: ["Read", "Grep", "Glob"],
+      disallowedTools: ["Bash", "Edit", "Write", "MultiEdit", "WebFetch", "WebSearch"],
+    });
+
+    if (result.status !== "completed") {
+      throw new Error(result.output || "Roadmap bootstrap call failed.");
+    }
+
+    const draft = result.output.trim();
+    if (!draft) {
+      throw new Error("Roadmap bootstrap returned an empty draft.");
+    }
+
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, draft + (draft.endsWith("\n") ? "" : "\n"), "utf8");
+
+    eventLog.emit({
+      project_id: projectId,
+      event_type: "project.roadmapBootstrapped",
+      payload: { filePath },
+      source: "orchestrator",
+    });
+
+    return { filePath, snippet: draft.slice(0, 1500) };
+  }
+
+  private readSrcLayout(project: ProjectConfig): string {
+    const srcRoot = resolve(project.repoPath, "src");
+    if (!existsSync(srcRoot)) {
+      return "(no src/ directory found)";
+    }
+    try {
+      const lines: string[] = [];
+      for (const entry of readdirSync(srcRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.name.startsWith(".")) continue;
+        if (entry.isDirectory()) {
+          lines.push(`src/${entry.name}/`);
+          const child = resolve(srcRoot, entry.name);
+          try {
+            for (const inner of readdirSync(child, { withFileTypes: true }).sort((a, b) =>
+              a.name.localeCompare(b.name),
+            )) {
+              if (inner.name.startsWith(".")) continue;
+              lines.push(`  src/${entry.name}/${inner.name}${inner.isDirectory() ? "/" : ""}`);
+            }
+          } catch {
+            // ignore unreadable subdirectory
+          }
+        } else {
+          lines.push(`src/${entry.name}`);
+        }
+      }
+      return lines.join("\n") || "(empty src/)";
+    } catch (error) {
+      return `(failed to inspect src/: ${error instanceof Error ? error.message : String(error)})`;
+    }
+  }
+
   async review(
     workstreamId: string,
     target?: string,
