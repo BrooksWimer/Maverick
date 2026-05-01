@@ -46,8 +46,6 @@ CREATE TABLE IF NOT EXISTS workstreams (
   plan                TEXT,            -- latest stored Claude implementation plan
   planning_context_json TEXT,          -- durable structured planning state
   verification_context_json TEXT,      -- latest structured verification state
-  budget_limit_usd   REAL NOT NULL DEFAULT 5.0,
-  budget_spent_usd   REAL NOT NULL DEFAULT 0,
 
   -- Timestamps
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),

@@ -3147,10 +3147,6 @@ export class DiscordBot {
         { label: "Project", value: `\`${snapshot.projectId}\`` },
         { label: "Branch", value: snapshot.branch ? `\`${snapshot.branch}\`` : "shared repository root" },
         {
-          label: "Budget",
-          value: `$${snapshot.budget.spentUsd.toFixed(2)} / $${snapshot.budget.limitUsd.toFixed(2)}`,
-        },
-        {
           label: "Active operation",
           value: snapshot.activeOperation ? `\`${snapshot.activeOperation.kind}\`` : "none",
         },

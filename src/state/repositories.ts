@@ -41,8 +41,6 @@ export interface WorkstreamRow {
   plan: string | null;
   planning_context_json: string | null;
   verification_context_json: string | null;
-  budget_limit_usd: number;
-  budget_spent_usd: number;
   created_at: string;
   updated_at: string;
   last_activity_at: string;
@@ -335,7 +333,7 @@ const localWorkstreams = {
     "state" | "current_goal" | "cwd" | "branch" | "base_branch" | "codex_thread_id" |
     "discord_channel_id" | "discord_thread_id" | "discord_parent_channel_id" | "workspace_mode" | "waiting_on_approval" |
     "pending_decision" | "summary" | "plan" | "planning_context_json" | "verification_context_json" |
-    "budget_limit_usd" | "budget_spent_usd" | "completed_at"
+    "completed_at"
   >>): WorkstreamRow | undefined {
     const db = getDatabase();
     const sets: string[] = ["updated_at = datetime('now')", "last_activity_at = datetime('now')"];

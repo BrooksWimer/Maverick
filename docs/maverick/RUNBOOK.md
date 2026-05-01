@@ -37,12 +37,6 @@ Each project can keep durable memory at `docs/maverick/PROJECT_MEMORY.md`.
 
 Maverick feeds this file into planning and appends completion notes when workstreams are archived. Operators may edit it directly when a decision, convention, or known trap should survive across future workstreams.
 
-## Budgets
-
-Each workstream defaults to a $5.00 budget. Maverick reserves budget before paid planning, implementation, verification, and review operations and refuses work that would exceed the limit.
-
-The budget is an upper-bound guardrail, not a provider invoice. It is designed to fail loudly before a runaway loop consumes more paid agent time.
-
 ## Worktree Reaper
 
 The server role runs a worktree reaper every five minutes. It only removes disposable `maverick/...` worktrees that are already archived and whose HEAD is contained by the durable lane branch.

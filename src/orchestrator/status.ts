@@ -77,11 +77,6 @@ export interface WorkstreamStatusSnapshot {
   currentGoal: string | null;
   waitingOnApproval: boolean;
   pendingApprovalCount: number;
-  budget: {
-    limitUsd: number;
-    spentUsd: number;
-    remainingUsd: number;
-  };
   health: WorkstreamHealth;
   healthReason: string | null;
   planning: StatusPlanningSummary;
@@ -116,10 +111,6 @@ export function renderWorkstreamStatusSnapshot(snapshot: WorkstreamStatusSnapsho
       { label: "Workspace", value: snapshot.workspace ? `\`${snapshot.workspace}\`` : null },
       { label: "Codex thread", value: snapshot.codexThreadId ? `\`${snapshot.codexThreadId}\`` : null },
       { label: "Waiting on approval", value: snapshot.waitingOnApproval ? "yes" : "no" },
-      {
-        label: "Budget",
-        value: `$${snapshot.budget.spentUsd.toFixed(2)} / $${snapshot.budget.limitUsd.toFixed(2)} used`,
-      },
       {
         label: "Active operation",
         value: snapshot.activeOperation

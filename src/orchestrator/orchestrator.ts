@@ -108,14 +108,6 @@ type GeneratePlanOptions = {
 type VerificationRunTrigger = "manual" | "auto";
 type WorkstreamFinishTrigger = "manual" | "auto";
 
-const DEFAULT_WORKSTREAM_BUDGET_LIMIT_USD = 5;
-const WORKSTREAM_BUDGET_RESERVATIONS_USD = {
-  planning: 0.5,
-  implementation: 1,
-  verification: 0.75,
-  review: 0.75,
-} as const;
-
 export interface LaneTarget {
   projectId: string;
   laneId: string;
@@ -645,10 +637,8 @@ export class Orchestrator {
     const startedAt = new Date().toISOString();
     this.beginActiveOperation(workstreamId, "implementation", startedAt);
 
-    let remainingBudgetUsd = 0.01;
     let turn: TurnRow;
     try {
-      remainingBudgetUsd = this.reserveWorkstreamBudget(dispatchWorkstream, "implementation");
       // Create turn record only after the shared DB guard is held.
       turn = turns.create({
         workstream_id: workstreamId,
@@ -694,7 +684,7 @@ export class Orchestrator {
         threadId: dispatchWorkstream.codex_thread_id!,
         instruction: executionInstruction,
         cwd: this.resolveExecutionWorkspace(dispatchWorkstream),
-        maxBudgetUsd: remainingBudgetUsd,
+        maxBudgetUsd: 0.75,
       });
 
       // Update turn
@@ -1141,15 +1131,14 @@ export class Orchestrator {
     const latestTurn = turns.listByWorkstream(ws.id).slice(-1)[0] ?? null;
     this.beginActiveOperation(workstreamId, "review");
     try {
-      const remainingBudgetUsd = this.reserveWorkstreamBudget(ws, "review");
       const result =
         reviewer === "claude"
-          ? await this.runClaudeReview(ws, effectiveTarget, latestTurn?.id ?? null, remainingBudgetUsd)
+          ? await this.runClaudeReview(ws, effectiveTarget, latestTurn?.id ?? null, 0.75)
           : await this.getAdapter(ws.project_id).startReview({
               threadId: runtimeThreadId!,
               cwd: this.resolveExecutionWorkspace(ws),
               target: effectiveTarget,
-              maxBudgetUsd: remainingBudgetUsd,
+              maxBudgetUsd: 0.75,
             });
 
       this.touchProgress("review", workstreamId, latestTurn?.id ?? undefined);
@@ -1224,7 +1213,6 @@ export class Orchestrator {
     const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, verificationConfig.model);
     this.beginActiveOperation(workstreamId, "verification");
     try {
-      const remainingBudgetUsd = this.reserveWorkstreamBudget(workstream, "verification");
       const agentResult = await runAgent(
         adapter,
         "verification",
@@ -1261,7 +1249,7 @@ export class Orchestrator {
           model: verificationConfig.model,
           maxTurns: 8,
           permissionMode: "auto",
-          maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
+          maxBudgetUsd: 0.75,
           onOutput: this.buildOperationOutputHandler("verification", workstream.id, latestTurn?.id ?? null),
         },
       );
@@ -1368,7 +1356,6 @@ export class Orchestrator {
     const epicContextAnalysis = contextBundle.epicContext;
     this.beginActiveOperation(workstreamId, "planning");
     try {
-      const remainingBudgetUsd = this.reserveWorkstreamBudget(workstream, "planning");
       let checkpoint = this.checkpointPlanningContext({
         workstream,
         instruction: effectiveInstruction,
@@ -1394,7 +1381,7 @@ export class Orchestrator {
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
           ...this.planningAgentGuardrails("plan"),
-          maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
+          maxBudgetUsd: 0.75,
         },
       );
 
@@ -1553,7 +1540,6 @@ export class Orchestrator {
         existingContext,
       );
       const epicContextAnalysis = contextBundle.epicContext;
-      const remainingBudgetUsd = this.reserveWorkstreamBudget(workstream, "planning");
       const checkpoint = this.checkpointPlanningContext({
         workstream,
         instruction: existingContext.originalInstruction,
@@ -1580,7 +1566,7 @@ export class Orchestrator {
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
           ...this.planningAgentGuardrails("plan"),
-          maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
+          maxBudgetUsd: 0.75,
         },
       );
 
@@ -1928,11 +1914,6 @@ export class Orchestrator {
       currentGoal: workstream.current_goal,
       waitingOnApproval: Boolean(workstream.waiting_on_approval) || pendingApprovalCount > 0,
       pendingApprovalCount,
-      budget: {
-        limitUsd: this.workstreamBudgetLimit(workstream),
-        spentUsd: this.workstreamBudgetSpent(workstream),
-        remainingUsd: Math.max(0, this.workstreamBudgetLimit(workstream) - this.workstreamBudgetSpent(workstream)),
-      },
       health,
       healthReason: reason,
       planning: {
@@ -3198,7 +3179,7 @@ export class Orchestrator {
     workstream: WorkstreamRow,
     target: string,
     sourceTurnId: string | null,
-    remainingBudgetUsd: number,
+    _maxBudgetUsd: number = 0.75,
   ): Promise<ReviewResult & { verdict?: string }> {
     const project = this.getProject(workstream.project_id);
     const reviewConfig = project.claudeReview;
@@ -3245,7 +3226,7 @@ export class Orchestrator {
         model: reviewConfig.model,
         maxTurns: 4,
         permissionMode: "plan",
-        maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
+        maxBudgetUsd: 0.75,
         onOutput: this.buildOperationOutputHandler("review", workstream.id, sourceTurnId),
       },
     );
@@ -3423,54 +3404,6 @@ export class Orchestrator {
       });
       return null;
     }
-  }
-
-  private workstreamBudgetLimit(workstream: WorkstreamRow): number {
-    const configured = Number(workstream.budget_limit_usd);
-    return Number.isFinite(configured) && configured > 0
-      ? configured
-      : DEFAULT_WORKSTREAM_BUDGET_LIMIT_USD;
-  }
-
-  private workstreamBudgetSpent(workstream: WorkstreamRow): number {
-    const spent = Number(workstream.budget_spent_usd);
-    return Number.isFinite(spent) && spent > 0 ? spent : 0;
-  }
-
-  private reserveWorkstreamBudget(
-    workstream: WorkstreamRow,
-    operation: keyof typeof WORKSTREAM_BUDGET_RESERVATIONS_USD,
-  ): number {
-    const reservation = WORKSTREAM_BUDGET_RESERVATIONS_USD[operation];
-    const limit = this.workstreamBudgetLimit(workstream);
-    const spent = this.workstreamBudgetSpent(workstream);
-    if (spent + reservation > limit) {
-      throw new Error(
-        `Workstream "${workstream.name}" budget would exceed $${limit.toFixed(2)} ` +
-        `(${spent.toFixed(2)} already reserved, ${reservation.toFixed(2)} requested for ${operation}).`
-      );
-    }
-
-    const nextSpent = Number((spent + reservation).toFixed(2));
-    workstreams.update(workstream.id, {
-      budget_spent_usd: nextSpent,
-    });
-
-    eventLog.emit({
-      workstream_id: workstream.id,
-      project_id: workstream.project_id,
-      event_type: "workstream.budgetReserved",
-      payload: {
-        operation,
-        reservationUsd: reservation,
-        spentUsd: nextSpent,
-        limitUsd: limit,
-        remainingUsd: Number((limit - nextSpent).toFixed(2)),
-      },
-      source: "orchestrator",
-    });
-
-    return Math.max(0.01, Number((limit - nextSpent).toFixed(2)));
   }
 
   private hashPlanningInput(value: string): string {

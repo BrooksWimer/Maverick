@@ -13,5 +13,4 @@ Durable cross-workstream facts, decisions, conventions, blockers, and completion
 - Phase 0 cleanup removed unused agents, daily/brief paths, Codex CLI, `/work`, and stale decision-queue implementation hooks.
 - Planning now uses one Claude planning call with project context, project memory, epic context, AGENTS doctrine, recent state, and changed evidence.
 - Discord now has `/workstream repair` commands, action buttons, live status messages, and DM fallback for inaccessible channels.
-- Workstreams have a default $5 budget guardrail with reservations before paid planning, implementation, verification, and review work.
 - Linux/server vs Windows/client role selection is controlled by `MAVERICK_ROLE`; only the server role owns Discord, reminder workers, and worktree reaping.
