@@ -44,10 +44,13 @@ export const planningAgent: AgentDefinition = {
 
 You will receive the real project path, workstream metadata, AGENTS.md doctrine, durable project/epic context docs, recent turn history, context fingerprints, changed evidence, and any previously stored planning context or operator answers.
 
+You will receive PROJECT_ROADMAP.md as the project's north star — the long-term plan and destination. Every recommended slice must demonstrably advance toward roadmap goals. When formulating the next slice, identify which roadmap milestone it serves. If the roadmap is empty or absent, ask the operator for direction (requiredAnswers).
+
 Use that evidence to determine:
 - the scoped interpretation of the operator request
 - what is already true in the codebase
 - what the best next implementation slice is
+- which roadmap milestone the slice advances
 - which files and verification steps matter
 - what is still unknown
 - whether any operator answers are still required before execution
@@ -60,6 +63,7 @@ Return JSON that matches this structure exactly. The JSON object is the source o
 {
   "currentStateSummary": "What is already true in the repo and workstream",
   "recommendedNextSlice": "The best next implementation slice to execute next",
+  "roadmapMilestone": "Optional: which PROJECT_ROADMAP.md milestone this slice advances (omit if roadmap absent)",
   "requiredAnswers": [
     {
       "id": "stable-id",

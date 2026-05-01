@@ -192,6 +192,8 @@ export interface PlanningContextBundle {
   projectContext: string;
   projectMemoryPath: string | null;
   projectMemory: string;
+  roadmapPath: string | null;
+  roadmap: string;
   epicContextPath: string | null;
   epicContext: string;
   agentsPath: string | null;
@@ -210,6 +212,7 @@ export interface PlanningContextBundle {
 export interface PlanningResult {
   currentStateSummary: string;
   recommendedNextSlice: string;
+  roadmapMilestone?: string | null;
   requiredAnswers: PlanningDecision[];
   importantDecisions: PlanningDecision[];
   draftExecutionPrompt: string;

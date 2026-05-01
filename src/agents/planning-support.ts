@@ -236,9 +236,12 @@ function normalizeResultFromStructured(
         .filter((entry): entry is PlanningDecision => entry !== null)
     : [];
 
+  const roadmapMilestone = asTrimmedString(structured.roadmapMilestone) || null;
+
   return {
     currentStateSummary,
     recommendedNextSlice,
+    roadmapMilestone,
     requiredAnswers,
     importantDecisions,
     draftExecutionPrompt: asTrimmedString(structured.draftExecutionPrompt),
@@ -257,6 +260,7 @@ function fallbackPlanningResult(rawOutput: string): PlanningResult {
   return {
     currentStateSummary: "Planning returned unstructured output. Review the stored raw plan text before dispatch.",
     recommendedNextSlice: "Review the raw planning output and answer any pending planning questions before dispatch.",
+    roadmapMilestone: null,
     requiredAnswers: [],
     importantDecisions: [],
     draftExecutionPrompt: "",
@@ -411,6 +415,7 @@ export function structureRawPlanningOutput(params: {
   return {
     currentStateSummary: summarizeStructuredPlan(rawAgentOutput, finalExecutionPrompt),
     recommendedNextSlice: "Dispatch the recovered execution prompt from the durable planning record.",
+    roadmapMilestone: null,
     requiredAnswers: [],
     importantDecisions: [],
     draftExecutionPrompt: finalExecutionPrompt,
@@ -487,6 +492,8 @@ function normalizePlanningContextBundle(value: unknown): PlanningContextBundle |
     projectContext: asTrimmedString(value.projectContext),
     projectMemoryPath: asTrimmedString(value.projectMemoryPath) || null,
     projectMemory: asTrimmedString(value.projectMemory),
+    roadmapPath: asTrimmedString(value.roadmapPath) || null,
+    roadmap: asTrimmedString(value.roadmap),
     epicContextPath: asTrimmedString(value.epicContextPath) || null,
     epicContext: asTrimmedString(value.epicContext),
     agentsPath: asTrimmedString(value.agentsPath) || null,
@@ -728,6 +735,9 @@ export function renderPlanningSummary(
         context.contextBundle.projectMemoryPath
           ? `Project memory: ${context.contextBundle.projectMemoryPath}`
           : "Project memory: none",
+        context.contextBundle.roadmapPath
+          ? `Project roadmap: ${context.contextBundle.roadmapPath}`
+          : "Project roadmap: none",
       ].join("\n")
     : "None recorded.";
   const pendingQuestions = context.pendingQuestions.length > 0
@@ -774,6 +784,9 @@ export function renderPlanningSummary(
     "",
     "Recommended next slice:",
     context.result.recommendedNextSlice || "None recorded.",
+    "",
+    "Roadmap milestone served:",
+    context.result.roadmapMilestone || "None recorded.",
     "",
     "Pending planning questions:",
     pendingQuestions,

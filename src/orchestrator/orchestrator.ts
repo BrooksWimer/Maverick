@@ -3380,6 +3380,23 @@ export class Orchestrator {
     }
   }
 
+  private projectRoadmapPath(project: ProjectConfig): string {
+    return resolve(project.repoPath, "docs", "maverick", "PROJECT_ROADMAP.md");
+  }
+
+  private readProjectRoadmap(project: ProjectConfig): { path: string; content: string } {
+    const path = this.projectRoadmapPath(project);
+    if (!existsSync(path)) {
+      return { path, content: "" };
+    }
+
+    try {
+      return { path, content: readFileSync(path, "utf8") };
+    } catch {
+      return { path, content: "" };
+    }
+  }
+
   private appendProjectMemoryEntry(workstream: WorkstreamRow, completedBy: string): string | null {
     const project = this.getProject(workstream.project_id);
     const path = this.projectMemoryPath(project);
@@ -3501,6 +3518,7 @@ export class Orchestrator {
     const project = this.getProject(workstream.project_id);
     const projectDoc = this.readPlanningDoc(project, "docs/maverick/PROJECT_CONTEXT.md");
     const projectMemoryDoc = this.readProjectMemory(project);
+    const projectRoadmapDoc = this.readProjectRoadmap(project);
     const epicDoc = workstream.epic_id
       ? this.readPlanningDoc(project, `docs/maverick/epics/${workstream.epic_id}.md`)
       : { path: "", content: "" };
@@ -3518,6 +3536,7 @@ export class Orchestrator {
     const fingerprintInputs = {
       projectContext: this.hashPlanningInput(projectDoc.content),
       projectMemory: this.hashPlanningInput(projectMemoryDoc.content),
+      roadmap: this.hashPlanningInput(projectRoadmapDoc.content),
       epicContext: this.hashPlanningInput(epicDoc.content),
       agentsMd: this.hashPlanningInput(agentsMd),
       projectConfig: this.hashPlanningInput(JSON.stringify({
@@ -3548,6 +3567,11 @@ export class Orchestrator {
       projectContext: this.summarizePlanningDoc(projectDoc.content, "No durable project context doc is present yet."),
       projectMemoryPath: existsSync(projectMemoryDoc.path) ? projectMemoryDoc.path : null,
       projectMemory: this.summarizePlanningDoc(projectMemoryDoc.content, "No PROJECT_MEMORY.md entries recorded yet."),
+      roadmapPath: existsSync(projectRoadmapDoc.path) ? projectRoadmapDoc.path : null,
+      roadmap: this.summarizePlanningDoc(
+        projectRoadmapDoc.content,
+        "No PROJECT_ROADMAP.md is present yet. Ask the operator for direction before recommending a slice.",
+      ),
       epicContextPath: epicDoc.path || null,
       epicContext: this.summarizePlanningDoc(epicDoc.content, "No durable epic context doc is present yet."),
       agentsPath: existsSync(agentsMdPath) ? agentsMdPath : null,
@@ -3898,6 +3922,7 @@ export class Orchestrator {
       extra: {
         "Bounded Project Context": contextBundle?.projectContext ?? "No bounded project context provided.",
         "Project Memory": contextBundle?.projectMemory ?? "No project memory provided.",
+        "Project Roadmap (north star)": contextBundle?.roadmap ?? "No project roadmap provided.",
         "Bounded Epic Context": contextBundle?.epicContext ?? "No bounded epic context provided.",
         "Context Fingerprint": contextBundle ? JSON.stringify({
           contextFingerprint: contextBundle.contextFingerprint,
