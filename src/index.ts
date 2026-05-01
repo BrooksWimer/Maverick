@@ -11,9 +11,8 @@ import { Orchestrator } from "./orchestrator/index.js";
 import { createHttpServer } from "./http/server.js";
 import { createDiscordBot } from "./discord/index.js";
 import { createLogger } from "./logger.js";
-import { createAssistantMirrorService, createAssistantService } from "./assistant/index.js";
-import { DailyBriefService } from "./daily-brief/index.js";
-import { eventBus } from "./orchestrator/event-bus.js";
+import { createAssistantService } from "./assistant/index.js";
+import { getRuntimeRole, ownsServerSideWork } from "./runtime/identity.js";
 
 loadEnvironment();
 
@@ -29,7 +28,9 @@ function isRecoverableHttpStartupError(error: unknown): boolean {
 }
 
 async function main() {
-  log.info("Starting Codex Orchestrator");
+  const runtimeRole = getRuntimeRole();
+  const serverSide = ownsServerSideWork();
+  log.info({ runtimeRole }, "Starting Codex Orchestrator");
 
   // Load config
   const configArgIndex = process.argv.findIndex((arg) => arg === "--config");
@@ -45,20 +46,12 @@ async function main() {
   const orchestrator = new Orchestrator(config);
   await orchestrator.initialize();
 
-  const assistantMirror = createAssistantMirrorService(config);
-  assistantMirror.start();
-  const assistant = createAssistantService(config, {
-    mirror: assistantMirror,
-  });
-  assistant.start();
-  const dailyBrief = new DailyBriefService(orchestrator, config);
-  dailyBrief.start();
-
-  eventBus.on("turn.completed", () => assistantMirror.queueSync("turn.completed"));
-  eventBus.on("plan.generated", () => assistantMirror.queueSync("plan.generated"));
-  eventBus.on("review.completed", () => assistantMirror.queueSync("review.completed"));
-  eventBus.on("verification.completed", () => assistantMirror.queueSync("verification.completed"));
-  eventBus.on("brief.generated", () => assistantMirror.queueSync("brief.generated"));
+  const assistant = createAssistantService(config);
+  if (serverSide) {
+    assistant.start();
+  } else {
+    log.info("Maverick client role detected; assistant reminder workers are disabled on this host");
+  }
 
   // Start HTTP server
   let httpServer: Awaited<ReturnType<typeof createHttpServer>> | undefined;
@@ -87,11 +80,23 @@ async function main() {
   }
 
   let discordBot: ReturnType<typeof createDiscordBot> | null = null;
-  if (config.discord.enabled) {
-    discordBot = createDiscordBot(orchestrator, config, assistant, dailyBrief);
+  if (config.discord.enabled && serverSide) {
+    discordBot = createDiscordBot(orchestrator, config, assistant);
     if (discordBot) {
       await discordBot.start();
     }
+  } else if (config.discord.enabled) {
+    log.info("Maverick client role detected; Discord bot connection is disabled on this host");
+  }
+
+  let worktreeReaperTimer: NodeJS.Timeout | null = null;
+  if (serverSide) {
+    worktreeReaperTimer = setInterval(() => {
+      void orchestrator.reapFinishedWorkstreams().catch((error) => {
+        log.warn({ err: error }, "Background worktree reaper failed");
+      });
+    }, 5 * 60 * 1000);
+    worktreeReaperTimer.unref();
   }
 
   log.info("Codex Orchestrator is running");
@@ -122,9 +127,10 @@ async function main() {
     if (discordBot) {
       await runShutdownStep("discord-bot", () => discordBot!.stop());
     }
-    await runShutdownStep("daily-brief", () => dailyBrief.shutdown());
+    if (worktreeReaperTimer) {
+      clearInterval(worktreeReaperTimer);
+    }
     await runShutdownStep("assistant", () => assistant.shutdown());
-    await runShutdownStep("assistant-mirror", () => assistantMirror.shutdown());
     await runShutdownStep("orchestrator", () => orchestrator.shutdown());
     if (httpServer) {
       await runShutdownStep("http-server", () => httpServer!.close());

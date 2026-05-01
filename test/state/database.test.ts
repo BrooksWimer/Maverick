@@ -93,7 +93,7 @@ describe("initDatabase legacy migrations", () => {
         cwd TEXT,
         branch TEXT,
         codex_thread_id TEXT,
-        execution_backend TEXT NOT NULL DEFAULT 'codex-cli',
+        execution_backend TEXT NOT NULL DEFAULT 'codex-app-server',
         discord_channel_id TEXT,
         discord_thread_id TEXT,
         waiting_on_approval INTEGER NOT NULL DEFAULT 0,

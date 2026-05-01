@@ -11,7 +11,79 @@
  * exploring the repo systematically to build confidence in scope decisions.
  */
 
-import type { AgentDefinition } from "./types.js";
+import type { AgentDefinition, IntakeResult } from "./types.js";
+
+function asTrimmedString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => asTrimmedString(entry))
+    .filter((entry) => entry.length > 0);
+}
+
+export function parseIntakeResult(
+  structured: Record<string, unknown> | null,
+  instruction: string,
+): IntakeResult {
+  if (!structured) {
+    return {
+      request: instruction,
+      scope: instruction,
+      outOfScope: "",
+      acceptanceCriteria: [],
+      risks: [],
+      complexity: "medium",
+      recommendation: "proceed",
+      clarificationQuestions: [],
+    };
+  }
+
+  return {
+    request: asTrimmedString(structured.request) || instruction,
+    scope: asTrimmedString(structured.scope) || instruction,
+    outOfScope: asTrimmedString(structured.outOfScope),
+    acceptanceCriteria: asStringArray(structured.acceptanceCriteria),
+    risks: asStringArray(structured.risks),
+    complexity:
+      structured.complexity === "small" ||
+      structured.complexity === "medium" ||
+      structured.complexity === "large"
+        ? structured.complexity
+        : "medium",
+    recommendation:
+      structured.recommendation === "needs-clarification" ||
+      structured.recommendation === "split-into-multiple" ||
+      structured.recommendation === "proceed"
+        ? structured.recommendation
+        : "proceed",
+    clarificationQuestions: asStringArray(structured.clarificationQuestions),
+  };
+}
+
+export function renderIntakeMarkdown(intake: IntakeResult): string {
+  return [
+    `Request: ${intake.request}`,
+    `Scope: ${intake.scope}`,
+    intake.outOfScope ? `Out of scope: ${intake.outOfScope}` : null,
+    intake.acceptanceCriteria.length > 0
+      ? `Acceptance criteria: ${intake.acceptanceCriteria.join("; ")}`
+      : null,
+    intake.risks.length > 0 ? `Risks: ${intake.risks.join("; ")}` : null,
+    `Complexity: ${intake.complexity}`,
+    `Recommendation: ${intake.recommendation}`,
+    intake.clarificationQuestions && intake.clarificationQuestions.length > 0
+      ? `Clarification questions: ${intake.clarificationQuestions.join("; ")}`
+      : null,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
 
 export const intakeAgent: AgentDefinition = {
   id: "intake",

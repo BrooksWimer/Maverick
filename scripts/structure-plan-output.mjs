@@ -8,7 +8,6 @@ import {
   renderPlanningSummary,
   structureRawPlanningOutput,
 } from "../dist/agents/planning-support.js";
-import { coerceExplanationResult } from "../dist/agents/response-formatting-support.js";
 
 function argValue(name) {
   const inline = process.argv.find((arg) => arg.startsWith(`${name}=`));
@@ -100,31 +99,12 @@ if (!result) {
   throw new Error("Raw planning output could not be structured deterministically.");
 }
 
-const baseContext = buildPlanningContextRecord({
-  originalInstruction: existingContext.originalInstruction,
-  result,
-  rawAgentOutput: existingContext.rawAgentOutput,
-  contextBundle: existingContext.contextBundle,
-  intake: existingContext.intake,
-  goalFrame: existingContext.goalFrame,
-  modeling: existingContext.modeling,
-  testDesign: existingContext.testDesign,
-  answers: existingContext.answers,
-  planningThreadId: existingContext.planningThreadId,
-  previous: existingContext,
-});
-const explanation = coerceExplanationResult(null, baseContext, baseContext.feedbackRequest);
 const structuredContext = buildPlanningContextRecord({
   originalInstruction: existingContext.originalInstruction,
   result,
   rawAgentOutput: existingContext.rawAgentOutput,
   contextBundle: existingContext.contextBundle,
   intake: existingContext.intake,
-  goalFrame: existingContext.goalFrame,
-  modeling: existingContext.modeling,
-  testDesign: existingContext.testDesign,
-  feedbackRequest: baseContext.feedbackRequest,
-  explanation,
   answers: existingContext.answers,
   planningThreadId: existingContext.planningThreadId,
   previous: existingContext,

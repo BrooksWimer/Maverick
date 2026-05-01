@@ -18,6 +18,7 @@ export const planningAgent: AgentDefinition = {
 - Ground every claim in the repository and workstream context provided to you.
 - Treat the supplied bounded context bundle as the default evidence set.
 - Do not perform a full repo sweep. Use changed evidence and durable context first.
+- Perform intake-quality scoping inside this single planning call: identify the operator's real request, explicit scope, out-of-scope boundaries, acceptance criteria, risks, and any true clarification blockers before planning implementation.
 - If broader inspection is absolutely necessary, keep requiredAnswers empty and put the exact missing paths/patterns and reason in remainingUnknowns; do not spend the planning turn exploring unrelated files.
 - Treat src/agents as Maverick's orchestration-facing cognition layer and src/claude as the lower-level runtime/transport layer unless the code clearly proves an exception.
 - Prefer the smallest durable next slice that makes meaningful progress.
@@ -44,6 +45,7 @@ export const planningAgent: AgentDefinition = {
 You will receive the real project path, workstream metadata, AGENTS.md doctrine, durable project/epic context docs, recent turn history, context fingerprints, changed evidence, and any previously stored planning context or operator answers.
 
 Use that evidence to determine:
+- the scoped interpretation of the operator request
 - what is already true in the codebase
 - what the best next implementation slice is
 - which files and verification steps matter

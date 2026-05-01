@@ -115,7 +115,6 @@ ensure_directories() {
   install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0755 "$(dirname "${NETWISE_DIR}")"
   install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0755 "$(dirname "${SYNCSONIC_DIR}")"
   install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0755 "${STATE_DIR}"
-  install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0755 "${STATE_DIR}/daily-briefs"
   install -d -o root -g "${SERVICE_GROUP}" -m 0750 /etc/maverick
 }
 

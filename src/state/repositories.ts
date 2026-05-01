@@ -41,6 +41,8 @@ export interface WorkstreamRow {
   plan: string | null;
   planning_context_json: string | null;
   verification_context_json: string | null;
+  budget_limit_usd: number;
+  budget_spent_usd: number;
   created_at: string;
   updated_at: string;
   last_activity_at: string;
@@ -332,7 +334,8 @@ const localWorkstreams = {
   update(id: string, fields: Partial<Pick<WorkstreamRow,
     "state" | "current_goal" | "cwd" | "branch" | "base_branch" | "codex_thread_id" |
     "discord_channel_id" | "discord_thread_id" | "discord_parent_channel_id" | "workspace_mode" | "waiting_on_approval" |
-    "pending_decision" | "summary" | "plan" | "planning_context_json" | "verification_context_json" | "completed_at"
+    "pending_decision" | "summary" | "plan" | "planning_context_json" | "verification_context_json" |
+    "budget_limit_usd" | "budget_spent_usd" | "completed_at"
   >>): WorkstreamRow | undefined {
     const db = getDatabase();
     const sets: string[] = ["updated_at = datetime('now')", "last_activity_at = datetime('now')"];
@@ -1299,6 +1302,16 @@ const localActiveWorkstreamOperations = {
       SET status = 'completed', completed_at = ?, last_seen_at = ?
       WHERE workstream_id = ? AND owner_instance_id = ? AND status = 'running'
     `).run(new Date().toISOString(), new Date().toISOString(), workstreamId, ownerInstanceId);
+  },
+
+  clear(workstreamId: string): number {
+    const db = getDatabase();
+    const result = db.prepare(`
+      UPDATE active_workstream_operations
+      SET status = 'completed', completed_at = datetime('now'), last_seen_at = datetime('now')
+      WHERE workstream_id = ? AND status = 'running'
+    `).run(workstreamId);
+    return result.changes;
   },
 
   clearForOwner(ownerInstanceId = getRuntimeInstanceId()): number {

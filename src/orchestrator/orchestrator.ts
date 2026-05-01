@@ -10,33 +10,15 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
-import {
-  BriefCollector,
-  briefFilename,
-  cronMatchesDate,
-  renderBriefMarkdown,
-  scheduledMinuteKey,
-  summarizeBrief,
-  type BriefTrigger,
-  type GeneratedBrief,
-} from "../claude/index.js";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { runAgent } from "../agents/agent-runner.js";
-import { coerceBriefAgentResult, renderBriefContent } from "../agents/brief-support.js";
 import { renderEpicContextAnalysis } from "../agents/epic-context-support.js";
-import {
-  parseGoalFrameResult,
-  parseIntakeResult,
-  renderGoalFrameMarkdown,
-  renderIntakeMarkdown,
-} from "../agents/goal-framing-support.js";
+import { renderIntakeMarkdown } from "../agents/intake-agent.js";
 import {
   buildIncidentContinuationInstruction,
   coerceIncidentTriageResult,
 } from "../agents/incident-triage-support.js";
-import { parseModelingResult, renderModelingMarkdown } from "../agents/modeling-support.js";
-import { coerceOperatorFeedbackResult, renderOperatorFeedbackMarkdown } from "../agents/operator-feedback-support.js";
 import {
   buildPlanningContextRecord,
   mergePlanningAnswers,
@@ -46,9 +28,7 @@ import {
   serializePlanningAnswers,
   structureRawPlanningOutput,
 } from "../agents/planning-support.js";
-import { coerceExplanationResult } from "../agents/response-formatting-support.js";
 import { coerceReviewAgentResult } from "../agents/review-support.js";
-import { parseTestDesignResult, renderTestDesignMarkdown } from "../agents/test-design-support.js";
 import {
   buildVerificationContextRecord,
   coerceVerificationResult,
@@ -103,16 +83,10 @@ import {
 import { getRuntimeInstanceId } from "../runtime/identity.js";
 import type {
   AgentResult,
-  ExplanationResult,
-  GoalFrameResult,
-  IntakeResult,
-  ModelingResult,
-  OperatorFeedbackResult,
   PlanningAnswer,
   PlanningContextBundle,
   PlanningContextRecord,
   PlanningResult,
-  TestDesignResult,
   VerificationContextRecord,
 } from "../agents/types.js";
 
@@ -133,6 +107,14 @@ type GeneratePlanOptions = {
 
 type VerificationRunTrigger = "manual" | "auto";
 type WorkstreamFinishTrigger = "manual" | "auto";
+
+const DEFAULT_WORKSTREAM_BUDGET_LIMIT_USD = 5;
+const WORKSTREAM_BUDGET_RESERVATIONS_USD = {
+  planning: 0.5,
+  implementation: 1,
+  verification: 0.75,
+  review: 0.75,
+} as const;
 
 export interface LaneTarget {
   projectId: string;
@@ -183,24 +165,36 @@ export interface DiscordThreadBindingRepair {
   };
 }
 
+export type WorkstreamRepairAction =
+  | "force-unblock"
+  | "reset-to-planning"
+  | "rebind-thread";
+
+export interface WorkstreamRepairResult {
+  action: WorkstreamRepairAction;
+  workstreamId: string;
+  workstreamName: string;
+  stateBefore: string;
+  stateAfter: string;
+  cancelledTurns: number;
+  expiredApprovals: number;
+  clearedActiveOperations: number;
+  message: string;
+}
+
+export interface WorkstreamThreadRebindInput {
+  channelId: string;
+  threadId?: string | null;
+  parentChannelId?: string | null;
+  reboundBy?: string;
+}
+
 type PlanningRoutingAgent =
-  | "intake"
-  | "goal-framing"
-  | "modeling"
-  | "test-design"
   | "planning"
-  | "operator-feedback"
-  | "response-formatting"
   | "epic-context";
 
 const PLANNING_AGENT_ROUTE_KEYS = {
-  intake: "intake",
-  "goal-framing": "goalFraming",
-  modeling: "modeling",
-  "test-design": "testDesign",
   planning: "planning",
-  "operator-feedback": "operatorFeedback",
-  "response-formatting": "responseFormatting",
   "epic-context": "epicContext",
 } as const satisfies Record<
   PlanningRoutingAgent,
@@ -372,9 +366,6 @@ export class Orchestrator {
   private activeOperationByWorkstream = new Map<string, ActiveOperationState>();
   private projectBootstrap = new Map<string, BootstrapStatus>();
   private utilityClaudeAdapter: ExecutionBackendAdapter | null = null;
-  private briefTimer: NodeJS.Timeout | null = null;
-  private lastBriefScheduleKey: string | null = null;
-  private briefInFlight: Promise<GeneratedBrief> | null = null;
   private initialized = false;
 
   constructor(config: OrchestratorConfig) {
@@ -453,16 +444,11 @@ export class Orchestrator {
     await this.recoverActiveWorkstreams();
 
     this.initialized = true;
-    this.startBriefScheduler();
     log.info({ projects: this.config.projects.length }, "Orchestrator initialized");
   }
 
   async shutdown(): Promise<void> {
     log.info("Shutting down orchestrator");
-    if (this.briefTimer) {
-      clearInterval(this.briefTimer);
-      this.briefTimer = null;
-    }
     for (const [id, adapter] of this.adapters) {
       log.info({ projectId: id }, "Shutting down adapter");
       await adapter.shutdown();
@@ -659,8 +645,10 @@ export class Orchestrator {
     const startedAt = new Date().toISOString();
     this.beginActiveOperation(workstreamId, "implementation", startedAt);
 
+    let remainingBudgetUsd = 0.01;
     let turn: TurnRow;
     try {
+      remainingBudgetUsd = this.reserveWorkstreamBudget(dispatchWorkstream, "implementation");
       // Create turn record only after the shared DB guard is held.
       turn = turns.create({
         workstream_id: workstreamId,
@@ -706,6 +694,7 @@ export class Orchestrator {
         threadId: dispatchWorkstream.codex_thread_id!,
         instruction: executionInstruction,
         cwd: this.resolveExecutionWorkspace(dispatchWorkstream),
+        maxBudgetUsd: remainingBudgetUsd,
       });
 
       // Update turn
@@ -865,6 +854,8 @@ export class Orchestrator {
       pending_decision: null,
       completed_at: new Date().toISOString(),
     });
+    const archivedWorkstream = workstreams.getById(workstreamId) ?? { ...ws, state: "done" };
+    const projectMemoryPath = this.appendProjectMemoryEntry(archivedWorkstream, archivedBy);
 
     eventBus.emit("workstream.stateChanged", {
       workstreamId,
@@ -883,6 +874,7 @@ export class Orchestrator {
         interruptedActiveTurn: Boolean(activeTurnId),
         cancelledTurns,
         expiredApprovals,
+        projectMemoryPath,
       },
       source: "orchestrator",
     });
@@ -1020,6 +1012,59 @@ export class Orchestrator {
     };
   }
 
+  async reapFinishedWorkstreams(): Promise<{
+    cleaned: WorkstreamCleanupResult[];
+    skipped: Array<{ workstreamId: string; reason: string }>;
+  }> {
+    const cleaned: WorkstreamCleanupResult[] = [];
+    const skipped: Array<{ workstreamId: string; reason: string }> = [];
+
+    for (const project of this.config.projects) {
+      for (const workstream of workstreams.listByProject(project.id)) {
+        if (
+          workstream.state !== "done" ||
+          workstream.workspace_mode !== "worktree" ||
+          !workstream.cwd ||
+          !workstream.branch ||
+          !workstream.base_branch
+        ) {
+          continue;
+        }
+
+        try {
+          const result = await this.cleanupFinishedWorkstream(workstream.id);
+          if (result.git.status === "cleaned") {
+            cleaned.push(result);
+          } else {
+            skipped.push({
+              workstreamId: workstream.id,
+              reason: result.git.reason ?? "Cleanup skipped.",
+            });
+          }
+        } catch (error) {
+          skipped.push({
+            workstreamId: workstream.id,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    if (cleaned.length > 0 || skipped.length > 0) {
+      eventLog.emit({
+        event_type: "workstream.reaperCompleted",
+        payload: {
+          cleaned: cleaned.length,
+          skipped: skipped.length,
+          skippedWorkstreams: skipped.slice(0, 20),
+        },
+        source: "orchestrator",
+      });
+    }
+
+    return { cleaned, skipped };
+  }
+
   async verifyLane(projectId: string, laneId?: string | null): Promise<LaneLifecycleResult> {
     const lane = this.resolveLaneTarget(projectId, laneId);
     const project = this.getProject(projectId);
@@ -1096,13 +1141,15 @@ export class Orchestrator {
     const latestTurn = turns.listByWorkstream(ws.id).slice(-1)[0] ?? null;
     this.beginActiveOperation(workstreamId, "review");
     try {
+      const remainingBudgetUsd = this.reserveWorkstreamBudget(ws, "review");
       const result =
         reviewer === "claude"
-          ? await this.runClaudeReview(ws, effectiveTarget, latestTurn?.id ?? null)
+          ? await this.runClaudeReview(ws, effectiveTarget, latestTurn?.id ?? null, remainingBudgetUsd)
           : await this.getAdapter(ws.project_id).startReview({
               threadId: runtimeThreadId!,
               cwd: this.resolveExecutionWorkspace(ws),
               target: effectiveTarget,
+              maxBudgetUsd: remainingBudgetUsd,
             });
 
       this.touchProgress("review", workstreamId, latestTurn?.id ?? undefined);
@@ -1177,6 +1224,7 @@ export class Orchestrator {
     const epicContextAnalysis = await this.getAgentEpicContextAnalysis(workstream, verificationConfig.model);
     this.beginActiveOperation(workstreamId, "verification");
     try {
+      const remainingBudgetUsd = this.reserveWorkstreamBudget(workstream, "verification");
       const agentResult = await runAgent(
         adapter,
         "verification",
@@ -1205,9 +1253,6 @@ export class Orchestrator {
             "Git Status": this.readGitOutput(["status", "--short", "--branch"], cwd),
             "Git Diff": this.readGitReviewDiff(cwd, "uncommitted"),
             "Structured Intake": planningContext?.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
-            "Goal Frame": planningContext?.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
-            "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
-            "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
             "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
           },
         },
@@ -1216,6 +1261,7 @@ export class Orchestrator {
           model: verificationConfig.model,
           maxTurns: 8,
           permissionMode: "auto",
+          maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
           onOutput: this.buildOperationOutputHandler("verification", workstream.id, latestTurn?.id ?? null),
         },
       );
@@ -1277,33 +1323,6 @@ export class Orchestrator {
     }
   }
 
-  async generateBrief(options?: {
-    trigger?: BriefTrigger;
-    requestedBy?: string;
-    channelId?: string | null;
-  }): Promise<GeneratedBrief> {
-    if (!this.config.brief.enabled) {
-      throw new Error("Claude brief generation is disabled in config.brief.enabled.");
-    }
-
-    if (this.briefInFlight) {
-      throw new Error("A Claude brief is already running.");
-    }
-
-    const promise = this.generateBriefInternal({
-      trigger: options?.trigger ?? "manual",
-      requestedBy: options?.requestedBy ?? "system",
-      channelId: options?.channelId ?? this.config.brief.discordChannelId ?? this.config.discord.defaultNotificationChannelId ?? null,
-    });
-
-    this.briefInFlight = promise;
-    try {
-      return await promise;
-    } finally {
-      this.briefInFlight = null;
-    }
-  }
-
   async generatePlan(
     workstreamId: string,
     instruction: string,
@@ -1349,73 +1368,13 @@ export class Orchestrator {
     const epicContextAnalysis = contextBundle.epicContext;
     this.beginActiveOperation(workstreamId, "planning");
     try {
-      const intake =
-        previousContext?.intake ??
-        await this.runPlanningIntake(
-          workstream,
-          effectiveInstruction,
-          this.resolvePlanningAgentModel(project, "intake"),
-          epicContextAnalysis,
-          contextBundle,
-        );
+      const remainingBudgetUsd = this.reserveWorkstreamBudget(workstream, "planning");
       let checkpoint = this.checkpointPlanningContext({
         workstream,
         instruction: effectiveInstruction,
-        stage: "scope framing",
+        stage: "planning request",
         contextBundle,
         previous: previousContext,
-        intake,
-      });
-      const goalFrame =
-        previousContext?.goalFrame ??
-        parseGoalFrameResult(null, intake);
-      checkpoint = this.checkpointPlanningContext({
-        workstream,
-        instruction: effectiveInstruction,
-        stage: "goal framing",
-        contextBundle,
-        previous: checkpoint,
-        intake,
-        goalFrame,
-      });
-      const modeling =
-        previousContext?.modeling && !contextBundle.fingerprintChanged
-          ? previousContext.modeling
-          :
-        await this.runPlanningModeling(
-          workstream,
-          effectiveInstruction,
-          intake,
-          goalFrame,
-          this.resolvePlanningAgentModel(project, "modeling"),
-          epicContextAnalysis,
-          contextBundle,
-          previousContext?.modeling ?? null,
-        );
-      checkpoint = this.checkpointPlanningContext({
-        workstream,
-        instruction: effectiveInstruction,
-        stage: contextBundle.fingerprintChanged ? "model update" : "model reuse",
-        contextBundle,
-        previous: checkpoint,
-        intake,
-        goalFrame,
-        modeling,
-      });
-      const testDesign =
-        previousContext?.testDesign && !contextBundle.fingerprintChanged
-          ? previousContext.testDesign
-          : this.buildDeterministicTestDesign(workstream, goalFrame, contextBundle);
-      checkpoint = this.checkpointPlanningContext({
-        workstream,
-        instruction: effectiveInstruction,
-        stage: "verification synthesis",
-        contextBundle,
-        previous: checkpoint,
-        intake,
-        goalFrame,
-        modeling,
-        testDesign,
       });
       const agentResult = await runAgent(
         adapter,
@@ -1423,10 +1382,6 @@ export class Orchestrator {
         this.buildPlanningAgentContext(
           workstream,
           effectiveInstruction,
-          intake,
-          goalFrame,
-          modeling,
-          testDesign,
           previousContext,
           undefined,
           epicContextAnalysis,
@@ -1439,6 +1394,7 @@ export class Orchestrator {
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
           ...this.planningAgentGuardrails("plan"),
+          maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
         },
       );
 
@@ -1452,33 +1408,13 @@ export class Orchestrator {
         agentResult,
         contextBundle,
       );
-      const basePlanningContext = buildPlanningContextRecord({
-        originalInstruction: effectiveInstruction,
-        result: planningResult,
-        rawAgentOutput: agentResult.output,
-        contextBundle,
-        intake,
-        goalFrame,
-        modeling,
-        testDesign,
-        planningThreadId: agentResult.threadId,
-        previous: previousContext,
-      });
-      const feedbackRequest = basePlanningContext.feedbackRequest;
-      const explanation = coerceExplanationResult(null, basePlanningContext, feedbackRequest);
       const planningContext = buildPlanningContextRecord({
         originalInstruction: effectiveInstruction,
         result: planningResult,
         rawAgentOutput: agentResult.output,
         contextBundle,
-        intake,
-        goalFrame,
-        modeling,
-        testDesign,
-        feedbackRequest,
-        explanation,
         planningThreadId: agentResult.threadId,
-        previous: previousContext,
+        previous: checkpoint,
       });
 
       const renderedPlan = this.persistPlanningContext(workstream, effectiveInstruction, planningContext, trigger);
@@ -1534,32 +1470,12 @@ export class Orchestrator {
     }
     this.assertPlanningResultIsActionable(planningResult);
 
-    const basePlanningContext = buildPlanningContextRecord({
-      originalInstruction: existingContext.originalInstruction,
-      result: planningResult,
-      rawAgentOutput: existingContext.rawAgentOutput,
-      contextBundle: existingContext.contextBundle,
-      intake: existingContext.intake,
-      goalFrame: existingContext.goalFrame,
-      modeling: existingContext.modeling,
-      testDesign: existingContext.testDesign,
-      answers: existingContext.answers,
-      planningThreadId: existingContext.planningThreadId,
-      previous: existingContext,
-    });
-    const feedbackRequest = basePlanningContext.feedbackRequest;
-    const explanation = coerceExplanationResult(null, basePlanningContext, feedbackRequest);
     const planningContext = buildPlanningContextRecord({
       originalInstruction: existingContext.originalInstruction,
       result: planningResult,
       rawAgentOutput: existingContext.rawAgentOutput,
       contextBundle: existingContext.contextBundle,
       intake: existingContext.intake,
-      goalFrame: existingContext.goalFrame,
-      modeling: existingContext.modeling,
-      testDesign: existingContext.testDesign,
-      feedbackRequest,
-      explanation,
       answers: existingContext.answers,
       planningThreadId: existingContext.planningThreadId,
       previous: existingContext,
@@ -1637,46 +1553,13 @@ export class Orchestrator {
         existingContext,
       );
       const epicContextAnalysis = contextBundle.epicContext;
-      const intake =
-        existingContext.intake ??
-        await this.runPlanningIntake(
-          workstream,
-          existingContext.originalInstruction,
-          this.resolvePlanningAgentModel(project, "intake"),
-          epicContextAnalysis,
-          contextBundle,
-        );
-      const goalFrame =
-        existingContext.goalFrame ??
-        parseGoalFrameResult(null, intake);
-      const modeling =
-        existingContext.modeling && !contextBundle.fingerprintChanged
-          ? existingContext.modeling
-          :
-        await this.runPlanningModeling(
-          workstream,
-          existingContext.originalInstruction,
-          intake,
-          goalFrame,
-          this.resolvePlanningAgentModel(project, "modeling"),
-          epicContextAnalysis,
-          contextBundle,
-          existingContext.modeling ?? null,
-        );
-      const testDesign =
-        existingContext.testDesign && !contextBundle.fingerprintChanged
-          ? existingContext.testDesign
-          : this.buildDeterministicTestDesign(workstream, goalFrame, contextBundle);
+      const remainingBudgetUsd = this.reserveWorkstreamBudget(workstream, "planning");
       const checkpoint = this.checkpointPlanningContext({
         workstream,
         instruction: existingContext.originalInstruction,
         stage: "answered planning resume",
         contextBundle,
         previous: existingContext,
-        intake,
-        goalFrame,
-        modeling,
-        testDesign,
         answers: mergedAnswers,
       });
       const agentResult = await runAgent(
@@ -1685,10 +1568,6 @@ export class Orchestrator {
         this.buildPlanningAgentContext(
           workstream,
           existingContext.originalInstruction,
-          intake,
-          goalFrame,
-          modeling,
-          testDesign,
           existingContext,
           mergedAnswers,
           epicContextAnalysis,
@@ -1701,6 +1580,7 @@ export class Orchestrator {
           permissionMode: "plan",
           onOutput: this.buildOperationOutputHandler("planning", workstream.id),
           ...this.planningAgentGuardrails("plan"),
+          maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
         },
       );
 
@@ -1714,32 +1594,11 @@ export class Orchestrator {
         agentResult,
         contextBundle,
       );
-      const basePlanningContext = buildPlanningContextRecord({
-        originalInstruction: existingContext.originalInstruction,
-        result: planningResult,
-        rawAgentOutput: agentResult.output,
-        contextBundle,
-        intake,
-        goalFrame,
-        modeling,
-        testDesign,
-        planningThreadId: agentResult.threadId,
-        answers: mergedAnswers,
-        previous: checkpoint,
-      });
-      const feedbackRequest = basePlanningContext.feedbackRequest;
-      const explanation = coerceExplanationResult(null, basePlanningContext, feedbackRequest);
       const planningContext = buildPlanningContextRecord({
         originalInstruction: existingContext.originalInstruction,
         result: planningResult,
         rawAgentOutput: agentResult.output,
         contextBundle,
-        intake,
-        goalFrame,
-        modeling,
-        testDesign,
-        feedbackRequest,
-        explanation,
         planningThreadId: agentResult.threadId,
         answers: mergedAnswers,
         previous: checkpoint,
@@ -1766,6 +1625,232 @@ export class Orchestrator {
     } finally {
       this.completeActiveOperation(workstreamId);
     }
+  }
+
+  forceUnblockWorkstream(workstreamId: string, repairedBy = "system"): WorkstreamRepairResult {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    const cancelledTurns = this.markRunningTurnsCancelled(
+      workstream.id,
+      `Force-unblocked by ${repairedBy}; stale running turn was cancelled locally.`,
+    );
+    const expiredApprovals = approvals.expirePendingByWorkstream(workstream.id, repairedBy);
+    const clearedActiveOperations = activeWorkstreamOperations.clear(workstream.id);
+    this.activeOperationByWorkstream.delete(workstream.id);
+
+    workstreams.update(workstream.id, {
+      waiting_on_approval: 0,
+      pending_decision: this.planningPendingDecisionForWorkstream(workstream),
+      current_goal: cancelledTurns > 0 ? null : workstream.current_goal,
+    });
+    const updated = workstreams.getById(workstream.id) ?? workstream;
+
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "workstream.repair.forceUnblock",
+      payload: {
+        repairedBy,
+        stateBefore: workstream.state,
+        stateAfter: updated.state,
+        cancelledTurns,
+        expiredApprovals,
+        clearedActiveOperations,
+      },
+      source: "orchestrator",
+    });
+
+    return {
+      action: "force-unblock",
+      workstreamId: updated.id,
+      workstreamName: updated.name,
+      stateBefore: workstream.state,
+      stateAfter: updated.state,
+      cancelledTurns,
+      expiredApprovals,
+      clearedActiveOperations,
+      message: "Cleared stale approvals, running-operation guards, and local running turns.",
+    };
+  }
+
+  resetWorkstreamToPlanning(workstreamId: string, repairedBy = "system"): WorkstreamRepairResult {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    const cancelledTurns = this.markRunningTurnsCancelled(
+      workstream.id,
+      `Reset to planning by ${repairedBy}; stale running turn was cancelled locally.`,
+    );
+    const expiredApprovals = approvals.expirePendingByWorkstream(workstream.id, repairedBy);
+    const clearedActiveOperations = activeWorkstreamOperations.clear(workstream.id);
+    this.activeOperationByWorkstream.delete(workstream.id);
+
+    workstreams.update(workstream.id, {
+      state: "planning",
+      current_goal: null,
+      waiting_on_approval: 0,
+      pending_decision: null,
+      plan: null,
+      planning_context_json: null,
+      verification_context_json: null,
+      completed_at: null,
+    });
+    const updated = workstreams.getById(workstream.id) ?? { ...workstream, state: "planning" };
+
+    eventBus.emit("workstream.stateChanged", {
+      workstreamId: workstream.id,
+      from: workstream.state,
+      to: "planning",
+      trigger: "repair-reset-to-planning",
+    });
+
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "workstream.repair.resetToPlanning",
+      payload: {
+        repairedBy,
+        stateBefore: workstream.state,
+        stateAfter: updated.state,
+        cancelledTurns,
+        expiredApprovals,
+        clearedActiveOperations,
+      },
+      source: "orchestrator",
+    });
+
+    return {
+      action: "reset-to-planning",
+      workstreamId: updated.id,
+      workstreamName: updated.name,
+      stateBefore: workstream.state,
+      stateAfter: updated.state,
+      cancelledTurns,
+      expiredApprovals,
+      clearedActiveOperations,
+      message: "Reset state to planning and cleared stale plan, verification, approval, and running-operation state.",
+    };
+  }
+
+  rebindWorkstreamThread(
+    workstreamId: string,
+    input: WorkstreamThreadRebindInput,
+  ): WorkstreamRepairResult {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    workstreams.update(workstream.id, {
+      discord_channel_id: input.channelId,
+      discord_thread_id: input.threadId ?? null,
+      discord_parent_channel_id: input.parentChannelId ?? null,
+    });
+    if (input.threadId && input.parentChannelId) {
+      const existingBinding = discordThreadBindings.getByThreadId(input.threadId);
+      this.upsertDiscordThreadBinding({
+        threadId: input.threadId,
+        parentChannelId: input.parentChannelId,
+        projectId: workstream.project_id,
+        epicId: workstream.epic_id,
+        lane: this.resolveLaneIdForWorktreeName(workstream),
+        baseBranch: workstream.base_branch,
+        assistantEnabled: Boolean(existingBinding?.assistant_enabled),
+        ownerInstanceId: existingBinding?.owner_instance_id ?? this.instanceId,
+        source: "repair",
+      });
+    }
+
+    const updated = workstreams.getById(workstream.id) ?? workstream;
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "workstream.repair.rebindThread",
+      payload: {
+        repairedBy: input.reboundBy ?? "system",
+        before: {
+          channelId: workstream.discord_channel_id,
+          threadId: workstream.discord_thread_id,
+          parentChannelId: workstream.discord_parent_channel_id,
+        },
+        after: {
+          channelId: updated.discord_channel_id,
+          threadId: updated.discord_thread_id,
+          parentChannelId: updated.discord_parent_channel_id,
+        },
+      },
+      source: "orchestrator",
+    });
+
+    return {
+      action: "rebind-thread",
+      workstreamId: updated.id,
+      workstreamName: updated.name,
+      stateBefore: workstream.state,
+      stateAfter: updated.state,
+      cancelledTurns: 0,
+      expiredApprovals: 0,
+      clearedActiveOperations: 0,
+      message: "Rebound the workstream to the current Discord channel/thread.",
+    };
+  }
+
+  async retryLatestWorkstreamAction(
+    workstreamId: string,
+    requestedBy = "system",
+  ): Promise<{ action: "plan" | "dispatch"; workstream: WorkstreamRow }> {
+    const workstream = workstreams.getById(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${workstreamId}`);
+    }
+
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    if (planningContext?.status === "needs-answers") {
+      throw new Error("Planning is waiting on operator answers; retry is blocked until those answers are provided.");
+    }
+
+    if (planningContext?.finalExecutionPrompt) {
+      await this.dispatch(workstream.id, planningContext.originalInstruction);
+      eventLog.emit({
+        workstream_id: workstream.id,
+        project_id: workstream.project_id,
+        event_type: "workstream.repair.retry",
+        payload: { requestedBy, action: "dispatch" },
+        source: "orchestrator",
+      });
+      return { action: "dispatch", workstream: workstreams.getById(workstream.id) ?? workstream };
+    }
+
+    const latestTurn = turns.listByWorkstream(workstream.id).at(-1);
+    const instruction = latestTurn?.instruction ?? workstream.current_goal ?? workstream.description ?? workstream.name;
+    if (latestTurn?.status === "failed" || workstream.current_goal) {
+      await this.dispatch(workstream.id, instruction);
+      eventLog.emit({
+        workstream_id: workstream.id,
+        project_id: workstream.project_id,
+        event_type: "workstream.repair.retry",
+        payload: { requestedBy, action: "dispatch" },
+        source: "orchestrator",
+      });
+      return { action: "dispatch", workstream: workstreams.getById(workstream.id) ?? workstream };
+    }
+
+    await this.generatePlan(workstream.id, instruction, "manual", {
+      resumeExisting: Boolean(planningContext),
+    });
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "workstream.repair.retry",
+      payload: { requestedBy, action: "plan" },
+      source: "orchestrator",
+    });
+    return { action: "plan", workstream: workstreams.getById(workstream.id) ?? workstream };
   }
 
   // --- Query methods ---
@@ -1843,6 +1928,11 @@ export class Orchestrator {
       currentGoal: workstream.current_goal,
       waitingOnApproval: Boolean(workstream.waiting_on_approval) || pendingApprovalCount > 0,
       pendingApprovalCount,
+      budget: {
+        limitUsd: this.workstreamBudgetLimit(workstream),
+        spentUsd: this.workstreamBudgetSpent(workstream),
+        remainingUsd: Math.max(0, this.workstreamBudgetLimit(workstream) - this.workstreamBudgetSpent(workstream)),
+      },
       health,
       healthReason: reason,
       planning: {
@@ -3108,6 +3198,7 @@ export class Orchestrator {
     workstream: WorkstreamRow,
     target: string,
     sourceTurnId: string | null,
+    remainingBudgetUsd: number,
   ): Promise<ReviewResult & { verdict?: string }> {
     const project = this.getProject(workstream.project_id);
     const reviewConfig = project.claudeReview;
@@ -3147,8 +3238,6 @@ export class Orchestrator {
           "Relevant Test Results": verificationContext
             ? renderVerificationSummary(verificationContext)
             : "No structured test results captured yet.",
-          "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "No stored system model.",
-          "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "No stored test design.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
         },
       },
@@ -3156,6 +3245,7 @@ export class Orchestrator {
         model: reviewConfig.model,
         maxTurns: 4,
         permissionMode: "plan",
+        maxBudgetUsd: Math.min(0.75, remainingBudgetUsd),
         onOutput: this.buildOperationOutputHandler("review", workstream.id, sourceTurnId),
       },
     );
@@ -3174,137 +3264,6 @@ export class Orchestrator {
       reviewResult.verdict = verdict;
     }
     return reviewResult;
-  }
-
-  private async generateBriefInternal(params: {
-    trigger: BriefTrigger;
-    requestedBy: string;
-    channelId: string | null;
-  }): Promise<GeneratedBrief> {
-    const collector = new BriefCollector(this.config);
-    const context = await collector.collect();
-    const adapter = await this.getUtilityClaudeAdapter();
-    const repoPaths = [...new Set(this.config.projects.map((project) => project.repoPath))];
-    const cwd = repoPaths[0] ?? process.cwd();
-    const agentResult = await runAgent(
-      adapter,
-      "brief",
-      {
-        projectId: "maverick-brief",
-        repoPath: cwd,
-        instruction: "Generate the daily operational brief from the provided control-plane context.",
-        cwd,
-        addDirs: repoPaths,
-        extra: {
-          "Brief Context JSON": JSON.stringify(context, null, 2),
-        },
-      },
-      {
-        model: this.config.brief.model,
-        maxTurns: 10,
-        permissionMode: "auto",
-      },
-    );
-
-    if (agentResult.status !== "completed") {
-      throw new Error(agentResult.output || "Claude brief generation failed.");
-    }
-
-    const content = renderBriefContent(coerceBriefAgentResult(agentResult.structured, agentResult.output), agentResult.output).trim();
-    if (!content) {
-      throw new Error("Claude returned an empty brief.");
-    }
-
-    const markdown = renderBriefMarkdown({
-      trigger: params.trigger,
-      generatedAt: context.generatedAt,
-      content,
-      context,
-    });
-    const storagePath = this.persistBrief(markdown, context.generatedAt);
-    const summary = summarizeBrief(content);
-
-    eventLog.emit({
-      event_type: "brief.generated",
-      payload: {
-        trigger: params.trigger,
-        requestedBy: params.requestedBy,
-        storagePath,
-        summary,
-      },
-      source: "orchestrator",
-    });
-
-    eventBus.emit("brief.generated", {
-      trigger: params.trigger,
-      generatedAt: context.generatedAt,
-      content,
-      markdown,
-      summary,
-      storagePath,
-      channelId: params.channelId,
-    });
-
-    return {
-      generatedAt: context.generatedAt,
-      trigger: params.trigger,
-      content,
-      markdown,
-      storagePath,
-      channelId: params.channelId,
-      summary,
-    };
-  }
-
-  private startBriefScheduler(): void {
-    if (!this.config.brief.enabled || !this.config.brief.schedule || this.briefTimer) {
-      return;
-    }
-
-    const timeZone = this.config.assistant.timeZone;
-    this.briefTimer = setInterval(() => {
-      if (!this.initialized) {
-        return;
-      }
-
-      const now = new Date();
-      try {
-        if (!cronMatchesDate(this.config.brief.schedule!, now, timeZone)) {
-          return;
-        }
-      } catch (error) {
-        log.warn({ err: error, schedule: this.config.brief.schedule }, "Invalid brief schedule");
-        return;
-      }
-
-      const minuteKey = scheduledMinuteKey(now, timeZone);
-      if (minuteKey === this.lastBriefScheduleKey) {
-        return;
-      }
-
-      this.lastBriefScheduleKey = minuteKey;
-      void this.generateBrief({
-        trigger: "schedule",
-        requestedBy: "scheduler",
-        channelId: this.config.brief.discordChannelId ?? this.config.discord.defaultNotificationChannelId ?? null,
-      }).catch((error) => {
-        log.warn({ err: error }, "Scheduled brief generation failed");
-      });
-    }, 60_000);
-
-    this.briefTimer.unref?.();
-    log.info(
-      { schedule: this.config.brief.schedule, timeZone },
-      "Claude brief scheduler started"
-    );
-  }
-
-  private persistBrief(markdown: string, generatedAt: string): string {
-    const storageRoot = resolve(this.config.brief.storagePath);
-    mkdirSync(storageRoot, { recursive: true });
-    const outputPath = join(storageRoot, briefFilename(generatedAt));
-    writeFileSync(outputPath, markdown, "utf8");
-    return outputPath;
   }
 
   private async getUtilityClaudeAdapter(): Promise<ExecutionBackendAdapter> {
@@ -3394,6 +3353,126 @@ export class Orchestrator {
     }
   }
 
+  private projectMemoryPath(project: ProjectConfig): string {
+    return resolve(project.repoPath, "docs", "maverick", "PROJECT_MEMORY.md");
+  }
+
+  private readProjectMemory(project: ProjectConfig): { path: string; content: string } {
+    const path = this.projectMemoryPath(project);
+    if (!existsSync(path)) {
+      return { path, content: "" };
+    }
+
+    try {
+      return { path, content: readFileSync(path, "utf8") };
+    } catch {
+      return { path, content: "" };
+    }
+  }
+
+  private appendProjectMemoryEntry(workstream: WorkstreamRow, completedBy: string): string | null {
+    const project = this.getProject(workstream.project_id);
+    const path = this.projectMemoryPath(project);
+    const planningContext = parsePlanningContextRecord(workstream.planning_context_json);
+    const verificationContext = parseVerificationContextRecord(workstream.verification_context_json);
+    const latestReport = this.getLatestOperatorReport(workstream.id);
+    const latestTurn = this.getLatestStatusTurn(workstream.id);
+    const changedFiles = this.collectWorkspaceChangedFiles(workstream).slice(0, 12);
+    const now = new Date().toISOString();
+    const lines = [
+      "",
+      `## ${now} - ${workstream.name}`,
+      "",
+      `- Workstream: ${workstream.id}`,
+      `- Completed by: ${completedBy}`,
+      workstream.epic_id ? `- Epic: ${workstream.epic_id}` : null,
+      workstream.branch ? `- Branch: ${workstream.branch}` : null,
+      workstream.summary ? `- Summary: ${workstream.summary}` : null,
+      planningContext?.result.recommendedNextSlice
+        ? `- Planned slice: ${planningContext.result.recommendedNextSlice}`
+        : null,
+      latestTurn?.resultSummary ? `- Latest turn: ${latestTurn.resultSummary}` : null,
+      verificationContext
+        ? `- Verification: ${verificationContext.result.status} (${verificationContext.result.recommendation})`
+        : null,
+      latestReport?.nextAction ? `- Last next action: ${latestReport.nextAction}` : null,
+      changedFiles.length > 0 ? `- Changed files: ${changedFiles.join(", ")}` : null,
+    ].filter((line): line is string => line !== null);
+
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      if (!existsSync(path)) {
+        writeFileSync(
+          path,
+          [
+            "# Project Memory",
+            "",
+            "Durable cross-workstream facts, decisions, conventions, blockers, and completion notes recorded by Maverick.",
+            "",
+          ].join("\n"),
+          "utf8",
+        );
+      }
+      appendFileSync(path, `${lines.join("\n")}\n`, "utf8");
+      return path;
+    } catch (error) {
+      eventBus.emit("error", {
+        workstreamId: workstream.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+        context: `Failed to append PROJECT_MEMORY.md for project ${project.id}`,
+      });
+      return null;
+    }
+  }
+
+  private workstreamBudgetLimit(workstream: WorkstreamRow): number {
+    const configured = Number(workstream.budget_limit_usd);
+    return Number.isFinite(configured) && configured > 0
+      ? configured
+      : DEFAULT_WORKSTREAM_BUDGET_LIMIT_USD;
+  }
+
+  private workstreamBudgetSpent(workstream: WorkstreamRow): number {
+    const spent = Number(workstream.budget_spent_usd);
+    return Number.isFinite(spent) && spent > 0 ? spent : 0;
+  }
+
+  private reserveWorkstreamBudget(
+    workstream: WorkstreamRow,
+    operation: keyof typeof WORKSTREAM_BUDGET_RESERVATIONS_USD,
+  ): number {
+    const reservation = WORKSTREAM_BUDGET_RESERVATIONS_USD[operation];
+    const limit = this.workstreamBudgetLimit(workstream);
+    const spent = this.workstreamBudgetSpent(workstream);
+    if (spent + reservation > limit) {
+      throw new Error(
+        `Workstream "${workstream.name}" budget would exceed $${limit.toFixed(2)} ` +
+        `(${spent.toFixed(2)} already reserved, ${reservation.toFixed(2)} requested for ${operation}).`
+      );
+    }
+
+    const nextSpent = Number((spent + reservation).toFixed(2));
+    workstreams.update(workstream.id, {
+      budget_spent_usd: nextSpent,
+    });
+
+    eventLog.emit({
+      workstream_id: workstream.id,
+      project_id: workstream.project_id,
+      event_type: "workstream.budgetReserved",
+      payload: {
+        operation,
+        reservationUsd: reservation,
+        spentUsd: nextSpent,
+        limitUsd: limit,
+        remainingUsd: Number((limit - nextSpent).toFixed(2)),
+      },
+      source: "orchestrator",
+    });
+
+    return Math.max(0.01, Number((limit - nextSpent).toFixed(2)));
+  }
+
   private hashPlanningInput(value: string): string {
     return createHash("sha256").update(value).digest("hex");
   }
@@ -3446,6 +3525,7 @@ export class Orchestrator {
   ): PlanningContextBundle {
     const project = this.getProject(workstream.project_id);
     const projectDoc = this.readPlanningDoc(project, "docs/maverick/PROJECT_CONTEXT.md");
+    const projectMemoryDoc = this.readProjectMemory(project);
     const epicDoc = workstream.epic_id
       ? this.readPlanningDoc(project, `docs/maverick/epics/${workstream.epic_id}.md`)
       : { path: "", content: "" };
@@ -3462,6 +3542,7 @@ export class Orchestrator {
     const changedFiles = this.listChangedFilesForPlanning(workstream);
     const fingerprintInputs = {
       projectContext: this.hashPlanningInput(projectDoc.content),
+      projectMemory: this.hashPlanningInput(projectMemoryDoc.content),
       epicContext: this.hashPlanningInput(epicDoc.content),
       agentsMd: this.hashPlanningInput(agentsMd),
       projectConfig: this.hashPlanningInput(JSON.stringify({
@@ -3490,6 +3571,8 @@ export class Orchestrator {
       schemaVersion: 1,
       projectContextPath: projectDoc.path || null,
       projectContext: this.summarizePlanningDoc(projectDoc.content, "No durable project context doc is present yet."),
+      projectMemoryPath: existsSync(projectMemoryDoc.path) ? projectMemoryDoc.path : null,
+      projectMemory: this.summarizePlanningDoc(projectMemoryDoc.content, "No PROJECT_MEMORY.md entries recorded yet."),
       epicContextPath: epicDoc.path || null,
       epicContext: this.summarizePlanningDoc(epicDoc.content, "No durable epic context doc is present yet."),
       agentsPath: existsSync(agentsMdPath) ? agentsMdPath : null,
@@ -3645,6 +3728,7 @@ export class Orchestrator {
     const project = this.getProject(workstream.project_id);
     const docs = [
       this.readPlanningDoc(project, "docs/maverick/PROJECT_CONTEXT.md").content,
+      this.readProjectMemory(project).content,
       workstream.epic_id
         ? this.readPlanningDoc(project, `docs/maverick/epics/${workstream.epic_id}.md`).content
         : "",
@@ -3712,10 +3796,6 @@ export class Orchestrator {
     stage: string;
     contextBundle: PlanningContextBundle;
     previous?: PlanningContextRecord | null;
-    intake?: IntakeResult | null;
-    goalFrame?: GoalFrameResult | null;
-    modeling?: ModelingResult | null;
-    testDesign?: TestDesignResult | null;
     answers?: Record<string, PlanningAnswer>;
   }): PlanningContextRecord {
     const checkpoint = buildPlanningContextRecord({
@@ -3723,10 +3803,6 @@ export class Orchestrator {
       result: this.buildCheckpointPlanningResult(params.instruction, params.stage, params.previous),
       rawAgentOutput: `Planning checkpoint saved after ${params.stage}.`,
       contextBundle: params.contextBundle,
-      intake: params.intake ?? params.previous?.intake ?? null,
-      goalFrame: params.goalFrame ?? params.previous?.goalFrame ?? null,
-      modeling: params.modeling ?? params.previous?.modeling ?? null,
-      testDesign: params.testDesign ?? params.previous?.testDesign ?? null,
       answers: params.answers,
       previous: params.previous,
     });
@@ -3736,105 +3812,6 @@ export class Orchestrator {
     });
     this.touchProgress("planning", params.workstream.id);
     return checkpoint;
-  }
-
-  private buildDeterministicTestDesign(
-    workstream: WorkstreamRow,
-    goalFrame: GoalFrameResult,
-    contextBundle: PlanningContextBundle,
-  ): TestDesignResult {
-    const project = this.getProject(workstream.project_id);
-    const changedFiles = contextBundle.changedFiles.map((file) => file.path);
-    const suggestedCommands = this.resolvePlanningVerificationCommands(project, contextBundle);
-
-    return {
-      strategySummary: [
-        "Use the narrowest verification that proves the planned slice.",
-        "Prefer existing project scripts and only expand checks when touched files or durable context require it.",
-      ].join(" "),
-      testCases: goalFrame.successCriteria.slice(0, 5).map((criterion, index) => ({
-        name: `Acceptance criterion ${index + 1}`,
-        scope: "integration",
-        purpose: criterion,
-        files: changedFiles,
-      })),
-      verificationChecklist: [
-        "Inspect git status before dispatch.",
-        "Run project-level tests or build commands relevant to changed files.",
-        "Capture evidence before finish or promotion.",
-      ],
-      suggestedCommands,
-    };
-  }
-
-  private resolvePlanningVerificationCommands(
-    project: ProjectConfig,
-    contextBundle: PlanningContextBundle,
-  ): string[] {
-    if (project.id === "portfolio-resume") {
-      return [
-        "git status --short",
-        "npx html-validate index.html projects/maverick/maverick.html projects/syncsonic/syncsonic.html projects/astra/astra.html projects/kitbash/kitbash.html projects/foodpal/foodpal.html",
-        "npx serve . --listen 8080",
-        "Manual browser review at desktop and 375px mobile viewport",
-      ];
-    }
-
-    const packageJsonPath = resolve(project.repoPath, "package.json");
-    const scripts = this.readPackageScripts(packageJsonPath);
-    const commands = ["git status --short"];
-    if (this.isMeaningfulPackageScript(scripts.test)) {
-      commands.push("npm test");
-    }
-    if (this.isMeaningfulPackageScript(scripts.build)) {
-      commands.push("npm run build");
-    }
-    if (commands.length > 1) {
-      return commands;
-    }
-
-    if (
-      contextBundle.projectContext.toLowerCase().includes("static html") ||
-      contextBundle.epicContext.toLowerCase().includes("portfolio")
-    ) {
-      return [
-        "git status --short",
-        "npx html-validate index.html",
-        "Manual browser review of changed pages",
-      ];
-    }
-
-    return commands;
-  }
-
-  private readPackageScripts(packageJsonPath: string): Record<string, string> {
-    if (!existsSync(packageJsonPath)) {
-      return {};
-    }
-
-    try {
-      const parsed = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
-        scripts?: Record<string, unknown>;
-      };
-      if (!parsed.scripts) {
-        return {};
-      }
-      return Object.fromEntries(
-        Object.entries(parsed.scripts)
-          .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-      );
-    } catch {
-      return {};
-    }
-  }
-
-  private isMeaningfulPackageScript(script: string | undefined): boolean {
-    if (!script) {
-      return false;
-    }
-
-    const normalized = script.toLowerCase();
-    return !normalized.includes("no test specified") && !normalized.includes("exit 1");
   }
 
   private async getAgentEpicContextAnalysis(
@@ -3900,355 +3877,9 @@ export class Orchestrator {
     return renderEpicContextAnalysis(agentResult.structured, agentResult.output);
   }
 
-  private async runPlanningIntake(
-    workstream: WorkstreamRow,
-    instruction: string,
-    model?: string,
-    epicContextAnalysis?: string | null,
-    contextBundle?: PlanningContextBundle,
-  ): Promise<IntakeResult> {
-    const project = this.getProject(workstream.project_id);
-    const cwd = this.resolveExecutionWorkspace(workstream);
-    const adapter = await this.getUtilityClaudeAdapter();
-    const recentTurns = turns.listByWorkstream(workstream.id).slice(-5).map((turn) => ({
-      instruction: turn.instruction,
-      status: turn.status,
-      summary: turn.result_summary,
-    }));
-    const agentResult = await runAgent(
-      adapter,
-      "intake",
-      {
-        projectId: project.id,
-        repoPath: project.repoPath,
-        workstreamId: workstream.id,
-        workstreamName: workstream.name,
-        workstreamState: workstream.state,
-        instruction: [
-          "Scope this workstream request against the current repo state.",
-          `Operator instruction: ${instruction}`,
-        ].join("\n"),
-        cwd,
-        addDirs: this.buildPlanningAddDirs(project, cwd),
-        epicCharter: this.getEpicCharterContext(workstream),
-        agentsMd: this.readAgentsMd(project),
-        extra: {
-          "Bounded Project Context": contextBundle?.projectContext ?? "No bounded project context provided.",
-          "Bounded Epic Context": contextBundle?.epicContext ?? "No bounded epic context provided.",
-          "Changed Evidence": contextBundle ? JSON.stringify({
-            fingerprintChanged: contextBundle.fingerprintChanged,
-            changedEvidence: contextBundle.changedEvidence,
-            changedFiles: contextBundle.changedFiles,
-            broaderInspectionPolicy: contextBundle.broaderInspectionPolicy,
-          }, null, 2) : "No changed evidence provided.",
-          "Recent Turn History": JSON.stringify(recentTurns, null, 2),
-          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
-          "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
-          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-        },
-      },
-      {
-        model,
-        maxTurns: 6,
-        permissionMode: "plan",
-        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
-        ...this.planningAgentGuardrails("scope"),
-      },
-    );
-
-    if (agentResult.status !== "completed") {
-      throw new Error(agentResult.output || "Claude intake generation failed.");
-    }
-
-    this.touchProgress("planning", workstream.id);
-    return parseIntakeResult(agentResult.structured, instruction);
-  }
-
-  private async runPlanningGoalFrame(
-    workstream: WorkstreamRow,
-    instruction: string,
-    intake: IntakeResult,
-    model?: string,
-    epicContextAnalysis?: string | null,
-  ): Promise<GoalFrameResult> {
-    const project = this.getProject(workstream.project_id);
-    const cwd = this.resolveExecutionWorkspace(workstream);
-    const adapter = await this.getUtilityClaudeAdapter();
-    const agentResult = await runAgent(
-      adapter,
-      "goal-framing",
-      {
-        projectId: project.id,
-        repoPath: project.repoPath,
-        workstreamId: workstream.id,
-        workstreamName: workstream.name,
-        workstreamState: workstream.state,
-        instruction: [
-          "Turn the scoped intake result into a durable execution frame for this workstream.",
-          `Operator instruction: ${instruction}`,
-        ].join("\n"),
-        cwd,
-        addDirs: this.buildPlanningAddDirs(project, cwd),
-        epicCharter: this.getEpicCharterContext(workstream),
-        agentsMd: this.readAgentsMd(project),
-        extra: {
-          "Structured Intake": renderIntakeMarkdown(intake),
-          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
-          "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
-          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
-        },
-      },
-      {
-        model,
-        maxTurns: 4,
-        permissionMode: "plan",
-        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
-      },
-    );
-
-    if (agentResult.status !== "completed") {
-      throw new Error(agentResult.output || "Claude goal framing failed.");
-    }
-
-    this.touchProgress("planning", workstream.id);
-    return parseGoalFrameResult(agentResult.structured, intake);
-  }
-
-  private async runPlanningModeling(
-    workstream: WorkstreamRow,
-    instruction: string,
-    intake: IntakeResult,
-    goalFrame: GoalFrameResult,
-    model?: string,
-    epicContextAnalysis?: string | null,
-    contextBundle?: PlanningContextBundle,
-    previousModel?: ModelingResult | null,
-  ): Promise<ModelingResult> {
-    const project = this.getProject(workstream.project_id);
-    const cwd = this.resolveExecutionWorkspace(workstream);
-    const adapter = await this.getUtilityClaudeAdapter();
-    const agentResult = await runAgent(
-      adapter,
-      "modeling",
-      {
-        projectId: project.id,
-        repoPath: project.repoPath,
-        workstreamId: workstream.id,
-        workstreamName: workstream.name,
-        workstreamState: workstream.state,
-        instruction: [
-          "Update the existing bounded project/epic model only where the supplied change evidence requires it.",
-          "Do not perform a full repo sweep. If broader inspection is necessary, explain exact files or patterns in openQuestions.",
-          `Operator instruction: ${instruction}`,
-        ].join("\n"),
-        cwd,
-        addDirs: this.buildPlanningAddDirs(project, cwd),
-        epicCharter: this.getEpicCharterContext(workstream),
-        agentsMd: this.readAgentsMd(project),
-        extra: {
-          "Structured Intake": renderIntakeMarkdown(intake),
-          "Goal Frame": renderGoalFrameMarkdown(goalFrame),
-          "Previous System Model": previousModel ? renderModelingMarkdown(previousModel) : "No previous model recorded.",
-          "Bounded Project Context": contextBundle?.projectContext ?? "No bounded project context provided.",
-          "Bounded Epic Context": contextBundle?.epicContext ?? "No bounded epic context provided.",
-          "Changed Evidence": contextBundle ? JSON.stringify({
-            fingerprintChanged: contextBundle.fingerprintChanged,
-            changedEvidence: contextBundle.changedEvidence,
-            changedFiles: contextBundle.changedFiles,
-            broaderInspectionPolicy: contextBundle.broaderInspectionPolicy,
-          }, null, 2) : "No changed evidence provided.",
-          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
-          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-        },
-      },
-      {
-        model,
-        maxTurns: 4,
-        permissionMode: "plan",
-        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
-        ...this.planningAgentGuardrails("model"),
-      },
-    );
-
-    this.touchProgress("planning", workstream.id);
-    return parseModelingResult(
-      agentResult.status === "completed" ? agentResult.structured : null,
-      goalFrame.problemStatement || intake.scope || instruction,
-    );
-  }
-
-  private async runPlanningTestDesign(
-    workstream: WorkstreamRow,
-    instruction: string,
-    intake: IntakeResult,
-    goalFrame: GoalFrameResult,
-    modeling: ModelingResult,
-    model?: string,
-    epicContextAnalysis?: string | null,
-  ): Promise<TestDesignResult> {
-    const project = this.getProject(workstream.project_id);
-    const cwd = this.resolveExecutionWorkspace(workstream);
-    const adapter = await this.getUtilityClaudeAdapter();
-    const agentResult = await runAgent(
-      adapter,
-      "test-design",
-      {
-        projectId: project.id,
-        repoPath: project.repoPath,
-        workstreamId: workstream.id,
-        workstreamName: workstream.name,
-        workstreamState: workstream.state,
-        instruction: [
-          "Create test-first execution prep for this workstream.",
-          `Operator instruction: ${instruction}`,
-        ].join("\n"),
-        cwd,
-        addDirs: this.buildPlanningAddDirs(project, cwd),
-        epicCharter: this.getEpicCharterContext(workstream),
-        agentsMd: this.readAgentsMd(project),
-        extra: {
-          "Structured Intake": renderIntakeMarkdown(intake),
-          "Goal Frame": renderGoalFrameMarkdown(goalFrame),
-          "System Model": renderModelingMarkdown(modeling),
-          "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
-          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
-        },
-      },
-      {
-        model,
-        maxTurns: 4,
-        permissionMode: "plan",
-        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
-      },
-    );
-
-    this.touchProgress("planning", workstream.id);
-    return parseTestDesignResult(
-      agentResult.status === "completed" ? agentResult.structured : null,
-      goalFrame.successCriteria[0] ?? intake.acceptanceCriteria[0] ?? instruction,
-    );
-  }
-
-  private async runPlanningFeedbackRequest(
-    workstream: WorkstreamRow,
-    instruction: string,
-    planningContext: PlanningContextRecord,
-    model?: string,
-    epicContextAnalysis?: string | null,
-  ): Promise<OperatorFeedbackResult | null> {
-    if (planningContext.pendingQuestions.length === 0) {
-      return null;
-    }
-
-    const project = this.getProject(workstream.project_id);
-    const cwd = this.resolveExecutionWorkspace(workstream);
-    const adapter = await this.getUtilityClaudeAdapter();
-    const agentResult = await runAgent(
-      adapter,
-      "operator-feedback",
-      {
-        projectId: project.id,
-        repoPath: project.repoPath,
-        workstreamId: workstream.id,
-        workstreamName: workstream.name,
-        workstreamState: workstream.state,
-        instruction: [
-          "Turn the pending planning questions into a stronger operator questionnaire.",
-          `Operator instruction: ${instruction}`,
-        ].join("\n"),
-        cwd,
-        addDirs: this.buildPlanningAddDirs(project, cwd),
-        epicCharter: this.getEpicCharterContext(workstream),
-        agentsMd: this.readAgentsMd(project),
-        extra: {
-          "Structured Intake": planningContext.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
-          "Goal Frame": planningContext.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
-          "System Model": planningContext.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
-          "Test Design": planningContext.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
-          "Pending Planning Questions": JSON.stringify(planningContext.pendingQuestions, null, 2),
-          "Recommended Next Slice": planningContext.result.recommendedNextSlice,
-          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-          "Related Configured Projects": this.renderRelatedPlanningProjects(project),
-        },
-      },
-      {
-        model,
-        maxTurns: 4,
-        permissionMode: "plan",
-        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
-      },
-    );
-
-    this.touchProgress("planning", workstream.id);
-    return coerceOperatorFeedbackResult(
-      agentResult.status === "completed" ? agentResult.structured : null,
-      planningContext.pendingQuestions,
-    );
-  }
-
-  private async runPlanningExplanation(
-    workstream: WorkstreamRow,
-    instruction: string,
-    planningContext: PlanningContextRecord,
-    feedbackRequest: OperatorFeedbackResult | null,
-    model?: string,
-    epicContextAnalysis?: string | null,
-  ): Promise<ExplanationResult> {
-    const project = this.getProject(workstream.project_id);
-    const cwd = this.resolveExecutionWorkspace(workstream);
-    const adapter = await this.getUtilityClaudeAdapter();
-    const agentResult = await runAgent(
-      adapter,
-      "response-formatting",
-      {
-        projectId: project.id,
-        repoPath: project.repoPath,
-        workstreamId: workstream.id,
-        workstreamName: workstream.name,
-        workstreamState: workstream.state,
-        instruction: [
-          "Format the current planning state into concise Discord-friendly Markdown.",
-          `Operator instruction: ${instruction}`,
-        ].join("\n"),
-        cwd,
-        addDirs: this.buildPlanningAddDirs(project, cwd),
-        epicCharter: this.getEpicCharterContext(workstream),
-        agentsMd: this.readAgentsMd(project),
-        extra: {
-          "Structured Intake": planningContext.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
-          "Goal Frame": planningContext.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
-          "System Model": planningContext.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
-          "Test Design": planningContext.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
-          "Planning Summary": renderPlanningSummary(planningContext),
-          "Operator Feedback Request": renderOperatorFeedbackMarkdown(feedbackRequest),
-          "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
-        },
-      },
-      {
-        model,
-        maxTurns: 4,
-        permissionMode: "plan",
-        onOutput: this.buildOperationOutputHandler("planning", workstream.id),
-      },
-    );
-
-    this.touchProgress("planning", workstream.id);
-    return coerceExplanationResult(
-      agentResult.status === "completed" ? agentResult.structured : null,
-      planningContext,
-      feedbackRequest,
-    );
-  }
-
   private buildPlanningAgentContext(
     workstream: WorkstreamRow,
     instruction: string,
-    intake: IntakeResult | null,
-    goalFrame: GoalFrameResult | null,
-    modeling: ModelingResult | null,
-    testDesign: TestDesignResult | null,
     previousContext?: PlanningContextRecord | null,
     answers?: Record<string, PlanningAnswer>,
     epicContextAnalysis?: string | null,
@@ -4291,6 +3922,7 @@ export class Orchestrator {
       agentsMd: this.readAgentsMd(project),
       extra: {
         "Bounded Project Context": contextBundle?.projectContext ?? "No bounded project context provided.",
+        "Project Memory": contextBundle?.projectMemory ?? "No project memory provided.",
         "Bounded Epic Context": contextBundle?.epicContext ?? "No bounded epic context provided.",
         "Context Fingerprint": contextBundle ? JSON.stringify({
           contextFingerprint: contextBundle.contextFingerprint,
@@ -4303,10 +3935,6 @@ export class Orchestrator {
         "Recent Turn History": JSON.stringify(recentTurns, null, 2),
         "Current Workstream Summary": workstream.summary ?? "No summary recorded.",
         "Stored Plan Summary": workstream.plan ?? "No stored plan summary.",
-        "Structured Intake": intake ? renderIntakeMarkdown(intake) : "None.",
-        "Goal Frame": goalFrame ? renderGoalFrameMarkdown(goalFrame) : "None.",
-        "System Model": modeling ? renderModelingMarkdown(modeling) : "None.",
-        "Test Design": testDesign ? renderTestDesignMarkdown(testDesign) : "None.",
         "Previous Planning Context": previousContext ? JSON.stringify(previousContext, null, 2) : "None.",
         "Operator Answers": serializePlanningAnswers(answers ?? previousContext?.answers ?? {}),
         "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
@@ -4322,10 +3950,9 @@ export class Orchestrator {
   ): string {
     const needsAnswers = planningContext.pendingQuestions.length > 0;
     const renderedPlan = renderPlanningSummary(planningContext, {
-      includeAgentSections: !needsAnswers,
       includeRawOutput: !needsAnswers,
     });
-    const formattedMarkdown = planningContext.explanation?.markdown ?? renderedPlan;
+    const formattedMarkdown = renderedPlan;
     const summary =
       planningContext.status === "needs-answers"
         ? `Planning is waiting on ${planningContext.pendingQuestions.length} operator answer${planningContext.pendingQuestions.length === 1 ? "" : "s"}.`
@@ -4511,9 +4138,6 @@ export class Orchestrator {
           "Git Status": this.readGitOutput(["status", "--short", "--branch"], cwd),
           "Git Diff": this.readGitReviewDiff(cwd, "uncommitted"),
           "Structured Intake": planningContext?.intake ? renderIntakeMarkdown(planningContext.intake) : "None.",
-          "Goal Frame": planningContext?.goalFrame ? renderGoalFrameMarkdown(planningContext.goalFrame) : "None.",
-          "System Model": planningContext?.modeling ? renderModelingMarkdown(planningContext.modeling) : "None.",
-          "Test Design": planningContext?.testDesign ? renderTestDesignMarkdown(planningContext.testDesign) : "None.",
           "Epic Context Analysis": epicContextAnalysis ?? "No dynamic epic context generated.",
         },
       },

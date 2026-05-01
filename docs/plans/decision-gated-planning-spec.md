@@ -213,7 +213,7 @@ That keeps the feature scoped while still delivering the real value.
 
 ## Relationship to the Larger Decision Queue Vision
 
-This feature is a narrow precursor to `decision-queue-feature-spec.md`.
+This feature was a narrow precursor to the broader decision-queue idea, which was removed during the stabilization cut.
 
 That larger spec asks Claude to keep work moving continuously after each turn.
 This feature does **not** do that.

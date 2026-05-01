@@ -3,21 +3,87 @@
   "defaults": {
     "workflow": {
       "name": "standard",
-      "states": ["intake", "planning", "awaiting-decisions", "implementation", "verification", "review", "done", "blocked"],
+      "states": [
+        "intake",
+        "planning",
+        "awaiting-decisions",
+        "implementation",
+        "verification",
+        "review",
+        "done",
+        "blocked"
+      ],
       "initialState": "intake",
-      "terminalStates": ["done"],
+      "terminalStates": [
+        "done"
+      ],
       "transitions": [
-        { "from": "intake", "to": "planning", "trigger": "scope-defined", "autoAdvance": true },
-        { "from": "intake", "to": "blocked", "trigger": "missing-info", "autoAdvance": false },
-        { "from": "blocked", "to": "intake", "trigger": "info-supplied", "autoAdvance": false },
-        { "from": "planning", "to": "awaiting-decisions", "trigger": "operator-input-required", "autoAdvance": true },
-        { "from": "awaiting-decisions", "to": "planning", "trigger": "operator-input-received", "autoAdvance": true },
-        { "from": "planning", "to": "implementation", "trigger": "plan-approved", "autoAdvance": false },
-        { "from": "implementation", "to": "verification", "trigger": "implementation-complete", "autoAdvance": true },
-        { "from": "verification", "to": "review", "trigger": "verification-passed", "autoAdvance": true },
-        { "from": "verification", "to": "implementation", "trigger": "verification-failed", "autoAdvance": true },
-        { "from": "review", "to": "done", "trigger": "review-approved", "autoAdvance": false },
-        { "from": "review", "to": "implementation", "trigger": "changes-requested", "autoAdvance": true }
+        {
+          "from": "intake",
+          "to": "planning",
+          "trigger": "scope-defined",
+          "autoAdvance": true
+        },
+        {
+          "from": "intake",
+          "to": "blocked",
+          "trigger": "missing-info",
+          "autoAdvance": false
+        },
+        {
+          "from": "blocked",
+          "to": "intake",
+          "trigger": "info-supplied",
+          "autoAdvance": false
+        },
+        {
+          "from": "planning",
+          "to": "awaiting-decisions",
+          "trigger": "operator-input-required",
+          "autoAdvance": true
+        },
+        {
+          "from": "awaiting-decisions",
+          "to": "planning",
+          "trigger": "operator-input-received",
+          "autoAdvance": true
+        },
+        {
+          "from": "planning",
+          "to": "implementation",
+          "trigger": "plan-approved",
+          "autoAdvance": false
+        },
+        {
+          "from": "implementation",
+          "to": "verification",
+          "trigger": "implementation-complete",
+          "autoAdvance": true
+        },
+        {
+          "from": "verification",
+          "to": "review",
+          "trigger": "verification-passed",
+          "autoAdvance": true
+        },
+        {
+          "from": "verification",
+          "to": "implementation",
+          "trigger": "verification-failed",
+          "autoAdvance": true
+        },
+        {
+          "from": "review",
+          "to": "done",
+          "trigger": "review-approved",
+          "autoAdvance": false
+        },
+        {
+          "from": "review",
+          "to": "implementation",
+          "trigger": "changes-requested",
+          "autoAdvance": true
+        }
       ]
     },
     "executionBackend": {
@@ -29,12 +95,36 @@
       "experimentalRawEvents": false
     },
     "escalationRules": [
-      { "pattern": "rm -rf", "tier": "human-decision", "description": "Destructive filesystem operations" },
-      { "pattern": "git push --force", "tier": "human-decision", "description": "Force pushes" },
-      { "pattern": "DROP TABLE", "tier": "human-decision", "description": "Destructive database operations" },
-      { "pattern": "npm install", "tier": "approval-gated", "description": "Installing dependencies" },
-      { "pattern": "git checkout", "tier": "auto", "description": "Branch operations" },
-      { "pattern": "npm test", "tier": "auto", "description": "Running tests" }
+      {
+        "pattern": "rm -rf",
+        "tier": "human-decision",
+        "description": "Destructive filesystem operations"
+      },
+      {
+        "pattern": "git push --force",
+        "tier": "human-decision",
+        "description": "Force pushes"
+      },
+      {
+        "pattern": "DROP TABLE",
+        "tier": "human-decision",
+        "description": "Destructive database operations"
+      },
+      {
+        "pattern": "npm install",
+        "tier": "approval-gated",
+        "description": "Installing dependencies"
+      },
+      {
+        "pattern": "git checkout",
+        "tier": "auto",
+        "description": "Branch operations"
+      },
+      {
+        "pattern": "npm test",
+        "tier": "auto",
+        "description": "Running tests"
+      }
     ],
     "maxConcurrentWorkstreams": 6
   },
@@ -99,13 +189,7 @@
             "deep": "sonnet"
           },
           "agents": {
-            "intake": "cheap",
-            "goalFraming": "cheap",
-            "modeling": "default",
-            "testDesign": "cheap",
             "planning": "deep",
-            "operatorFeedback": "cheap",
-            "responseFormatting": "cheap",
             "epicContext": "default"
           }
         }
@@ -226,13 +310,7 @@
             "deep": "sonnet"
           },
           "agents": {
-            "intake": "cheap",
-            "goalFraming": "cheap",
-            "modeling": "default",
-            "testDesign": "cheap",
             "planning": "deep",
-            "operatorFeedback": "cheap",
-            "responseFormatting": "cheap",
             "epicContext": "default"
           }
         }
@@ -291,13 +369,7 @@
             "deep": "sonnet"
           },
           "agents": {
-            "intake": "cheap",
-            "goalFraming": "cheap",
-            "modeling": "default",
-            "testDesign": "cheap",
             "planning": "deep",
-            "operatorFeedback": "cheap",
-            "responseFormatting": "cheap",
             "epicContext": "default"
           }
         }
@@ -349,11 +421,6 @@
     "port": 3847,
     "host": "127.0.0.1"
   },
-  "brief": {
-    "enabled": true,
-    "discordChannelId": null,
-    "model": "sonnet"
-  },
   "assistant": {
     "enabled": true,
     "agentProjectId": "maverick",
@@ -361,7 +428,9 @@
     "allowedPhoneNumbers": [],
     "discord": {
       "enabled": true,
-      "channelIds": ["1490188914861019197"],
+      "channelIds": [
+        "1490188914861019197"
+      ],
       "allowedUserIds": [],
       "replyInThread": true
     },
@@ -404,16 +473,5 @@
       "googleRootFolderId": null,
       "syncOnChange": true
     }
-  },
-  "dailyBrief": {
-    "enabled": false,
-    "timeZone": "America/New_York",
-    "deliveryHour": 21,
-    "deliveryMinute": 0,
-    "pollIntervalMs": 300000,
-    "channelId": "1490188914861019197",
-    "maxProjectsInDigest": 10,
-    "maxNotesInDigest": 8,
-    "maxRemindersInDigest": 5
   }
 }

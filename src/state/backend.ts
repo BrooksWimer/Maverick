@@ -40,7 +40,9 @@ export function configureRemoteStateBackend(params: {
 }
 
 export function configureStateBackendFromEnv(): StateBackendMode {
-  const mode = (process.env.STATE_BACKEND ?? "sqlite").trim().toLowerCase();
+  const role = process.env.MAVERICK_ROLE?.trim().toLowerCase();
+  const defaultMode = role === "client" ? "remote" : "sqlite";
+  const mode = (process.env.STATE_BACKEND ?? defaultMode).trim().toLowerCase();
   if (mode === "remote") {
     configureRemoteStateBackend({
       url: process.env.MAVERICK_STATE_URL ?? "",

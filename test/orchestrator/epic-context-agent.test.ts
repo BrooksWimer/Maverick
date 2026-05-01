@@ -90,13 +90,7 @@ const planningRouting = {
     deep: "sonnet",
   },
   agents: {
-    intake: "cheap",
-    goalFraming: "cheap",
-    modeling: "default",
-    testDesign: "cheap",
     planning: "deep",
-    operatorFeedback: "cheap",
-    responseFormatting: "cheap",
     epicContext: "default",
   },
 } as const;
@@ -191,29 +185,6 @@ describe("Orchestrator epic-context agent integration", () => {
     const utilityAdapter = new QueuedAdapter("utility", [
       agentOutput(
         {
-          request: "Plan the next router-admin ingestion slice.",
-          scope: "Plan the next router-admin ingestion slice without overfitting to one vendor.",
-          outOfScope: "Rebuilding the entire router-admin stack.",
-          acceptanceCriteria: ["The next slice respects the epic charter boundary."],
-          risks: ["Vendor-specific selectors could leak into shared abstractions."],
-          complexity: "medium",
-          recommendation: "proceed",
-          clarificationQuestions: [],
-        },
-        "Intake ready.",
-      ),
-      agentOutput(
-        {
-          systemSummary: "The router-admin ingestion flow spans epic context, planning, and downstream implementation.",
-          mermaid: "flowchart TD\n  A[Epic context] --> B[Planning]\n  B --> C[Router-admin slice]",
-          keyEntities: ["epic context", "planning", "router-admin slice"],
-          criticalFlows: ["planning"],
-          openQuestions: [],
-        },
-        "Model ready.",
-      ),
-      agentOutput(
-        {
           currentStateSummary: "Planning has dynamic epic context available.",
           recommendedNextSlice: "Use the epic context summary while shaping the next implementation slice.",
           requiredAnswers: [],
@@ -246,13 +217,10 @@ describe("Orchestrator epic-context agent integration", () => {
       "manual",
     );
 
-    expect(utilityAdapter.turnRequests).toHaveLength(3);
-    expect(utilityAdapter.turnRequests[0]?.model).toBe("haiku");
-    expect(utilityAdapter.turnRequests[1]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[2]?.model).toBe("sonnet");
+    expect(utilityAdapter.turnRequests).toHaveLength(1);
+    expect(utilityAdapter.turnRequests[0]?.model).toBe("sonnet");
     expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Bounded Epic Context");
     expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Do not overfit to Xfinity-only selectors.");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Epic Context Analysis");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Do not overfit to Xfinity-only selectors.");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Epic Context Analysis");
   });
 });

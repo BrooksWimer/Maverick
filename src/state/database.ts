@@ -110,6 +110,18 @@ export function initDatabase(dbPath?: string): SqliteDatabase | null {
     "verification_context_json",
     "ALTER TABLE workstreams ADD COLUMN verification_context_json TEXT"
   );
+  ensureColumn(
+    db,
+    "workstreams",
+    "budget_limit_usd",
+    "ALTER TABLE workstreams ADD COLUMN budget_limit_usd REAL NOT NULL DEFAULT 5.0"
+  );
+  ensureColumn(
+    db,
+    "workstreams",
+    "budget_spent_usd",
+    "ALTER TABLE workstreams ADD COLUMN budget_spent_usd REAL NOT NULL DEFAULT 0"
+  );
   ensureColumn(db, "turns", "last_progress_at", "ALTER TABLE turns ADD COLUMN last_progress_at TEXT");
   ensureColumn(
     db,

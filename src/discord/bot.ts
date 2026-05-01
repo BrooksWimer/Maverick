@@ -25,9 +25,8 @@ import {
 import { createLogger } from "../logger.js";
 import { eventBus } from "../orchestrator/event-bus.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
-import type { LaneLifecycleResult } from "../orchestrator/orchestrator.js";
+import type { LaneLifecycleResult, WorkstreamRepairResult } from "../orchestrator/orchestrator.js";
 import type { AssistantService } from "../assistant/index.js";
-import type { DailyBriefService } from "../daily-brief/index.js";
 import type { ApprovalRow, DiscordThreadBindingRow, WorkstreamRow } from "../state/index.js";
 import type { DiscordRoute, EpicBranchConfig, OrchestratorConfig, ProjectConfig } from "../config/schema.js";
 import { workstreamLaneForEpic } from "../projects/epics.js";
@@ -50,6 +49,7 @@ type DiscordBotOptions = {
 const APPROVAL_PREFIX = "approval";
 const PLANNING_ANSWER_PREFIX = "planning-answer";
 const PLANNING_ANSWER_MODAL_PREFIX = "planning-answer-modal";
+const WORKSTREAM_ACTION_PREFIX = "workstream-action";
 const PLANNING_QUESTIONS_PER_MODAL = 5;
 
 type SendableChannel = TextBasedChannel & {
@@ -92,9 +92,7 @@ type ResolvedThreadContext = {
   binding: DiscordThreadBindingRow | null;
 };
 
-type WorkSmartGoalChoice = "none" | "business-context" | "engineering-learning" | "both";
-
-type AsyncWorkstreamCommand = "plan" | "answer-plan" | "dispatch" | "review" | "verify" | "finish";
+type AsyncWorkstreamCommand = "plan" | "answer-plan" | "dispatch" | "review" | "verify" | "finish" | "retry";
 
 function isDiscordApiError(error: unknown, code?: number): boolean {
   if (!error || typeof error !== "object") {
@@ -231,6 +229,42 @@ function buildPlanningAnswerButtonRows(
   return rows;
 }
 
+function buildWorkstreamActionRows(
+  workstreamId: string,
+  actions: Array<"status" | "retry" | "verify" | "finish" | "force-unblock" | "reset-planning">,
+): ActionRowBuilder<ButtonBuilder>[] {
+  if (actions.length === 0) {
+    return [];
+  }
+
+  const buttons = actions.map((action) => {
+    const button = new ButtonBuilder()
+      .setCustomId(`${WORKSTREAM_ACTION_PREFIX}:${action}:${workstreamId}`);
+
+    switch (action) {
+      case "status":
+        return button.setLabel("Status").setStyle(ButtonStyle.Secondary);
+      case "retry":
+        return button.setLabel("Retry").setStyle(ButtonStyle.Primary);
+      case "verify":
+        return button.setLabel("Verify").setStyle(ButtonStyle.Primary);
+      case "finish":
+        return button.setLabel("Finish").setStyle(ButtonStyle.Success);
+      case "force-unblock":
+        return button.setLabel("Force Unblock").setStyle(ButtonStyle.Danger);
+      case "reset-planning":
+        return button.setLabel("Reset Planning").setStyle(ButtonStyle.Secondary);
+    }
+  });
+
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+  for (let index = 0; index < buttons.length; index += 5) {
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons.slice(index, index + 5)));
+  }
+
+  return rows;
+}
+
 export function buildAttachedTextReply(params: {
   headerLines: string[];
   body: string;
@@ -279,6 +313,7 @@ function buildPlanningQuestionsNotificationMessage(params: {
 }
 
 function buildPlanGeneratedNotificationMessage(params: {
+  workstreamId?: string;
   workstreamName: string;
   instruction: string;
   renderedPlan: string;
@@ -301,7 +336,15 @@ function buildPlanGeneratedNotificationMessage(params: {
     }],
     sections: [{ title: "Details", lines: params.renderedPlan.split(/\r?\n/).map((line) => line || " ") }],
   });
-  return { content: fullBody };
+  return {
+    content: fullBody,
+    components: params.workstreamId
+      ? buildWorkstreamActionRows(
+          params.workstreamId,
+          params.finalExecutionPrompt ? ["status", "retry", "verify"] : ["status", "reset-planning"],
+        )
+      : undefined,
+  };
 }
 
 function buildFormattedPlanningSummaryMessage(params: {
@@ -345,6 +388,7 @@ export function buildPlanNotificationMessages(params: {
         questions: params.questions,
       })
       : buildPlanGeneratedNotificationMessage({
+        workstreamId: params.workstreamId,
         workstreamName: params.workstreamName,
         instruction: params.instruction,
         renderedPlan: params.renderedPlan,
@@ -496,12 +540,6 @@ function subcommandBuilder(config: OrchestratorConfig) {
     name: project.name,
     value: project.id,
   }));
-  const smartGoalChoices = [
-    { name: "None", value: "none" },
-    { name: "Business Context", value: "business-context" },
-    { name: "Engineering Learning", value: "engineering-learning" },
-    { name: "Both Goals", value: "both" },
-  ] as const;
   const assistantContextChoices = [
     { name: "Work", value: "work" },
     { name: "Personal", value: "personal" },
@@ -523,22 +561,6 @@ function subcommandBuilder(config: OrchestratorConfig) {
     { name: "Verification", value: "verification" },
     { name: "Review", value: "review" },
   ] as const;
-  const addWorkAttachmentOptions = <T extends {
-    addAttachmentOption: (builder: (option: any) => any) => T;
-  }>(subcommand: T): T =>
-    subcommand
-      .addAttachmentOption((option) =>
-        option.setName("attachment").setDescription("Optional image or file").setRequired(false)
-      )
-      .addAttachmentOption((option) =>
-        option.setName("attachment_2").setDescription("Optional second image or file").setRequired(false)
-      )
-      .addAttachmentOption((option) =>
-        option.setName("attachment_3").setDescription("Optional third image or file").setRequired(false)
-      )
-      .addAttachmentOption((option) =>
-        option.setName("attachment_4").setDescription("Optional fourth image or file").setRequired(false)
-      );
   const epicChoices = buildWorkstreamEpicChoices(config);
 
   const workstream = new SlashCommandBuilder()
@@ -695,6 +717,43 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .addStringOption((option) =>
           option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
         )
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName("repair")
+        .setDescription("Repair stale workstream state and Discord routing")
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("retry")
+            .setDescription("Retry the latest safe planning or implementation action")
+            .addStringOption((option) =>
+              option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+            )
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("force-unblock")
+            .setDescription("Clear stale approvals, running guards, and local running turns")
+            .addStringOption((option) =>
+              option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+            )
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("reset-to-planning")
+            .setDescription("Reset a stuck workstream back to fresh planning")
+            .addStringOption((option) =>
+              option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+            )
+        )
+        .addSubcommand((subcommand) =>
+          subcommand
+            .setName("rebind-thread")
+            .setDescription("Bind the workstream to the current Discord channel/thread")
+            .addStringOption((option) =>
+              option.setName("workstream").setDescription("Specific workstream id").setRequired(false)
+            )
+        )
     );
 
   const project = new SlashCommandBuilder()
@@ -760,108 +819,6 @@ function subcommandBuilder(config: OrchestratorConfig) {
         .addStringOption((option) =>
           option.setName("lane").setDescription("Lane id, epic id, or durable branch").setRequired(false)
         )
-    );
-
-  const work = new SlashCommandBuilder()
-    .setName("work")
-    .setDescription("Capture structured work notes")
-    .addSubcommand((subcommand) =>
-      addWorkAttachmentOptions(subcommand
-        .setName("general")
-        .setDescription("Save a general work note")
-        .addStringOption((option) =>
-          option.setName("details").setDescription("The note body or summary").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option.setName("title").setDescription("Optional short title").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option
-            .setName("smart_goal")
-            .setDescription("Optionally file this note under a smart goal")
-            .setRequired(false)
-            .addChoices(...smartGoalChoices)
-        ))
-    )
-    .addSubcommand((subcommand) =>
-      addWorkAttachmentOptions(subcommand
-        .setName("project")
-        .setDescription("Save a project-specific work note")
-        .addStringOption((option) =>
-          option.setName("project").setDescription("Project or ticket name").setRequired(true)
-        )
-        .addStringOption((option) =>
-          option.setName("details").setDescription("The note body or summary").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option.setName("title").setDescription("Optional short title").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option
-            .setName("smart_goal")
-            .setDescription("Optionally file this note under a smart goal")
-            .setRequired(false)
-            .addChoices(...smartGoalChoices)
-        ))
-    )
-    .addSubcommand((subcommand) =>
-      addWorkAttachmentOptions(subcommand
-        .setName("acceptance")
-        .setDescription("Save ticket acceptance criteria or requirement capture")
-        .addStringOption((option) =>
-          option.setName("project").setDescription("Project, ticket, or feature name").setRequired(true)
-        )
-        .addStringOption((option) =>
-          option.setName("details").setDescription("Short explanation of the capture").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option.setName("title").setDescription("Optional short title").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option
-            .setName("smart_goal")
-            .setDescription("Override the default smart goal filing")
-            .setRequired(false)
-            .addChoices(...smartGoalChoices)
-        ))
-    )
-    .addSubcommand((subcommand) =>
-      addWorkAttachmentOptions(subcommand
-        .setName("study")
-        .setDescription("Save a study note for work reading or active learning")
-        .addStringOption((option) =>
-          option.setName("details").setDescription("What you studied or learned").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option.setName("title").setDescription("Optional short title").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option.setName("project").setDescription("Optional related work project").setRequired(false)
-        )
-        .addStringOption((option) =>
-          option
-            .setName("smart_goal")
-            .setDescription("Override the default smart goal filing")
-            .setRequired(false)
-            .addChoices(...smartGoalChoices)
-        ))
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("recent")
-        .setDescription("Show recently captured work notes")
-        .addIntegerOption((option) =>
-          option.setName("limit").setDescription("How many notes to show").setRequired(false).setMinValue(1).setMaxValue(10)
-        )
-    );
-
-  const brief = new SlashCommandBuilder()
-    .setName("brief")
-    .setDescription("Generate Maverick summary briefs")
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("daily")
-        .setDescription("Generate a preview of today's daily brief")
     );
 
   const assistant = new SlashCommandBuilder()
@@ -978,11 +935,6 @@ function subcommandBuilder(config: OrchestratorConfig) {
     .setDescription("Run Maverick control-plane operations")
     .addSubcommand((subcommand) =>
       subcommand
-        .setName("brief")
-        .setDescription("Generate and post the nightly Claude brief")
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
         .setName("audit")
         .setDescription("Inspect Maverick git, Discord, and state routing health")
         .addStringOption((option) =>
@@ -1003,8 +955,6 @@ function subcommandBuilder(config: OrchestratorConfig) {
     workstream.toJSON(),
     project.toJSON(),
     lane.toJSON(),
-    work.toJSON(),
-    brief.toJSON(),
     assistant.toJSON(),
     maverick.toJSON(),
   ] satisfies RESTPostAPIApplicationCommandsJSONBody[];
@@ -1015,13 +965,13 @@ export class DiscordBot {
   private readonly commands: RESTPostAPIApplicationCommandsJSONBody[];
   private readonly instanceId = getRuntimeInstanceId();
   private readonly planningAnswerDrafts = new Map<string, Record<string, string>>();
+  private readonly liveStatusMessages = new Map<string, { channelId: string; messageId: string }>();
 
   constructor(
     private readonly orchestrator: Orchestrator,
     private readonly config: OrchestratorConfig,
     private readonly options: DiscordBotOptions,
-    private readonly assistant: AssistantService | null = null,
-    private readonly dailyBrief: DailyBriefService | null = null
+    private readonly assistant: AssistantService | null = null
   ) {
     this.client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -1051,24 +1001,6 @@ export class DiscordBot {
           error: error instanceof Error ? error.message : String(error),
         };
       }
-    });
-    this.dailyBrief?.setDispatcher(async ({
-      channelId,
-      headline,
-      preview,
-      markdown,
-      trigger,
-    }) => {
-      const channel = await this.fetchTextChannel(channelId);
-      if (!channel) {
-        throw new Error(`Daily brief channel ${channelId} is not accessible.`);
-      }
-
-      await this.safeSend(channel, {
-        content: markdown.trim() || [headline, trigger === "scheduled" ? "Nightly brief delivered." : "Daily brief preview.", preview]
-          .filter(Boolean)
-          .join("\n\n"),
-      });
     });
   }
 
@@ -1110,6 +1042,15 @@ export class DiscordBot {
   }
 
   private registerEventBusSubscriptions(): void {
+    const refreshLiveStatus = (workstreamId: string, context: string) => {
+      this.runBackgroundTask(`live-status.${context}`, async () => {
+        const workstream = this.orchestrator.getWorkstream(workstreamId);
+        if (workstream) {
+          await this.upsertLiveStatusMessage(workstream);
+        }
+      });
+    };
+
     eventBus.on("workstream.created", (event) => {
       this.runBackgroundTask("workstream.created", async () => {
         const workstream = this.orchestrator.getWorkstream(event.workstreamId);
@@ -1139,7 +1080,16 @@ export class DiscordBot {
             .filter(Boolean)
             .join("\n"),
         });
+        await this.upsertLiveStatusMessage(workstream);
       });
+    });
+
+    eventBus.on("workstream.stateChanged", (event) => {
+      refreshLiveStatus(event.workstreamId, "state-changed");
+    });
+
+    eventBus.on("turn.started", (event) => {
+      refreshLiveStatus(event.workstreamId, "turn-started");
     });
 
     eventBus.on("workstream.finished", (event) => {
@@ -1164,6 +1114,7 @@ export class DiscordBot {
             "Production was not changed. Use `/lane promote` from this lane when you are ready.",
           ].join("\n"),
         });
+        await this.upsertLiveStatusMessage(workstream);
       });
     });
 
@@ -1197,6 +1148,7 @@ export class DiscordBot {
             workstream.id,
           ),
         );
+        await this.upsertLiveStatusMessage(workstream);
       });
     });
 
@@ -1233,21 +1185,12 @@ export class DiscordBot {
           ].join("\n"),
           components: [row],
         });
+        await this.upsertLiveStatusMessage(workstream);
       });
     });
 
-    eventBus.on("brief.generated", (event) => {
-      this.runBackgroundTask("brief.generated", async () => {
-        const channel = event.channelId
-          ? await this.fetchTextChannel(event.channelId)
-          : await this.resolveDefaultChannel();
-        if (!channel) {
-          log.warn({ channelId: event.channelId }, "No Discord channel available for Claude brief");
-          return;
-        }
-
-        await this.safeSend(channel, this.buildBriefGeneratedMessage(event.generatedAt, event.summary, event.markdown));
-      });
+    eventBus.on("approval.resolved", (event) => {
+      refreshLiveStatus(event.workstreamId, "approval-resolved");
     });
 
     eventBus.on("review.completed", (event) => {
@@ -1265,6 +1208,7 @@ export class DiscordBot {
             event.workstreamId,
           ),
         );
+        refreshLiveStatus(event.workstreamId, "review-completed");
       });
     });
 
@@ -1288,6 +1232,7 @@ export class DiscordBot {
             event.workstreamId,
           ),
         );
+        refreshLiveStatus(event.workstreamId, "verification-completed");
       });
     });
 
@@ -1316,6 +1261,7 @@ export class DiscordBot {
         })) {
           await this.safeSend(channel, message);
         }
+        await this.upsertLiveStatusMessage(workstream);
       });
     });
 
@@ -1347,6 +1293,7 @@ export class DiscordBot {
         })) {
           await this.safeSend(channel, message);
         }
+        await this.upsertLiveStatusMessage(workstream);
       });
     });
 
@@ -1495,16 +1442,6 @@ export class DiscordBot {
       return;
     }
 
-    if (interaction.commandName === "work") {
-      await this.handleWorkCommand(interaction);
-      return;
-    }
-
-    if (interaction.commandName === "brief") {
-      await this.handleBriefCommand(interaction);
-      return;
-    }
-
     if (interaction.commandName === "assistant") {
       await this.handleAssistantCommand(interaction);
       return;
@@ -1516,7 +1453,14 @@ export class DiscordBot {
   }
 
   private async handleWorkstreamCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    const group = interaction.options.getSubcommandGroup(false);
     const subcommand = interaction.options.getSubcommand();
+
+    if (group === "repair") {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await this.handleRepairCommand(interaction, subcommand);
+      return;
+    }
 
     switch (subcommand) {
       case "start":
@@ -1653,74 +1597,6 @@ export class DiscordBot {
     }
 
     await interaction.editReply(`Unsupported lane subcommand: ${subcommand}`);
-  }
-
-  private async handleWorkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-    if (!this.assistant?.isEnabled()) {
-      await interaction.reply({
-        content: "The Maverick assistant is not enabled right now.",
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    const subcommand = interaction.options.getSubcommand();
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    switch (subcommand) {
-      case "general":
-        await this.captureStructuredWorkNote(interaction, {
-          noteKind: "general",
-          defaultSmartGoalIds: [],
-        });
-        return;
-      case "project":
-        await this.captureStructuredWorkNote(interaction, {
-          noteKind: "project",
-          defaultSmartGoalIds: [],
-        });
-        return;
-      case "acceptance":
-        await this.captureStructuredWorkNote(interaction, {
-          noteKind: "acceptance-criteria",
-          defaultSmartGoalIds: ["business-context"],
-        });
-        return;
-      case "study":
-        await this.captureStructuredWorkNote(interaction, {
-          noteKind: "study",
-          defaultSmartGoalIds: ["engineering-learning"],
-        });
-        return;
-      case "recent":
-        await this.handleRecentWorkNotes(interaction);
-        return;
-      default:
-        await interaction.editReply(`Unsupported work subcommand: ${subcommand}`);
-    }
-  }
-
-  private async handleBriefCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-    if (!this.dailyBrief) {
-      await interaction.reply({
-        content: "The daily brief service is not configured right now.",
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    const subcommand = interaction.options.getSubcommand();
-    if (subcommand !== "daily") {
-      await interaction.reply({
-        content: `Unsupported brief subcommand: ${subcommand}`,
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const report = await this.dailyBrief.generateReport();
-    await this.editReplyWithChunks(interaction, report.markdown.trim() || [report.headline, report.preview].join("\n\n"));
   }
 
   private async handleAssistantCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1921,7 +1797,7 @@ export class DiscordBot {
 
   private async handleMaverickCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const subcommand = interaction.options.getSubcommand();
-    if (subcommand !== "brief" && subcommand !== "audit") {
+    if (subcommand !== "audit") {
       await interaction.reply({
         content: `Unsupported maverick subcommand: ${subcommand}`,
         flags: MessageFlags.Ephemeral,
@@ -1998,96 +1874,6 @@ export class DiscordBot {
       await this.editReplyWithChunks(interaction, lines.join("\n"));
       return;
     }
-
-    const result = await this.orchestrator.generateBrief({
-      trigger: "manual",
-      requestedBy: interaction.user.id,
-      channelId: this.config.brief.discordChannelId ?? interaction.channelId,
-    });
-
-    await interaction.editReply(
-      [
-        "Claude brief generated.",
-        result.channelId ? `Posted to channel: \`${result.channelId}\`` : "Posted channel: unavailable",
-        result.storagePath ? `Saved to: \`${result.storagePath}\`` : null,
-        `Summary: ${truncate(result.summary, 1200)}`,
-      ]
-        .filter(Boolean)
-        .join("\n")
-    );
-  }
-
-  private async captureStructuredWorkNote(
-    interaction: ChatInputCommandInteraction,
-    params: {
-      noteKind: "general" | "project" | "study" | "acceptance-criteria";
-      defaultSmartGoalIds: string[];
-    }
-  ): Promise<void> {
-    const details = interaction.options.getString("details") ?? "";
-    const title = interaction.options.getString("title");
-    const projectName = interaction.options.getString("project");
-    const smartGoalChoice = interaction.options.getString("smart_goal") as WorkSmartGoalChoice | null;
-    const attachments = ["attachment", "attachment_2", "attachment_3", "attachment_4"]
-      .map((optionName) => interaction.options.getAttachment(optionName))
-      .filter((attachment): attachment is NonNullable<typeof attachment> => attachment !== null)
-      .map((attachment) => this.toAssistantAttachment(attachment));
-
-    if (!details.trim() && !title?.trim() && attachments.length === 0) {
-      await interaction.editReply("Add note details, a title, or an attachment so I have something to save.");
-      return;
-    }
-
-    const result = await this.assistant!.processIncomingMessage({
-      source: "discord",
-      body: details,
-      from: interaction.user.id,
-      replyTarget: interaction.channelId,
-      attachments,
-      metadata: {
-        channelId: interaction.channelId,
-        guildId: interaction.guildId,
-        interactionId: interaction.id,
-        username: interaction.user.username,
-        structuredCapture: true,
-        structuredSubcommand: interaction.options.getSubcommand(),
-      },
-      structuredNote: {
-        title,
-        content: details,
-        context: "work",
-        noteKind: params.noteKind,
-        projectName,
-        smartGoalIds: this.resolveWorkSmartGoalIds(smartGoalChoice, params.defaultSmartGoalIds),
-      },
-    });
-
-    await interaction.editReply(result.reply);
-  }
-
-  private async handleRecentWorkNotes(interaction: ChatInputCommandInteraction): Promise<void> {
-    const limit = interaction.options.getInteger("limit") ?? 5;
-    const notes = this.assistant!
-      .listNotes(limit * 4)
-      .filter((note) => note.note_context === "work")
-      .slice(0, limit);
-
-    if (notes.length === 0) {
-      await interaction.editReply("No work notes have been captured yet.");
-      return;
-    }
-
-    const lines = ["Recent work notes:"];
-    for (const note of notes) {
-      const parts = [
-        note.note_kind ? `[${note.note_kind}]` : null,
-        note.project_name ? `project: ${note.project_name}` : null,
-        note.storage_path ? `file: ${note.storage_path}` : null,
-      ].filter(Boolean);
-      lines.push(`- ${note.created_at}: ${note.title}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`);
-    }
-
-    await interaction.editReply(lines.join("\n"));
   }
 
   private async handleWorkstreamStart(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -2366,7 +2152,7 @@ export class DiscordBot {
       includeAgentSections: !needsAnswers,
       includeRawOutput: !needsAnswers,
     });
-    const formattedMarkdown = planningContext.explanation?.markdown?.trim() || renderedPlan;
+    const formattedMarkdown = renderedPlan;
     const instruction =
       planningContext.originalInstruction.trim() ||
       workstream.current_goal?.trim() ||
@@ -2393,6 +2179,47 @@ export class DiscordBot {
         "No Claude planning work was rerun.",
       ].join("\n")
     );
+  }
+
+  private async handleRepairCommand(
+    interaction: ChatInputCommandInteraction,
+    subcommand: string,
+  ): Promise<void> {
+    const workstream = this.resolveWorkstream(interaction, interaction.options.getString("workstream"));
+
+    switch (subcommand) {
+      case "retry":
+        await this.startAsyncWorkstreamCommand(interaction, workstream, "retry", {
+          description: "Retrying the latest safe planning or implementation action in the background.",
+          run: async () => {
+            await this.orchestrator.retryLatestWorkstreamAction(workstream.id, interaction.user.id);
+          },
+        });
+        return;
+      case "force-unblock": {
+        const result = this.orchestrator.forceUnblockWorkstream(workstream.id, interaction.user.id);
+        await interaction.editReply(this.renderRepairResult(result));
+        return;
+      }
+      case "reset-to-planning": {
+        const result = this.orchestrator.resetWorkstreamToPlanning(workstream.id, interaction.user.id);
+        await interaction.editReply(this.renderRepairResult(result));
+        return;
+      }
+      case "rebind-thread": {
+        const binding = this.resolveWorkstreamChannelBinding(interaction);
+        const result = this.orchestrator.rebindWorkstreamThread(workstream.id, {
+          channelId: binding.channelId,
+          threadId: binding.threadId ?? null,
+          parentChannelId: binding.parentChannelId ?? null,
+          reboundBy: interaction.user.id,
+        });
+        await interaction.editReply(this.renderRepairResult(result));
+        return;
+      }
+      default:
+        await interaction.editReply(`Unsupported repair subcommand: ${subcommand}`);
+    }
   }
 
   private async startAsyncWorkstreamCommand(
@@ -2462,7 +2289,22 @@ export class DiscordBot {
         return "verification";
       case "finish":
         return "workstream finish";
+      case "retry":
+        return "repair retry";
     }
+  }
+
+  private renderRepairResult(result: WorkstreamRepairResult): string {
+    return [
+      `Repair completed for \`${result.workstreamName}\`.`,
+      `Action: \`${result.action}\``,
+      `Workstream: \`${result.workstreamId}\``,
+      `State: \`${result.stateBefore}\` -> \`${result.stateAfter}\``,
+      `Cancelled running turns: ${result.cancelledTurns}`,
+      `Expired approvals: ${result.expiredApprovals}`,
+      `Cleared active operations: ${result.clearedActiveOperations}`,
+      result.message,
+    ].join("\n");
   }
 
   private buildAsyncCommandStartedMessage(
@@ -2501,6 +2343,11 @@ export class DiscordBot {
       return;
     }
 
+    if (interaction.customId.startsWith(`${WORKSTREAM_ACTION_PREFIX}:`)) {
+      await this.handleWorkstreamActionButton(interaction);
+      return;
+    }
+
     const [prefix, action, approvalId] = interaction.customId.split(":");
     if (prefix !== APPROVAL_PREFIX || !approvalId) {
       return;
@@ -2513,6 +2360,101 @@ export class DiscordBot {
     await interaction.update({
       content: `${originalContent}\n\nResolved by <@${interaction.user.id}>: \`${approved ? "approved" : "denied"}\``,
       components: [],
+    });
+  }
+
+  private async handleWorkstreamActionButton(interaction: ButtonInteraction): Promise<void> {
+    const [, action, workstreamId] = interaction.customId.split(":");
+    const workstream = workstreamId ? this.orchestrator.getWorkstream(workstreamId) : null;
+    if (!workstream) {
+      await interaction.reply({
+        content: `Workstream not found: \`${workstreamId ?? "unknown"}\`.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (action === "status") {
+      const reply = this.buildWorkstreamStatusReply(this.formatWorkstream(workstream));
+      await interaction.reply({
+        content: typeof reply.content === "string" ? reply.content : "",
+        components: reply.components,
+        files: reply.files,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (action === "force-unblock") {
+      const result = this.orchestrator.forceUnblockWorkstream(workstream.id, interaction.user.id);
+      await interaction.reply({
+        content: this.renderRepairResult(result),
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (action === "reset-planning") {
+      const result = this.orchestrator.resetWorkstreamToPlanning(workstream.id, interaction.user.id);
+      await interaction.reply({
+        content: this.renderRepairResult(result),
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (action === "retry" || action === "verify" || action === "finish") {
+      await interaction.reply({
+        content: `Started ${action} for \`${workstream.name}\`. Maverick will post the result in this channel.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      this.runBackgroundTask(`workstream.button.${action}`, async () => {
+        const channel = interaction.channelId
+          ? await this.resolveAsyncCommandChannel(workstream, interaction.channelId)
+          : await this.resolveNotificationChannel(workstream, "notifications");
+        if (channel) {
+          await this.safeSend(
+            channel,
+            this.buildAsyncCommandStartedMessage(
+              workstream,
+              action === "retry" ? "retry" : action,
+              action === "retry"
+                ? "Retrying the latest safe planning or implementation action."
+                : action === "verify"
+                  ? "Running Claude verification from a Discord action button."
+                  : "Finishing the verified workstream into the durable lane branch.",
+            ),
+          );
+        }
+
+        try {
+          if (action === "retry") {
+            await this.orchestrator.retryLatestWorkstreamAction(workstream.id, interaction.user.id);
+          } else if (action === "verify") {
+            await this.orchestrator.verify(workstream.id, { trigger: "manual" });
+          } else {
+            await this.orchestrator.finishWorkstream(workstream.id, {
+              trigger: "manual",
+              finishedBy: interaction.user.id,
+            });
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (channel) {
+            await this.safeSend(
+              channel,
+              this.buildAsyncCommandFailedMessage(workstream, action === "retry" ? "retry" : action, message),
+            );
+          }
+          throw error;
+        }
+      });
+      return;
+    }
+
+    await interaction.reply({
+      content: `That workstream action is not recognized: \`${action ?? "unknown"}\`.`,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -3101,59 +3043,6 @@ export class DiscordBot {
     return null;
   }
 
-  private normalizeAssistantMessageContent(content: string): string {
-    const botId = this.client.user?.id;
-    if (!botId) {
-      return content;
-    }
-
-    return content.replace(new RegExp(`^<@!?${botId}>\\s*`), "");
-  }
-
-  private serializeAttachments(message: Message): AssistantAttachment[] {
-    return [...message.attachments.values()].map((attachment) => this.toAssistantAttachment(attachment));
-  }
-
-  private toAssistantAttachment(attachment: {
-    id?: string | null;
-    url?: string | null;
-    proxyURL?: string | null;
-    name?: string | null;
-    contentType?: string | null;
-    size?: number | null;
-    width?: number | null;
-    height?: number | null;
-  }): AssistantAttachment {
-    return {
-      id: attachment.id ?? null,
-      url: attachment.url ?? null,
-      proxyUrl: attachment.proxyURL ?? null,
-      name: attachment.name ?? null,
-      contentType: attachment.contentType ?? null,
-      size: attachment.size ?? null,
-      width: attachment.width ?? null,
-      height: attachment.height ?? null,
-    };
-  }
-
-  private resolveWorkSmartGoalIds(
-    choice: WorkSmartGoalChoice | null,
-    defaults: string[]
-  ): string[] {
-    switch (choice) {
-      case "none":
-        return [];
-      case "business-context":
-        return ["business-context"];
-      case "engineering-learning":
-        return ["engineering-learning"];
-      case "both":
-        return ["business-context", "engineering-learning"];
-      default:
-        return defaults;
-    }
-  }
-
   private async resolveNotificationChannelFromWorkstreamId(
     workstreamId: string,
     purpose: "notifications" | "approvals"
@@ -3190,6 +3079,102 @@ export class DiscordBot {
       return null;
     }
     return this.fetchTextChannel(this.config.discord.defaultNotificationChannelId);
+  }
+
+  private async upsertLiveStatusMessage(workstream: WorkstreamRow): Promise<void> {
+    const channel = await this.resolveNotificationChannel(workstream, "notifications");
+    if (!channel) {
+      return;
+    }
+
+    const options = this.buildLiveStatusMessage(workstream);
+    const existing = this.liveStatusMessages.get(workstream.id);
+    if (existing?.channelId === channel.id) {
+      const messageApi = (channel as { messages?: { fetch: (id: string) => Promise<Message> } }).messages;
+      if (messageApi) {
+        try {
+          const message = await messageApi.fetch(existing.messageId);
+          await message.edit({
+            content: typeof options.content === "string" ? options.content : "",
+            components: options.components,
+          });
+          return;
+        } catch (error) {
+          log.warn({ err: error, workstreamId: workstream.id }, "Could not update live status message; posting a fresh one");
+          this.liveStatusMessages.delete(workstream.id);
+        }
+      }
+    }
+
+    try {
+      const sent = await channel.send(options);
+      if (sent && typeof sent === "object" && "id" in sent && typeof sent.id === "string") {
+        this.liveStatusMessages.set(workstream.id, {
+          channelId: channel.id,
+          messageId: sent.id,
+        });
+      }
+    } catch (error) {
+      if (isDiscordApiError(error, 50001) || isDiscordApiError(error, 50013)) {
+        await this.sendDmFallback(options, channel.id, "unable to post live status");
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private buildLiveStatusMessage(workstream: WorkstreamRow): MessageCreateOptions {
+    const snapshot = this.orchestrator.getWorkstreamStatusSnapshot(workstream.id);
+    if (!snapshot) {
+      return {
+        content: [
+          `# Live Status - ${workstream.name}`,
+          `State: \`${workstream.state}\``,
+          `Workstream: \`${workstream.id}\``,
+        ].join("\n"),
+        components: buildWorkstreamActionRows(workstream.id, ["status"]),
+      };
+    }
+
+    const content = renderMarkdownDocument({
+      title: `Live Status - ${snapshot.workstreamName}`,
+      summary: [
+        `State: \`${snapshot.state}\``,
+        `Health: \`${snapshot.health}\`${snapshot.healthReason ? ` - ${snapshot.healthReason}` : ""}`,
+      ],
+      facts: [
+        { label: "Workstream", value: `\`${snapshot.workstreamId}\`` },
+        { label: "Project", value: `\`${snapshot.projectId}\`` },
+        { label: "Branch", value: snapshot.branch ? `\`${snapshot.branch}\`` : "shared repository root" },
+        {
+          label: "Budget",
+          value: `$${snapshot.budget.spentUsd.toFixed(2)} / $${snapshot.budget.limitUsd.toFixed(2)}`,
+        },
+        {
+          label: "Active operation",
+          value: snapshot.activeOperation ? `\`${snapshot.activeOperation.kind}\`` : "none",
+        },
+      ],
+      callouts: [{
+        label: "Next Action",
+        body: snapshot.nextAction,
+        tone: snapshot.health === "failed" || snapshot.health === "blocked" ? "warning" : "info",
+      }],
+    });
+
+    const actions =
+      snapshot.health === "failed" || snapshot.health === "blocked"
+        ? ["status", "retry", "force-unblock", "reset-planning"] as const
+        : snapshot.planning.status === "needs-answers"
+          ? ["status", "reset-planning"] as const
+          : snapshot.verification.status === "pass"
+            ? ["status", "finish"] as const
+            : ["status", "verify"] as const;
+
+    return {
+      content: truncate(content, DISCORD_RENDERED_MESSAGE_LIMIT),
+      components: buildWorkstreamActionRows(snapshot.workstreamId, [...actions]),
+    };
   }
 
   private bestRouteForProject(
@@ -3280,21 +3265,74 @@ export class DiscordBot {
       if (isDiscordApiError(error, 50001)) {
         log.error(
           { channelId: channel.id, err: error, code: 50001 },
-          "Discord bot lost access before sending message; notification was dropped silently. Operator action required to restore channel access."
+          "Discord bot lost access before sending message; trying configured DM fallback."
         );
+        await this.sendDmFallback(options, channel.id, "missing channel access");
         return;
       }
 
       if (isDiscordApiError(error, 50013)) {
         log.error(
           { channelId: channel.id, err: error, code: 50013 },
-          "Discord bot lacks permission to send into channel; notification was dropped. Grant Send Messages permission to restore."
+          "Discord bot lacks permission to send into channel; trying configured DM fallback."
         );
+        await this.sendDmFallback(options, channel.id, "missing channel permission");
         return;
       }
 
       throw error;
     }
+  }
+
+  private async sendDmFallback(
+    options: string | MessageCreateOptions,
+    failedChannelId: string,
+    reason: string,
+  ): Promise<void> {
+    const fallbackUserIds = this.discordFallbackUserIds();
+    if (fallbackUserIds.length === 0) {
+      log.warn({ failedChannelId, reason }, "Discord notification had no configured DM fallback recipients");
+      return;
+    }
+
+    const rawContent = typeof options === "string" ? options : options.content;
+    const content = typeof rawContent === "string" && rawContent.trim()
+      ? rawContent
+      : "Maverick could not render the original notification body for DM fallback.";
+    const prefixed = [
+      `Maverick could not post in channel \`${failedChannelId}\` (${reason}).`,
+      "",
+      content,
+    ].join("\n");
+    const chunks = splitDiscordMessageContent(prefixed);
+
+    for (const userId of fallbackUserIds) {
+      try {
+        const user = await this.client.users.fetch(userId);
+        for (const [index, chunk] of chunks.entries()) {
+          await user.send({
+            content: chunk,
+            components: index === chunks.length - 1 && typeof options !== "string"
+              ? options.components
+              : [],
+          });
+        }
+      } catch (error) {
+        log.warn({ err: error, userId, failedChannelId }, "Discord DM fallback failed");
+      }
+    }
+  }
+
+  private discordFallbackUserIds(): string[] {
+    const fromEnv = (process.env.MAVERICK_DISCORD_DM_FALLBACK_USER_IDS ?? "")
+      .split(/[,;\s]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    return [...new Set([
+      ...(this.config.discord.dmFallbackUserIds ?? []),
+      ...(this.config.assistant.discord.allowedUserIds ?? []),
+      ...fromEnv,
+    ])];
   }
 
   private async replyWithChunks(
@@ -3350,6 +3388,41 @@ export class DiscordBot {
     }
   }
 
+  private normalizeAssistantMessageContent(content: string): string {
+    const botId = this.client.user?.id;
+    if (!botId) {
+      return content;
+    }
+
+    return content.replace(new RegExp(`^<@!?${botId}>\\s*`), "");
+  }
+
+  private serializeAttachments(message: Message): AssistantAttachment[] {
+    return [...message.attachments.values()].map((attachment) => this.toAssistantAttachment(attachment));
+  }
+
+  private toAssistantAttachment(attachment: {
+    id?: string | null;
+    url?: string | null;
+    proxyURL?: string | null;
+    name?: string | null;
+    contentType?: string | null;
+    size?: number | null;
+    width?: number | null;
+    height?: number | null;
+  }): AssistantAttachment {
+    return {
+      id: attachment.id ?? null,
+      url: attachment.url ?? null,
+      proxyUrl: attachment.proxyURL ?? null,
+      name: attachment.name ?? null,
+      contentType: attachment.contentType ?? null,
+      size: attachment.size ?? null,
+      width: attachment.width ?? null,
+      height: attachment.height ?? null,
+    };
+  }
+
   private buildTurnCompletedMessage(
     heading: string,
     turnId: string,
@@ -3364,21 +3437,6 @@ export class DiscordBot {
       sections: normalizedOutput
         ? [{ title: "Details", lines: normalizedOutput.split(/\r?\n/).map((line) => line || " ") }]
         : [],
-    });
-    return { content: fullBody };
-  }
-
-  private buildBriefGeneratedMessage(
-    generatedAt: string,
-    summary: string,
-    markdown: string
-  ): MessageCreateOptions {
-    const trimmed = markdown.trim();
-    const fullBody = renderMarkdownDocument({
-      title: "Maverick Brief",
-      summary: [summary],
-      facts: [{ label: "Generated", value: generatedAt }],
-      sections: [{ title: "Details", lines: trimmed.split(/\r?\n/).map((line) => line || " ") }],
     });
     return { content: fullBody };
   }
@@ -3454,6 +3512,17 @@ export class DiscordBot {
     return {
       ...options,
       content: combined,
+      components: [
+        ...(options.components ?? []),
+        ...buildWorkstreamActionRows(
+          workstreamId,
+          snapshot.health === "failed" || snapshot.health === "blocked"
+            ? ["status", "retry", "force-unblock", "reset-planning"]
+            : snapshot.verification.status === "pass"
+              ? ["status", "finish"]
+              : ["status", "verify"],
+        ),
+      ].slice(0, 5),
     };
   }
 

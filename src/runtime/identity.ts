@@ -11,3 +11,18 @@ export function getRuntimeInstanceId(): string {
 
   return hostName && hostName.length > 0 ? hostName.toLowerCase() : "default";
 }
+
+export type MaverickRuntimeRole = "server" | "client";
+
+export function getRuntimeRole(): MaverickRuntimeRole {
+  const explicit = process.env.MAVERICK_ROLE?.trim().toLowerCase();
+  if (explicit === "server" || explicit === "client") {
+    return explicit;
+  }
+
+  return "server";
+}
+
+export function ownsServerSideWork(): boolean {
+  return getRuntimeRole() === "server";
+}

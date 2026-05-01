@@ -91,6 +91,7 @@ Routine Windows/Linux operation should not copy SQLite files. Windows should use
 Linux owns the SQLite file directly:
 
 ```dotenv
+MAVERICK_ROLE=server
 MAVERICK_INSTANCE_ID=linux
 STATE_BACKEND=sqlite
 DATABASE_PATH=/var/lib/maverick/orchestrator.db
@@ -102,6 +103,7 @@ The HTTP server is already bound to `127.0.0.1` by default in the shared control
 Windows keeps the existing Discord command routing and instance behavior, but uses the Linux state service:
 
 ```dotenv
+MAVERICK_ROLE=client
 MAVERICK_INSTANCE_ID=windows
 STATE_BACKEND=remote
 MAVERICK_STATE_URL=http://127.0.0.1:3848
@@ -115,6 +117,8 @@ Start the tunnel before starting the Windows bot:
 ```
 
 This forwards `127.0.0.1:3848` on Windows to the Linux service on `127.0.0.1:3847`. If the tunnel or Linux state API is unavailable, Windows remote state calls fail closed instead of opening its own SQLite database.
+
+In client role, Windows does not start the Discord bot, assistant reminder workers, or background worktree reaper. To dogfood a local Windows build against Discord, temporarily stop the Linux service and run Windows with `MAVERICK_ROLE=server`; switch it back to `client` when the Linux service resumes.
 
 ## State Migration
 

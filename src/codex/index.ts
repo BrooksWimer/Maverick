@@ -10,7 +10,6 @@ export type {
   ApprovalRequest,
 } from "./types.js";
 
-export { CodexCliAdapter } from "./cli-adapter.js";
 export { CodexAppServerAdapter } from "./app-server-adapter.js";
 export { MockAdapter } from "./mock-adapter.js";
 export { ClaudeCliAdapter } from "../claude/claude-adapter.js";
@@ -18,7 +17,6 @@ export { ClaudeCliAdapter } from "../claude/claude-adapter.js";
 import type { ExecutionBackend } from "../config/schema.js";
 import type { ExecutionBackendAdapter } from "./types.js";
 import { CodexAppServerAdapter } from "./app-server-adapter.js";
-import { CodexCliAdapter } from "./cli-adapter.js";
 import { MockAdapter } from "./mock-adapter.js";
 import { ClaudeCliAdapter } from "../claude/claude-adapter.js";
 
@@ -38,11 +36,6 @@ export function createAdapter(config: ExecutionBackend): ExecutionBackendAdapter
         websocketPort: config.websocketPort,
         persistExtendedHistory: config.persistExtendedHistory,
         experimentalRawEvents: config.experimentalRawEvents,
-      });
-    case "codex-cli":
-      return new CodexCliAdapter({
-        model: config.model,
-        approvalMode: config.approvalMode,
       });
     case "claude-code":
       return new ClaudeCliAdapter({

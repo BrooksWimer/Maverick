@@ -7,7 +7,6 @@ import type {
   AssistantAttachment,
   AssistantInterpreter,
   ParsedAssistantIntent,
-  WorkNotesConfig,
 } from "./types.js";
 
 const log = createLogger("assistant:agent");
@@ -19,9 +18,6 @@ type AgentEnvelope = {
     title?: string;
     content?: string;
     context?: "work" | "personal" | "home" | "errands" | "health" | "planning";
-    noteKind?: "general" | "project" | "study" | "acceptance-criteria";
-    projectName?: string | null;
-    smartGoalIds?: string[];
   } | null;
   task?: {
     title?: string;
@@ -63,8 +59,7 @@ export class CodexAssistantInterpreter implements AssistantInterpreter {
 
   constructor(
     private readonly project: ProjectConfig,
-    backend: ExecutionBackend,
-    private readonly workNotes: WorkNotesConfig | null = null
+    backend: ExecutionBackend
   ) {
     this.adapter = createAdapter(backend);
   }
@@ -81,8 +76,7 @@ export class CodexAssistantInterpreter implements AssistantInterpreter {
       input.text,
       input.now,
       input.timeZone,
-      input.attachments ?? [],
-      this.workNotes
+      input.attachments ?? []
     );
     const result = await this.adapter.startTurn({
       threadId: thread.id,
@@ -128,8 +122,7 @@ function buildInterpretationPrompt(
   text: string,
   now: Date,
   timeZone: string,
-  attachments: AssistantAttachment[],
-  workNotes: WorkNotesConfig | null
+  attachments: AssistantAttachment[]
 ): string {
   const attachmentSummaries = attachments.length > 0
     ? [
@@ -139,20 +132,6 @@ function buildInterpretationPrompt(
         ),
       ]
     : ["Attachments: none"];
-
-  const workNoteGuidance = workNotes
-    ? [
-        "For notes, distinguish between generic notes and work notes.",
-        "If a note is work-related, return \"context\":\"work\" and classify it into one of:",
-        "- \"general\": a general work-progress or job note",
-        "- \"project\": a note tied to a named project or ticket",
-        "- \"study\": reading, study, or active learning for work",
-        "- \"acceptance-criteria\": screenshots or notes about ticket requirements or acceptance criteria",
-        "When a work note clearly belongs to a named project or ticket, set projectName.",
-        "When a work note supports one of these smart goals, include the matching ids in smartGoalIds:",
-        ...workNotes.smartGoals.map((goal) => `- ${goal.id}: ${goal.description}`),
-      ]
-    : [];
 
   return [
     "You are Maverick's personal assistant interpreter.",
@@ -169,13 +148,12 @@ function buildInterpretationPrompt(
     '- "clarification": ask a concise question if required information is missing',
     "Primary contexts: work, personal, home, errands, health, planning.",
     "Only use the query intent when the user is clearly asking Maverick to show agenda/inbox/search information, not when they are capturing something.",
-    ...workNoteGuidance,
     "Interpret natural language flexibly, including casual wording and implied tasks.",
     "Return shape:",
     "{" +
       "\"intent\":\"note|task|reminder|calendar|query|clarification\"," +
       "\"confidence\":0.0," +
-      "\"note\":{\"title\":\"...\",\"content\":\"...\",\"context\":\"work|personal|home|errands|health|planning\",\"noteKind\":\"general|project|study|acceptance-criteria\",\"projectName\":\"...\",\"smartGoalIds\":[\"...\"]}|null," +
+      "\"note\":{\"title\":\"...\",\"content\":\"...\",\"context\":\"work|personal|home|errands|health|planning\"}|null," +
       "\"task\":{\"title\":\"...\",\"details\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\",\"status\":\"inbox|open|scheduled\",\"dueAtIso\":\"...\",\"scheduledForIso\":\"...\"}|null," +
       "\"reminder\":{\"body\":\"...\",\"remindAtIso\":\"...\",\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
       "\"calendar\":{\"title\":\"...\",\"startsAtIso\":\"...\",\"endsAtIso\":\"...\",\"isAllDay\":false,\"recurrenceRule\":\"RRULE:FREQ=DAILY|RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR|RRULE:FREQ=WEEKLY;BYDAY=MO,...\",\"details\":\"...\",\"location\":null,\"primaryContext\":\"work|personal|home|errands|health|planning\"}|null," +
@@ -244,11 +222,6 @@ function toParsedIntent(envelope: AgentEnvelope): ParsedAssistantIntent | null {
         content: envelope.note.content.trim(),
         confidence,
         context: normalizeContext(envelope.note.context),
-        noteKind: envelope.note.noteKind,
-        projectName: envelope.note.projectName ?? null,
-        smartGoalIds: Array.isArray(envelope.note.smartGoalIds)
-          ? envelope.note.smartGoalIds.filter((value): value is string => typeof value === "string")
-          : [],
       };
     case "task":
       if (!envelope.task?.details) {
