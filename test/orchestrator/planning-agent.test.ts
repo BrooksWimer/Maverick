@@ -418,6 +418,14 @@ describe("Orchestrator planning agent flow", () => {
 
     const firstPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
     expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
+
+    // Change PROJECT_MEMORY.md to invalidate the fingerprint and force a fresh plan
+    // (otherwise the manual re-call reuses the stored plan).
+    writeFileSync(
+      join(repoPath, "docs", "maverick", "PROJECT_MEMORY.md"),
+      "# Project Memory\n\nUpdated entry forces a fresh plan.",
+      "utf8",
+    );
     const secondPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
     expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
     const resumedPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual", {

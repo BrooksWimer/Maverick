@@ -1353,6 +1353,35 @@ export class Orchestrator {
     const previousContext = options.resumeExisting ? storedContext : null;
     const effectiveInstruction = previousContext?.originalInstruction ?? instruction;
     const contextBundle = this.buildPlanningContextBundle(workstream, effectiveInstruction, previousContext);
+
+    if (
+      !options.resumeExisting &&
+      trigger === "manual" &&
+      storedContext &&
+      storedContext.contextBundle?.contextFingerprint === contextBundle.contextFingerprint &&
+      storedContext.pendingQuestions.length === 0 &&
+      (storedContext.finalExecutionPrompt ?? "").trim().length > 0
+    ) {
+      log.info(
+        { workstreamId, fingerprint: contextBundle.contextFingerprint },
+        "Planning context unchanged; reusing stored plan instead of recalling Claude",
+      );
+      this.touchProgress("planning", workstream.id);
+      eventLog.emit({
+        workstream_id: workstream.id,
+        project_id: workstream.project_id,
+        event_type: "planning.reused",
+        payload: { fingerprint: contextBundle.contextFingerprint },
+        source: "orchestrator",
+      });
+      return {
+        renderedPlan: renderPlanningSummary(storedContext),
+        planningContext: storedContext,
+        finalExecutionPrompt: storedContext.finalExecutionPrompt,
+        needsAnswers: false,
+      };
+    }
+
     const epicContextAnalysis = contextBundle.epicContext;
     this.beginActiveOperation(workstreamId, "planning");
     try {
@@ -3420,7 +3449,20 @@ export class Orchestrator {
   }
 
   private isPlanningContextRelevantEvent(eventType: string): boolean {
-    return !eventType.startsWith("plan.");
+    if (eventType.startsWith("plan.")) {
+      return false;
+    }
+    if (eventType.startsWith("planning.")) {
+      // planning.reused, planning.checkpointed etc. — caused by planning itself.
+      return false;
+    }
+    if (eventType === "workstream.stateChanged") {
+      // State transitions are byproducts of orchestrator action, not new
+      // operator-supplied context. Including them would make the fingerprint
+      // change every time planning runs and defeat reuse.
+      return false;
+    }
+    return true;
   }
 
   private listChangedFilesForPlanning(workstream: WorkstreamRow): PlanningContextBundle["changedFiles"] {
