@@ -227,9 +227,37 @@ For each convention finding:
 
 ---
 
+## PASS 5: CLARIFYING QUESTIONS
+
+After completing the four passes, identify any critical ambiguities or unresolved decisions that require operator input before proceeding.
+
+**When to ask clarifying questions:**
+- A key architectural decision was made but not explicitly documented in code comments
+- Multiple valid approaches exist and the code doesn't explain which one was chosen
+- A security trade-off was made (e.g., accepting a known CVE for compatibility)
+- A performance optimization introduces subtle behavior changes that need verification
+- The code violates documented patterns from AGENTS.md or the epic charter, but the reason isn't clear
+
+**Question Format:**
+Each question should include:
+- \`id\`: A short kebab-case identifier (e.g., "auth-strategy-choice")
+- \`question\`: The specific question to ask the operator
+- \`context\`: Why this matters and what the code currently does
+- \`severity\`: "error" if this blocks shipping, "warning" if it should be resolved soon
+
+**Important Decisions:**
+Similarly, document any major architectural or strategic decisions that were reviewed positively. These help establish precedent and context for future work.
+
+Decision Format:
+- \`id\`: A short kebab-case identifier
+- \`decision\`: The decision that was made
+- \`rationale\`: Why this decision makes sense given the context
+
+---
+
 ## FINAL VERDICT
 
-After completing all four passes, synthesize findings into a final verdict:
+After completing all five passes, synthesize findings into a final verdict:
 
 ### Verdict Options:
 - **ship**: No findings, or only minor info-level suggestions. Code is production-ready.
@@ -313,11 +341,27 @@ Your final output MUST be valid JSON matching this structure:
   "suggestions": [
     "Consider refactoring UserService to reduce complexity",
     "Add integration tests for the new payment flow"
+  ],
+  "requiredAnswers": [
+    {
+      "id": "review-auth-strategy",
+      "question": "Should the app use JWT or session-based authentication?",
+      "context": "The new auth module has both implementations and we need to settle on one approach.",
+      "severity": "error"
+    }
+  ],
+  "importantDecisions": [
+    {
+      "id": "deploy-strategy",
+      "decision": "Blue-green deployment with automated canary testing",
+      "rationale": "This allows safe rollout of new changes with quick rollback if needed."
+    }
   ]
 }
 \`\`\`
 
 Each finding MUST include: file, severity, category, and description.
+The requiredAnswers and importantDecisions fields are optional and should be used to surface critical ambiguities or major decisions for operator confirmation.
 
 ---
 

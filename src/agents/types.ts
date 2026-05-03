@@ -308,6 +308,8 @@ export interface ReviewResult {
   correctnessFindings: ReviewFinding[];
   conventionFindings: ReviewFinding[];
   suggestions: string[];
+  requiredAnswers?: ReviewAnswer[];
+  importantDecisions?: ImportantDecision[];
 }
 
 export interface ReviewPass {
@@ -323,6 +325,19 @@ export interface ReviewFinding {
   category: string;
   description: string;
   suggestion?: string;
+}
+
+export interface ReviewAnswer {
+  id: string;
+  question: string;
+  context: string;
+  severity: "warning" | "error";
+}
+
+export interface ImportantDecision {
+  id: string;
+  decision: string;
+  rationale: string;
 }
 
 /** Epic context agent output */
