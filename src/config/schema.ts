@@ -35,7 +35,7 @@ export const DEFAULT_WORKFLOW: z.infer<typeof WorkflowSchema> = {
     { from: "blocked", to: "intake", trigger: "info-supplied", autoAdvance: false },
     { from: "planning", to: "awaiting-decisions", trigger: "operator-input-required", autoAdvance: true },
     { from: "awaiting-decisions", to: "planning", trigger: "operator-input-received", autoAdvance: true },
-    { from: "planning", to: "implementation", trigger: "plan-approved", autoAdvance: false },
+    { from: "planning", to: "implementation", trigger: "plan-approved", autoAdvance: true },
     { from: "implementation", to: "verification", trigger: "implementation-complete", autoAdvance: true },
     { from: "verification", to: "review", trigger: "verification-passed", autoAdvance: true },
     { from: "verification", to: "implementation", trigger: "verification-failed", autoAdvance: true },
