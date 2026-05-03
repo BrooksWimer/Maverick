@@ -79,7 +79,8 @@ describe("Workstream auto-advance", () => {
       const locks = new Map<string, Promise<void>>();
       const workstreamId = "ws_123";
 
-      locks.set(workstreamId, Promise.reject(new Error("Test error")));
+      const rejectedPromise = Promise.reject(new Error("Test error")).catch(() => {});
+      locks.set(workstreamId, rejectedPromise);
       locks.delete(workstreamId);
 
       expect(locks.has(workstreamId)).toBe(false);
