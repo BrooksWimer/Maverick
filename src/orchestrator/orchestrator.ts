@@ -360,6 +360,11 @@ export class Orchestrator {
   private utilityClaudeAdapter: ExecutionBackendAdapter | null = null;
   private initialized = false;
 
+  // Auto-advance locking and tracking
+  private autoAdvanceLocks = new Map<string, Promise<void>>();
+  private loopDetection = new Map<string, { transition: string; count: number; timestamp: number }>();
+  private verificationRetryCount = new Map<string, number>();
+
   constructor(config: OrchestratorConfig) {
     this.config = normalizeEpicFirstConfig(config);
     this.instanceId = getRuntimeInstanceId();
@@ -1111,6 +1116,119 @@ export class Orchestrator {
     return newState;
   }
 
+  /**
+   * Attempt to automatically advance a workstream to the next state based on its current state
+   * and configured auto-advance transitions. Uses per-workstream locking to prevent re-entrancy,
+   * loop detection to prevent rapid repeated transitions, and retry caps for verification failures.
+   *
+   * @param workstreamId - The workstream to attempt auto-advancing
+   * @param hint - Optional hint about what transition to try (e.g., "plan-approved")
+   */
+  async tryAutoAdvance(workstreamId: string, hint?: string): Promise<boolean> {
+    // Acquire per-workstream lock to prevent concurrent auto-advances
+    const existingLock = this.autoAdvanceLocks.get(workstreamId);
+    if (existingLock) {
+      log.debug({ workstreamId }, "Auto-advance already in progress, skipping");
+      return false;
+    }
+
+    const lockPromise = (async () => {
+      try {
+        const ws = workstreams.getById(workstreamId);
+        if (!ws) {
+          log.warn({ workstreamId }, "Workstream not found for auto-advance");
+          return;
+        }
+
+        const sm = this.getStateMachine(ws.project_id);
+        let transitionToAttempt: string | null = hint ?? null;
+
+        // If no hint, check which auto-advance transitions are available from current state
+        if (!transitionToAttempt) {
+          const availableTransitions = sm.getAutoAdvanceTransitions(ws.state);
+          if (availableTransitions.length === 0) {
+            log.debug({ workstreamId, state: ws.state }, "No auto-advance transitions available");
+            return;
+          }
+          // Try the first available auto-advance transition
+          transitionToAttempt = availableTransitions[0].trigger;
+        }
+
+        // Check loop detection: abort if same transition fires 3+ times in 60 seconds
+        const loopKey = `${workstreamId}:${transitionToAttempt}`;
+        const loopRecord = this.loopDetection.get(loopKey);
+        const now = Date.now();
+        if (loopRecord && now - loopRecord.timestamp < 60000) {
+          loopRecord.count++;
+          if (loopRecord.count >= 3) {
+            log.error(
+              { workstreamId, transition: transitionToAttempt, count: loopRecord.count },
+              "Loop detected: same transition fired 3+ times in 60 seconds",
+            );
+            this.loopDetection.delete(loopKey);
+            return;
+          }
+        } else {
+          this.loopDetection.set(loopKey, { transition: transitionToAttempt, count: 1, timestamp: now });
+        }
+
+        // Check retry caps for verification failures
+        if (ws.state === "verification") {
+          const retryCount = this.verificationRetryCount.get(workstreamId) ?? 0;
+          if (retryCount >= 2) {
+            log.warn(
+              { workstreamId, retryCount },
+              "Verification retry cap reached (max 2 retries); blocking auto-advance",
+            );
+            return;
+          }
+        }
+
+        // Attempt the transition
+        const ws_fresh = workstreams.getById(workstreamId);
+        if (!ws_fresh) return;
+
+        const canTransition = sm.canTransition(ws_fresh.state, transitionToAttempt);
+        if (!canTransition.allowed) {
+          log.debug(
+            { workstreamId, state: ws_fresh.state, trigger: transitionToAttempt, reason: canTransition.reason },
+            "Cannot auto-advance: transition not allowed",
+          );
+          return;
+        }
+
+        // Perform the transition
+        const updated = this.tryTransitionState(ws_fresh, transitionToAttempt);
+        log.info(
+          { workstreamId, from: ws_fresh.state, to: updated.state, trigger: transitionToAttempt },
+          "Auto-advanced workstream",
+        );
+
+        // Track if this was a verification transition for retry counting
+        if (transitionToAttempt === "verification-failed") {
+          this.verificationRetryCount.set(workstreamId, (this.verificationRetryCount.get(workstreamId) ?? 0) + 1);
+        } else if (transitionToAttempt === "verification-passed") {
+          // Clear retry count on success
+          this.verificationRetryCount.delete(workstreamId);
+        }
+
+        eventLog.emit({
+          workstream_id: workstreamId,
+          project_id: ws_fresh.project_id,
+          event_type: "workstream.autoAdvanced",
+          payload: { from: ws_fresh.state, to: updated.state, trigger: transitionToAttempt },
+          source: "orchestrator",
+        });
+      } finally {
+        this.autoAdvanceLocks.delete(workstreamId);
+      }
+    })();
+
+    this.autoAdvanceLocks.set(workstreamId, lockPromise);
+    await lockPromise;
+    return true;
+  }
+
   async bootstrapProjectRoadmap(projectId: string): Promise<{ filePath: string; snippet: string }> {
     const project = this.getProject(projectId);
     const filePath = this.projectRoadmapPath(project);
@@ -1563,6 +1681,14 @@ export class Orchestrator {
         workstream,
         this.buildPlanOperatorReport(workstream, planningContext, trigger),
       );
+
+      // Auto-advance if planning completed with no pending questions
+      if (planningContext.pendingQuestions.length === 0 && planningContext.finalExecutionPrompt) {
+        this.tryAutoAdvance(workstreamId, "plan-approved").catch((err) => {
+          log.error({ workstreamId, error: err.message }, "Error during auto-advance after planning");
+        });
+      }
+
       return {
         renderedPlan,
         planningContext,
@@ -1754,6 +1880,13 @@ export class Orchestrator {
         workstream,
         this.buildPlanOperatorReport(workstream, planningContext, "resume"),
       );
+
+      // Auto-advance if planning completed with no pending questions
+      if (planningContext.pendingQuestions.length === 0 && planningContext.finalExecutionPrompt) {
+        this.tryAutoAdvance(workstreamId, "plan-approved").catch((err) => {
+          log.error({ workstreamId, error: err.message }, "Error during auto-advance after answering decisions");
+        });
+      }
 
       return {
         renderedPlan,
