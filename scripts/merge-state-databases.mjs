@@ -22,6 +22,8 @@ const tableCopyOrder = [
   "assistant_calendar_events",
   "assistant_reminders",
   "assistant_settings",
+  "assistant_item_assignments",
+  "dashboard_plan_items",
 ];
 
 const args = parseArgs(process.argv.slice(2));
