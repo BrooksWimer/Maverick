@@ -17,6 +17,8 @@ export type CommandCenterEvidenceLinkKind =
   | "repo-path"
   | "artifact";
 export type CommandCenterProjectIntelligenceStatus = "idle" | "active" | "attention";
+export type CommandCenterDashboardItemType = "task" | "note" | "capture" | "calendar" | "workstream" | "plan";
+export type CommandCenterPlanSection = "focus" | "next" | "later" | "waiting";
 
 export interface CommandCenterEvidenceLink {
   kind: CommandCenterEvidenceLinkKind;
@@ -48,6 +50,35 @@ export interface CommandCenterProjectSummary {
   health: WorkstreamHealth | "ok" | "attention";
   healthReason: string | null;
   latestActivityAt: string | null;
+}
+
+export interface CommandCenterProjectTab {
+  projectId: string;
+  projectName: string;
+  status: CommandCenterProjectIntelligenceStatus;
+  headline: string;
+  activeWorkstreamCount: number;
+  actionItemCount: number;
+  laneCount: number;
+  latestActivityAt: string | null;
+}
+
+export interface CommandCenterOrganizationLaneOption {
+  projectId: string;
+  laneId: string;
+  label: string;
+  source: "epic" | "lane" | "route" | "thread" | "workstream" | "general";
+  channelId: string | null;
+  threadId: string | null;
+  epicId: string | null;
+  baseBranch: string | null;
+  assistantEnabled: boolean | null;
+}
+
+export interface CommandCenterOrganizationOption {
+  projectId: string;
+  projectName: string;
+  lanes: CommandCenterOrganizationLaneOption[];
 }
 
 export interface CommandCenterReportSummary {
@@ -96,6 +127,9 @@ export interface CommandCenterNoteSummary {
   projectName: string | null;
   sourceProjectId: string | null;
   laneId: string | null;
+  sourceLaneId: string | null;
+  effectiveProjectId: string | null;
+  effectiveLaneId: string | null;
   threadId: string | null;
   storagePath: string | null;
   evidenceLinks: CommandCenterEvidenceLink[];
@@ -116,13 +150,35 @@ export interface CommandCenterTodayPlanItem {
   id: string;
   title: string;
   details: string;
-  source: "task" | "note" | "calendar" | "workstream";
+  source: "task" | "note" | "calendar" | "workstream" | "plan";
   projectId: string | null;
   laneId: string | null;
   dueAt: string | null;
   scheduledFor: string | null;
   status: string | null;
   evidenceLinks: CommandCenterEvidenceLink[];
+}
+
+export interface CommandCenterPlanBoardItem {
+  id: string;
+  date: string;
+  section: CommandCenterPlanSection;
+  title: string;
+  details: string | null;
+  itemType: CommandCenterDashboardItemType | null;
+  itemId: string | null;
+  projectId: string | null;
+  laneId: string | null;
+  position: number;
+  status: string;
+  evidenceLinks: CommandCenterEvidenceLink[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CommandCenterPlanBoard {
+  date: string;
+  sections: Record<CommandCenterPlanSection, CommandCenterPlanBoardItem[]>;
 }
 
 export interface CommandCenterTodayCalendarEvent {
@@ -148,6 +204,7 @@ export interface CommandCenterTodayPlan {
   personal: CommandCenterTodayPlanItem[];
   calendarEvents: CommandCenterTodayCalendarEvent[];
   planningNotes: CommandCenterNoteSummary[];
+  planBoard: CommandCenterPlanBoard;
 }
 
 export interface CommandCenterProjectTask {
@@ -160,6 +217,9 @@ export interface CommandCenterProjectTask {
   scheduledFor: string | null;
   sourceProjectId: string | null;
   laneId: string | null;
+  sourceLaneId: string | null;
+  effectiveProjectId: string | null;
+  effectiveLaneId: string | null;
   threadId: string | null;
   evidenceLinks: CommandCenterEvidenceLink[];
   createdAt: string;
@@ -177,6 +237,9 @@ export interface CommandCenterProjectCalendarEvent {
   syncStatus: string;
   sourceProjectId: string | null;
   laneId: string | null;
+  sourceLaneId: string | null;
+  effectiveProjectId: string | null;
+  effectiveLaneId: string | null;
   threadId: string | null;
   evidenceLinks: CommandCenterEvidenceLink[];
   createdAt: string;
@@ -188,6 +251,9 @@ export interface CommandCenterUnresolvedCapture {
   excerpt: string;
   sourceProjectId: string | null;
   laneId: string | null;
+  sourceLaneId: string | null;
+  effectiveProjectId: string | null;
+  effectiveLaneId: string | null;
   threadId: string | null;
   status: string;
   intent: string | null;
@@ -197,6 +263,7 @@ export interface CommandCenterUnresolvedCapture {
 
 export interface CommandCenterProjectLaneSummary {
   laneId: string;
+  label: string;
   headline: string;
   keyUpdates: string[];
   actionItems: string[];
@@ -240,6 +307,8 @@ export interface CommandCenterSnapshot {
   todayPlan: CommandCenterTodayPlan;
   projectSummaries: CommandCenterProjectSummary[];
   projectIntelligenceSummaries: CommandCenterProjectIntelligenceSummary[];
+  projectTabs: CommandCenterProjectTab[];
+  organizationOptions: CommandCenterOrganizationOption[];
   activeWorkstreams: WorkstreamStatusSnapshot[];
   latestReports: CommandCenterReportSummary[];
   pendingApprovals: CommandCenterApprovalSummary[];

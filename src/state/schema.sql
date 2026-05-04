@@ -309,3 +309,39 @@ CREATE TABLE IF NOT EXISTS assistant_settings (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_settings_scope_feature
   ON assistant_settings(scope_type, scope_id, feature);
+
+-- Dashboard-only visual organization overrides. These do not rewrite source messages
+-- or move stored markdown files; they only control Command Center grouping.
+CREATE TABLE IF NOT EXISTS assistant_item_assignments (
+  item_type     TEXT NOT NULL,
+  item_id       TEXT NOT NULL,
+  project_id    TEXT NOT NULL REFERENCES projects(id),
+  lane_id       TEXT,
+  updated_by    TEXT NOT NULL DEFAULT 'dashboard',
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (item_type, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assistant_item_assignments_project
+  ON assistant_item_assignments(project_id, lane_id);
+
+-- Operator-curated daily planning board for the private Command Center.
+CREATE TABLE IF NOT EXISTS dashboard_plan_items (
+  id          TEXT PRIMARY KEY,
+  date_key    TEXT NOT NULL,
+  section     TEXT NOT NULL,
+  item_type   TEXT,
+  item_id     TEXT,
+  title       TEXT NOT NULL,
+  details     TEXT,
+  project_id  TEXT REFERENCES projects(id),
+  lane_id     TEXT,
+  position    INTEGER NOT NULL DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'active',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dashboard_plan_items_date_section
+  ON dashboard_plan_items(date_key, section, position);

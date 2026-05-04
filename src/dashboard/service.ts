@@ -13,29 +13,40 @@ import type {
 import {
   artifacts,
   assistantCalendarEvents,
+  assistantItemAssignments,
   assistantMessages,
   assistantNotes,
   assistantTasks,
+  dashboardPlanItems,
+  events,
   workstreams,
   type ArtifactRow,
   type AssistantCalendarEventRow,
+  type AssistantItemAssignmentRow,
   type AssistantMessageRow,
   type AssistantNoteRow,
   type AssistantTaskRow,
+  type DashboardPlanItemRow,
   type EventRow,
 } from "../state/index.js";
 import type {
   CommandCenterApprovalSummary,
+  CommandCenterDashboardItemType,
   CommandCenterEventSummary,
   CommandCenterEvidenceLink,
   CommandCenterHealthSummary,
   CommandCenterNoteSummary,
+  CommandCenterOrganizationOption,
+  CommandCenterPlanBoard,
+  CommandCenterPlanBoardItem,
+  CommandCenterPlanSection,
   CommandCenterProjectCalendarEvent,
   CommandCenterProjectIntelligenceDetail,
   CommandCenterProjectIntelligenceStatus,
   CommandCenterProjectIntelligenceSummary,
   CommandCenterProjectLaneSummary,
   CommandCenterProjectSummary,
+  CommandCenterProjectTab,
   CommandCenterProjectTask,
   CommandCenterReportSummary,
   CommandCenterSnapshot,
@@ -57,6 +68,17 @@ const ASSISTANT_CONTEXTS: AssistantPrimaryContext[] = [
 
 const STALE_WORKSTREAM_MS = 24 * 60 * 60 * 1000;
 const RECENT_ASSISTANT_ROW_LIMIT = 120;
+const PLAN_SECTIONS: CommandCenterPlanSection[] = ["focus", "next", "later", "waiting"];
+const DASHBOARD_ITEM_TYPES: CommandCenterDashboardItemType[] = [
+  "task",
+  "note",
+  "capture",
+  "calendar",
+  "workstream",
+  "plan",
+];
+
+type AssignmentMap = Map<string, AssistantItemAssignmentRow>;
 
 interface SourceContext {
   messageId: string | null;
@@ -86,6 +108,49 @@ interface IntelligenceBuildResult {
   todayPlan: CommandCenterTodayPlan;
 }
 
+export interface DashboardTaskPatch {
+  title?: string;
+  details?: string;
+  primaryContext?: AssistantPrimaryContext;
+  status?: string;
+  dueAt?: string | null;
+  scheduledFor?: string | null;
+}
+
+export interface DashboardAssignmentPatch {
+  itemType: CommandCenterDashboardItemType;
+  itemId: string;
+  projectId: string;
+  laneId?: string | null;
+  updatedBy?: string;
+}
+
+export interface DashboardPlanItemInput {
+  date?: string;
+  section: CommandCenterPlanSection;
+  title?: string;
+  details?: string | null;
+  itemType?: CommandCenterDashboardItemType | null;
+  itemId?: string | null;
+  projectId?: string | null;
+  laneId?: string | null;
+  position?: number;
+  status?: string;
+}
+
+export interface DashboardPlanItemPatch {
+  date?: string;
+  section?: CommandCenterPlanSection;
+  title?: string;
+  details?: string | null;
+  itemType?: CommandCenterDashboardItemType | null;
+  itemId?: string | null;
+  projectId?: string | null;
+  laneId?: string | null;
+  position?: number;
+  status?: string;
+}
+
 export function buildCommandCenterSnapshot(input: {
   orchestrator: Orchestrator;
   assistant?: AssistantService | null;
@@ -104,6 +169,7 @@ export function buildCommandCenterSnapshot(input: {
     .filter((snapshot): snapshot is WorkstreamStatusSnapshot => snapshot !== null);
   const activeRowsById = new Map(activeRows.map((workstream) => [workstream.id, workstream]));
   const reports = buildLatestReports();
+  const organizationOptions = buildOrganizationOptions(input.orchestrator, activeWorkstreams);
   const pendingApprovals = input.orchestrator.getPendingApprovals().map((approval) => {
     const workstream = workstreams.getById(approval.workstream_id);
     return {
@@ -142,6 +208,8 @@ export function buildCommandCenterSnapshot(input: {
     todayPlan: intelligence.todayPlan,
     projectSummaries,
     projectIntelligenceSummaries: intelligence.summaries,
+    projectTabs: buildProjectTabs(projectSummaries, intelligence.summaries),
+    organizationOptions,
     activeWorkstreams,
     latestReports: reports,
     pendingApprovals,
@@ -184,6 +252,292 @@ export function buildCommandCenterProjectDetail(input: {
   });
 
   return intelligence.details.find((detail) => detail.projectId === input.projectId) ?? null;
+}
+
+export async function completeDashboardTask(input: {
+  assistant?: AssistantService | null;
+  taskId: string;
+}) {
+  const task = assistantTasks.getById(input.taskId);
+  if (!task) {
+    throw new Error(`Task not found: ${input.taskId}`);
+  }
+
+  const completed = input.assistant?.isEnabled()
+    ? await input.assistant.completeTask(input.taskId)
+    : assistantTasks.update(input.taskId, {
+        status: "done",
+        completed_at: new Date().toISOString(),
+      });
+
+  events.emit({
+    event_type: "dashboard.task.completed",
+    payload: {
+      taskId: input.taskId,
+    },
+    source: "dashboard",
+  });
+
+  return completed;
+}
+
+export function updateDashboardTask(input: {
+  taskId: string;
+  patch: DashboardTaskPatch;
+}) {
+  const task = assistantTasks.getById(input.taskId);
+  if (!task) {
+    throw new Error(`Task not found: ${input.taskId}`);
+  }
+
+  const fields: Parameters<typeof assistantTasks.update>[1] = {};
+  if (input.patch.title !== undefined) fields.title = requireNonBlank(input.patch.title, "title");
+  if (input.patch.details !== undefined) fields.details = input.patch.details;
+  if (input.patch.primaryContext !== undefined) fields.primary_context = normalizeAssistantContext(input.patch.primaryContext);
+  if (input.patch.status !== undefined) fields.status = requireNonBlank(input.patch.status, "status");
+  if (input.patch.dueAt !== undefined) fields.due_at = input.patch.dueAt;
+  if (input.patch.scheduledFor !== undefined) fields.scheduled_for = input.patch.scheduledFor;
+  if (fields.status && fields.status !== "done") fields.completed_at = null;
+  if (fields.status === "done") fields.completed_at = new Date().toISOString();
+
+  const updated = assistantTasks.update(input.taskId, fields);
+  events.emit({
+    event_type: "dashboard.task.updated",
+    payload: {
+      taskId: input.taskId,
+      fields: Object.keys(fields),
+    },
+    source: "dashboard",
+  });
+  return updated;
+}
+
+export function assignDashboardItem(input: {
+  orchestrator: Orchestrator;
+  patch: DashboardAssignmentPatch;
+}) {
+  const itemType = normalizeDashboardItemType(input.patch.itemType);
+  if (!itemType || itemType === "plan") {
+    throw new Error(`Invalid dashboard item type: ${input.patch.itemType}`);
+  }
+  assertDashboardItemExists(itemType, input.patch.itemId);
+  assertValidAssignment(input.orchestrator, input.patch.projectId, input.patch.laneId ?? null);
+
+  const assignment = assistantItemAssignments.upsert({
+    item_type: itemType,
+    item_id: input.patch.itemId,
+    project_id: input.patch.projectId,
+    lane_id: normalizeLaneId(input.patch.laneId),
+    updated_by: input.patch.updatedBy ?? "dashboard",
+  });
+  events.emit({
+    project_id: assignment.project_id,
+    event_type: "dashboard.item.assigned",
+    payload: {
+      itemType,
+      itemId: assignment.item_id,
+      projectId: assignment.project_id,
+      laneId: assignment.lane_id,
+    },
+    source: "dashboard",
+  });
+  return assignment;
+}
+
+export function promoteDashboardNoteToTask(input: {
+  orchestrator: Orchestrator;
+  noteId: string;
+}) {
+  const note = assistantNotes.getById(input.noteId);
+  if (!note) {
+    throw new Error(`Note not found: ${input.noteId}`);
+  }
+  const source = resolveMessageSource(note.message_id);
+  const assignment = assistantItemAssignments.get("note", note.id);
+  if (assignment) {
+    assertValidAssignment(input.orchestrator, assignment.project_id, assignment.lane_id);
+  }
+
+  const task = assistantTasks.create({
+    message_id: note.message_id,
+    source_contact: note.source_contact,
+    title: note.title,
+    details: note.content,
+    primary_context: normalizeAssistantContext(note.note_context),
+    status: "open",
+    note_id: note.id,
+  });
+  if (assignment) {
+    assistantItemAssignments.upsert({
+      item_type: "task",
+      item_id: task.id,
+      project_id: assignment.project_id,
+      lane_id: assignment.lane_id,
+      updated_by: assignment.updated_by,
+    });
+  }
+
+  events.emit({
+    project_id: assignment?.project_id ?? source.sourceProjectId ?? undefined,
+    event_type: "dashboard.note.promoted_to_task",
+    payload: {
+      noteId: note.id,
+      taskId: task.id,
+    },
+    source: "dashboard",
+  });
+  return task;
+}
+
+export function promoteDashboardCaptureToTask(input: {
+  orchestrator: Orchestrator;
+  messageId: string;
+}) {
+  const message = assistantMessages.getById(input.messageId);
+  if (!message) {
+    throw new Error(`Capture not found: ${input.messageId}`);
+  }
+  const assignment = assistantItemAssignments.get("capture", message.id);
+  if (assignment) {
+    assertValidAssignment(input.orchestrator, assignment.project_id, assignment.lane_id);
+  }
+
+  const task = assistantTasks.create({
+    message_id: message.id,
+    source_contact: message.contact,
+    title: summarizeDashboardTaskTitle(message.body),
+    details: message.body,
+    primary_context: message.project_id || assignment?.project_id ? "work" : "personal",
+    status: "inbox",
+  });
+  if (assignment) {
+    assistantItemAssignments.upsert({
+      item_type: "task",
+      item_id: task.id,
+      project_id: assignment.project_id,
+      lane_id: assignment.lane_id,
+      updated_by: assignment.updated_by,
+    });
+  }
+
+  events.emit({
+    project_id: assignment?.project_id ?? message.project_id ?? undefined,
+    event_type: "dashboard.capture.promoted_to_task",
+    payload: {
+      messageId: message.id,
+      taskId: task.id,
+    },
+    source: "dashboard",
+  });
+  return task;
+}
+
+export function createDashboardTodayPlanItem(input: {
+  orchestrator: Orchestrator;
+  item: DashboardPlanItemInput;
+  timeZone?: string;
+  now?: Date;
+}) {
+  const date = input.item.date ?? formatDateKey(input.now ?? new Date(), input.timeZone ?? "America/New_York");
+  const section = requirePlanSection(input.item.section);
+  const defaults = resolvePlanItemDefaults(input.item.itemType ?? null, input.item.itemId ?? null);
+  const projectId = input.item.projectId ?? defaults.projectId;
+  const laneId = normalizeLaneId(input.item.laneId ?? defaults.laneId);
+  if (projectId) {
+    assertValidAssignment(input.orchestrator, projectId, laneId);
+  }
+
+  const row = dashboardPlanItems.create({
+    date_key: date,
+    section,
+    item_type: input.item.itemType ?? defaults.itemType,
+    item_id: input.item.itemId ?? defaults.itemId,
+    title: requireNonBlank(input.item.title ?? defaults.title, "title"),
+    details: input.item.details ?? defaults.details,
+    project_id: projectId,
+    lane_id: laneId,
+    position: input.item.position ?? nextPlanPosition(date, section),
+    status: input.item.status ?? "active",
+  });
+  events.emit({
+    project_id: row.project_id ?? undefined,
+    event_type: "dashboard.plan.updated",
+    payload: {
+      action: "created",
+      itemId: row.id,
+      date: row.date_key,
+      section: row.section,
+    },
+    source: "dashboard",
+  });
+  return toPlanBoardItem(row, section);
+}
+
+export function updateDashboardTodayPlanItem(input: {
+  orchestrator: Orchestrator;
+  itemId: string;
+  patch: DashboardPlanItemPatch;
+}) {
+  const existing = dashboardPlanItems.getById(input.itemId);
+  if (!existing) {
+    throw new Error(`Plan item not found: ${input.itemId}`);
+  }
+  const section = input.patch.section ? requirePlanSection(input.patch.section) : undefined;
+  const itemType = input.patch.itemType === undefined
+    ? undefined
+    : normalizeDashboardItemType(input.patch.itemType);
+  if (input.patch.itemType !== undefined && input.patch.itemType !== null && !itemType) {
+    throw new Error(`Invalid dashboard item type: ${input.patch.itemType}`);
+  }
+  const nextProjectId = input.patch.projectId !== undefined ? input.patch.projectId : existing.project_id;
+  const nextLaneId = input.patch.laneId !== undefined ? normalizeLaneId(input.patch.laneId) : existing.lane_id;
+  if (nextProjectId) {
+    assertValidAssignment(input.orchestrator, nextProjectId, nextLaneId);
+  }
+
+  const updated = dashboardPlanItems.update(input.itemId, {
+    date_key: input.patch.date,
+    section,
+    item_type: input.patch.itemType === null ? null : itemType,
+    item_id: input.patch.itemId,
+    title: input.patch.title === undefined ? undefined : requireNonBlank(input.patch.title, "title"),
+    details: input.patch.details,
+    project_id: input.patch.projectId,
+    lane_id: input.patch.laneId === undefined ? undefined : normalizeLaneId(input.patch.laneId),
+    position: input.patch.position,
+    status: input.patch.status,
+  });
+  events.emit({
+    project_id: updated?.project_id ?? undefined,
+    event_type: "dashboard.plan.updated",
+    payload: {
+      action: "updated",
+      itemId: input.itemId,
+      fields: Object.keys(input.patch),
+    },
+    source: "dashboard",
+  });
+  return updated ? toPlanBoardItem(updated, requirePlanSection(updated.section)) : null;
+}
+
+export function deleteDashboardTodayPlanItem(itemId: string) {
+  const existing = dashboardPlanItems.getById(itemId);
+  if (!existing) {
+    throw new Error(`Plan item not found: ${itemId}`);
+  }
+  dashboardPlanItems.delete(itemId);
+  events.emit({
+    project_id: existing.project_id ?? undefined,
+    event_type: "dashboard.plan.updated",
+    payload: {
+      action: "deleted",
+      itemId,
+      date: existing.date_key,
+      section: existing.section,
+    },
+    source: "dashboard",
+  });
+  return { ok: true };
 }
 
 function buildTaskSummary(agenda: AssistantAgendaSnapshot | null): CommandCenterTaskSummary {
@@ -273,6 +627,206 @@ function buildProjectSummaries(
   });
 }
 
+function buildProjectTabs(
+  projectSummaries: CommandCenterProjectSummary[],
+  intelligenceSummaries: CommandCenterProjectIntelligenceSummary[],
+): CommandCenterProjectTab[] {
+  const intelligenceByProject = new Map(intelligenceSummaries.map((summary) => [summary.projectId, summary]));
+  return projectSummaries.map((project) => {
+    const intelligence = intelligenceByProject.get(project.id);
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      status: intelligence?.status ?? (project.activeWorkstreamCount > 0 ? "active" : "idle"),
+      headline: intelligence?.headline ?? project.healthReason ?? "No recent project activity.",
+      activeWorkstreamCount: project.activeWorkstreamCount,
+      actionItemCount: intelligence?.actionItems.length ?? 0,
+      laneCount: intelligence?.laneCount ?? 0,
+      latestActivityAt: intelligence?.latestNoteAt ?? project.latestActivityAt,
+    };
+  });
+}
+
+function buildOrganizationOptions(
+  orchestrator: Orchestrator,
+  activeWorkstreams: WorkstreamStatusSnapshot[],
+): CommandCenterOrganizationOption[] {
+  const projects = orchestrator.getHealthStatus().projects;
+  const namesByProject = new Map(projects.map((project) => [project.id, project.name]));
+  const lanesByProject = new Map<string, Map<string, CommandCenterOrganizationOption["lanes"][number]>>();
+
+  const ensureProject = (projectId: string) => {
+    if (!lanesByProject.has(projectId)) {
+      lanesByProject.set(projectId, new Map());
+    }
+    return lanesByProject.get(projectId)!;
+  };
+  const addLane = (option: CommandCenterOrganizationOption["lanes"][number]) => {
+    const laneId = option.laneId || "general";
+    const lanes = ensureProject(option.projectId);
+    const existing = lanes.get(laneId);
+    if (existing) {
+      lanes.set(laneId, {
+        ...existing,
+        ...option,
+        label: existing.label || option.label,
+        source: existing.source === "general" ? option.source : existing.source,
+        channelId: existing.channelId ?? option.channelId,
+        threadId: existing.threadId ?? option.threadId,
+        epicId: existing.epicId ?? option.epicId,
+        baseBranch: existing.baseBranch ?? option.baseBranch,
+        assistantEnabled: existing.assistantEnabled ?? option.assistantEnabled,
+      });
+      return;
+    }
+    lanes.set(laneId, { ...option, laneId });
+  };
+
+  for (const project of projects) {
+    addLane({
+      projectId: project.id,
+      laneId: "general",
+      label: "General",
+      source: "general",
+      channelId: null,
+      threadId: null,
+      epicId: null,
+      baseBranch: null,
+      assistantEnabled: null,
+    });
+  }
+
+  const audit = orchestrator.getAuditReport("discord") as {
+    projects?: Array<{
+      id: string;
+      name: string;
+      defaultLanes?: Array<{ id: string; baseBranch?: string; assistantEnabled?: boolean }>;
+      epicBranches?: Array<{ id: string; branch?: string }>;
+      threadBindings?: Array<{
+        threadId: string;
+        parentChannelId?: string;
+        epicId?: string | null;
+        lane?: string | null;
+        baseBranch?: string | null;
+        assistantEnabled?: boolean;
+      }>;
+    }>;
+    discord?: {
+      routes?: Array<{
+        projectId: string;
+        channelId: string;
+        epicId?: string | null;
+        lane?: string | null;
+        baseBranch?: string | null;
+        assistantEnabled?: boolean;
+      }>;
+    } | null;
+  };
+
+  for (const project of audit.projects ?? []) {
+    namesByProject.set(project.id, project.name);
+    for (const lane of project.defaultLanes ?? []) {
+      addLane({
+        projectId: project.id,
+        laneId: lane.id,
+        label: titleFromId(lane.id),
+        source: "lane",
+        channelId: null,
+        threadId: null,
+        epicId: null,
+        baseBranch: lane.baseBranch ?? null,
+        assistantEnabled: lane.assistantEnabled ?? null,
+      });
+    }
+    for (const epic of project.epicBranches ?? []) {
+      addLane({
+        projectId: project.id,
+        laneId: epic.id,
+        label: titleFromId(epic.id),
+        source: "epic",
+        channelId: null,
+        threadId: null,
+        epicId: epic.id,
+        baseBranch: epic.branch ?? null,
+        assistantEnabled: null,
+      });
+    }
+    for (const binding of project.threadBindings ?? []) {
+      const laneId = binding.lane ?? binding.epicId ?? "general";
+      addLane({
+        projectId: project.id,
+        laneId,
+        label: laneId === "general" ? "General" : titleFromId(laneId),
+        source: "thread",
+        channelId: binding.parentChannelId ?? null,
+        threadId: binding.threadId,
+        epicId: binding.epicId ?? null,
+        baseBranch: binding.baseBranch ?? null,
+        assistantEnabled: binding.assistantEnabled ?? null,
+      });
+    }
+  }
+
+  for (const route of audit.discord?.routes ?? []) {
+    const laneId = route.lane ?? route.epicId ?? "general";
+    addLane({
+      projectId: route.projectId,
+      laneId,
+      label: laneId === "general" ? "General" : titleFromId(laneId),
+      source: "route",
+      channelId: route.channelId,
+      threadId: null,
+      epicId: route.epicId ?? null,
+      baseBranch: route.baseBranch ?? null,
+      assistantEnabled: route.assistantEnabled ?? null,
+    });
+  }
+
+  for (const workstream of activeWorkstreams) {
+    addLane({
+      projectId: workstream.projectId,
+      laneId: workstream.epicId ?? workstream.workstreamId,
+      label: workstream.epicId ? titleFromId(workstream.epicId) : workstream.workstreamName,
+      source: "workstream",
+      channelId: null,
+      threadId: null,
+      epicId: workstream.epicId,
+      baseBranch: null,
+      assistantEnabled: null,
+    });
+  }
+
+  for (const message of assistantMessages.listRecent(RECENT_ASSISTANT_ROW_LIMIT)) {
+    if (!message.project_id) {
+      continue;
+    }
+    const laneId = message.lane_id ?? "general";
+    addLane({
+      projectId: message.project_id,
+      laneId,
+      label: laneId === "general" ? "General" : titleFromId(laneId),
+      source: "thread",
+      channelId: null,
+      threadId: message.thread_id,
+      epicId: null,
+      baseBranch: null,
+      assistantEnabled: null,
+    });
+  }
+
+  return Array.from(lanesByProject.entries())
+    .map(([projectId, laneMap]) => ({
+      projectId,
+      projectName: namesByProject.get(projectId) ?? titleFromId(projectId),
+      lanes: Array.from(laneMap.values()).sort((a, b) => {
+        if (a.laneId === "general") return -1;
+        if (b.laneId === "general") return 1;
+        return a.label.localeCompare(b.label);
+      }),
+    }))
+    .sort((a, b) => a.projectName.localeCompare(b.projectName));
+}
+
 function buildProjectIntelligence(input: {
   orchestrator: Orchestrator;
   assistantAvailable: boolean;
@@ -283,6 +837,7 @@ function buildProjectIntelligence(input: {
 }): IntelligenceBuildResult {
   const projectDefinitions = input.orchestrator.getHealthStatus().projects;
   const projectNames = new Map(projectDefinitions.map((project) => [project.id, project.name]));
+  const assignments = buildAssignmentMap();
   const buckets = new Map<string, ProjectBucket>();
   const recentNotes: CommandCenterNoteSummary[] = [];
   const allTasks: CommandCenterProjectTask[] = [];
@@ -321,26 +876,26 @@ function buildProjectIntelligence(input: {
   if (input.assistantAvailable) {
     for (const note of assistantNotes.listRecent(RECENT_ASSISTANT_ROW_LIMIT)) {
       const source = resolveMessageSource(note.message_id);
-      const summary = toNoteSummary(note, source);
+      const summary = toNoteSummary(note, source, assignments.get(assignmentKey("note", note.id)));
       recentNotes.push(summary);
       if (summary.context === "planning") {
         planningNotes.push(summary);
       }
-      getBucket(source.sourceProjectId, note.project_name)?.notes.push(summary);
+      getBucket(summary.effectiveProjectId, note.project_name)?.notes.push(summary);
     }
 
     for (const task of assistantTasks.listRecent(RECENT_ASSISTANT_ROW_LIMIT)) {
       const source = resolveMessageSource(task.message_id);
-      const mapped = toProjectTask(task, source);
+      const mapped = toProjectTask(task, source, assignments.get(assignmentKey("task", task.id)));
       allTasks.push(mapped);
-      getBucket(source.sourceProjectId)?.tasks.push(mapped);
+      getBucket(mapped.effectiveProjectId)?.tasks.push(mapped);
     }
 
     for (const event of assistantCalendarEvents.listRecent(RECENT_ASSISTANT_ROW_LIMIT)) {
       const source = resolveMessageSource(event.message_id);
-      const mapped = toProjectCalendarEvent(event, source);
+      const mapped = toProjectCalendarEvent(event, source, assignments.get(assignmentKey("calendar", event.id)));
       allCalendarEvents.push(mapped);
-      getBucket(source.sourceProjectId)?.calendarEvents.push(mapped);
+      getBucket(mapped.effectiveProjectId)?.calendarEvents.push(mapped);
     }
 
     for (const message of assistantMessages.listRecent(RECENT_ASSISTANT_ROW_LIMIT)) {
@@ -348,7 +903,8 @@ function buildProjectIntelligence(input: {
         continue;
       }
       const source = sourceFromMessage(message);
-      getBucket(source.sourceProjectId)?.unresolvedCaptures.push(toUnresolvedCapture(message, source));
+      const mapped = toUnresolvedCapture(message, source, assignments.get(assignmentKey("capture", message.id)));
+      getBucket(mapped.effectiveProjectId)?.unresolvedCaptures.push(mapped);
     }
   }
 
@@ -396,6 +952,7 @@ function buildTodayPlan(input: {
 }): CommandCenterTodayPlan {
   const timeZone = input.agenda?.timeZone ?? "America/New_York";
   const todayKey = formatDateKey(input.now, timeZone);
+  const planBoard = buildPlanBoard(todayKey);
   const actionableTasks = input.tasks
     .filter((task) => !["done", "archived"].includes(task.status))
     .sort(compareTasksForPlan);
@@ -428,8 +985,8 @@ function buildTodayPlan(input: {
       timeZone: event.timeZone,
       location: event.location,
       syncStatus: event.syncStatus,
-      projectId: event.sourceProjectId,
-      laneId: event.laneId,
+      projectId: event.effectiveProjectId,
+      laneId: event.effectiveLaneId,
       evidenceLinks: event.evidenceLinks,
     } satisfies CommandCenterTodayCalendarEvent));
   const planningNotes = input.planningNotes.slice(0, 5);
@@ -443,6 +1000,7 @@ function buildTodayPlan(input: {
     personal,
     calendarEvents: todayCalendar,
     planningNotes,
+    planBoard,
   };
 }
 
@@ -452,12 +1010,63 @@ function taskToPlanItem(task: CommandCenterProjectTask): CommandCenterTodayPlanI
     title: task.title,
     details: task.details,
     source: "task",
-    projectId: task.sourceProjectId,
-    laneId: task.laneId,
+    projectId: task.effectiveProjectId,
+    laneId: task.effectiveLaneId,
     dueAt: task.dueAt,
     scheduledFor: task.scheduledFor,
     status: task.status,
     evidenceLinks: task.evidenceLinks,
+  };
+}
+
+function buildPlanBoard(dateKey: string): CommandCenterPlanBoard {
+  const sections: Record<CommandCenterPlanSection, CommandCenterPlanBoardItem[]> = {
+    focus: [],
+    next: [],
+    later: [],
+    waiting: [],
+  };
+
+  for (const row of dashboardPlanItems.listByDate(dateKey)) {
+    const section = normalizePlanSection(row.section);
+    if (!section || row.status === "archived" || row.status === "deleted") {
+      continue;
+    }
+    if (row.item_type === "task") {
+      const task = row.item_id ? assistantTasks.getById(row.item_id) : null;
+      if (task && ["done", "archived"].includes(task.status)) {
+        continue;
+      }
+    }
+    sections[section].push(toPlanBoardItem(row, section));
+  }
+
+  for (const section of PLAN_SECTIONS) {
+    sections[section].sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
+  }
+
+  return {
+    date: dateKey,
+    sections,
+  };
+}
+
+function toPlanBoardItem(row: DashboardPlanItemRow, section: CommandCenterPlanSection): CommandCenterPlanBoardItem {
+  return {
+    id: row.id,
+    date: row.date_key,
+    section,
+    title: row.title,
+    details: row.details,
+    itemType: normalizeDashboardItemType(row.item_type),
+    itemId: row.item_id,
+    projectId: row.project_id,
+    laneId: row.lane_id,
+    position: row.position,
+    status: row.status,
+    evidenceLinks: evidenceForDashboardItem(row.item_type, row.item_id),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -505,20 +1114,20 @@ function toProjectDetail(bucket: ProjectBucket, generatedAt: string): CommandCen
 
 function buildLaneSummaries(bucket: ProjectBucket): CommandCenterProjectLaneSummary[] {
   const laneIds = new Set<string>();
-  for (const note of bucket.notes) laneIds.add(note.laneId ?? "general");
-  for (const task of bucket.tasks) laneIds.add(task.laneId ?? "general");
-  for (const event of bucket.calendarEvents) laneIds.add(event.laneId ?? "general");
+  for (const note of bucket.notes) laneIds.add(note.effectiveLaneId ?? "general");
+  for (const task of bucket.tasks) laneIds.add(task.effectiveLaneId ?? "general");
+  for (const event of bucket.calendarEvents) laneIds.add(event.effectiveLaneId ?? "general");
   for (const workstream of bucket.workstreams) laneIds.add(workstream.epicId ?? workstream.workstreamId);
-  for (const capture of bucket.unresolvedCaptures) laneIds.add(capture.laneId ?? "general");
+  for (const capture of bucket.unresolvedCaptures) laneIds.add(capture.effectiveLaneId ?? "general");
 
   return Array.from(laneIds).map((laneId) => {
-    const notes = bucket.notes.filter((note) => (note.laneId ?? "general") === laneId);
-    const tasks = bucket.tasks.filter((task) => (task.laneId ?? "general") === laneId);
-    const calendar = bucket.calendarEvents.filter((event) => (event.laneId ?? "general") === laneId);
+    const notes = bucket.notes.filter((note) => (note.effectiveLaneId ?? "general") === laneId);
+    const tasks = bucket.tasks.filter((task) => (task.effectiveLaneId ?? "general") === laneId);
+    const calendar = bucket.calendarEvents.filter((event) => (event.effectiveLaneId ?? "general") === laneId);
     const streamRows = bucket.workstreams.filter((workstream) =>
       (workstream.epicId ?? workstream.workstreamId) === laneId
     );
-    const captures = bucket.unresolvedCaptures.filter((capture) => (capture.laneId ?? "general") === laneId);
+    const captures = bucket.unresolvedCaptures.filter((capture) => (capture.effectiveLaneId ?? "general") === laneId);
     const keyUpdates = notes.map((note) => note.title).slice(0, 4);
     const actionItems = tasks
       .filter((task) => !["done", "archived"].includes(task.status))
@@ -534,6 +1143,7 @@ function buildLaneSummaries(bucket: ProjectBucket): CommandCenterProjectLaneSumm
 
     return {
       laneId,
+      label: laneId === "general" ? "General" : titleFromId(laneId),
       headline: actionItems[0] ?? keyUpdates[0] ?? "No recent lane action.",
       keyUpdates,
       actionItems,
@@ -554,7 +1164,11 @@ function buildLaneSummaries(bucket: ProjectBucket): CommandCenterProjectLaneSumm
   }).sort((a, b) => compareNullableDateDesc(a.latestActivityAt, b.latestActivityAt));
 }
 
-function toNoteSummary(note: AssistantNoteRow, source: SourceContext): CommandCenterNoteSummary {
+function toNoteSummary(
+  note: AssistantNoteRow,
+  source: SourceContext,
+  assignment?: AssistantItemAssignmentRow,
+): CommandCenterNoteSummary {
   return {
     id: note.id,
     title: note.title,
@@ -564,6 +1178,9 @@ function toNoteSummary(note: AssistantNoteRow, source: SourceContext): CommandCe
     projectName: note.project_name,
     sourceProjectId: source.sourceProjectId,
     laneId: source.laneId,
+    sourceLaneId: source.laneId,
+    effectiveProjectId: assignment?.project_id ?? source.sourceProjectId,
+    effectiveLaneId: assignment?.lane_id ?? source.laneId,
     threadId: source.threadId,
     storagePath: note.storage_path,
     evidenceLinks: sourceEvidenceLinks(source, {
@@ -574,7 +1191,11 @@ function toNoteSummary(note: AssistantNoteRow, source: SourceContext): CommandCe
   };
 }
 
-function toProjectTask(task: AssistantTaskRow, source: SourceContext): CommandCenterProjectTask {
+function toProjectTask(
+  task: AssistantTaskRow,
+  source: SourceContext,
+  assignment?: AssistantItemAssignmentRow,
+): CommandCenterProjectTask {
   return {
     id: task.id,
     title: task.title,
@@ -585,6 +1206,9 @@ function toProjectTask(task: AssistantTaskRow, source: SourceContext): CommandCe
     scheduledFor: task.scheduled_for,
     sourceProjectId: source.sourceProjectId,
     laneId: source.laneId,
+    sourceLaneId: source.laneId,
+    effectiveProjectId: assignment?.project_id ?? source.sourceProjectId,
+    effectiveLaneId: assignment?.lane_id ?? source.laneId,
     threadId: source.threadId,
     evidenceLinks: sourceEvidenceLinks(source, {
       createdAt: task.created_at,
@@ -597,6 +1221,7 @@ function toProjectTask(task: AssistantTaskRow, source: SourceContext): CommandCe
 function toProjectCalendarEvent(
   event: AssistantCalendarEventRow,
   source: SourceContext,
+  assignment?: AssistantItemAssignmentRow,
 ): CommandCenterProjectCalendarEvent {
   return {
     id: event.id,
@@ -609,6 +1234,9 @@ function toProjectCalendarEvent(
     syncStatus: event.sync_status,
     sourceProjectId: source.sourceProjectId,
     laneId: source.laneId,
+    sourceLaneId: source.laneId,
+    effectiveProjectId: assignment?.project_id ?? source.sourceProjectId,
+    effectiveLaneId: assignment?.lane_id ?? source.laneId,
     threadId: source.threadId,
     evidenceLinks: sourceEvidenceLinks(source, {
       createdAt: event.created_at,
@@ -620,6 +1248,7 @@ function toProjectCalendarEvent(
 function toUnresolvedCapture(
   message: AssistantMessageRow,
   source: SourceContext,
+  assignment?: AssistantItemAssignmentRow,
 ): CommandCenterUnresolvedCapture {
   return {
     id: message.id,
@@ -627,6 +1256,9 @@ function toUnresolvedCapture(
     excerpt: truncate(message.body, 220),
     sourceProjectId: source.sourceProjectId,
     laneId: source.laneId,
+    sourceLaneId: source.laneId,
+    effectiveProjectId: assignment?.project_id ?? source.sourceProjectId,
+    effectiveLaneId: assignment?.lane_id ?? source.laneId,
     threadId: source.threadId,
     status: message.status,
     intent: message.intent,
@@ -841,6 +1473,55 @@ function sourceEvidenceLinks(
   return links;
 }
 
+function evidenceForDashboardItem(
+  itemType: string | null,
+  itemId: string | null,
+): CommandCenterEvidenceLink[] {
+  const normalized = normalizeDashboardItemType(itemType);
+  if (!normalized || !itemId) {
+    return [];
+  }
+
+  if (normalized === "task") {
+    const task = assistantTasks.getById(itemId);
+    return task ? sourceEvidenceLinks(resolveMessageSource(task.message_id), { createdAt: task.created_at }) : [];
+  }
+  if (normalized === "note") {
+    const note = assistantNotes.getById(itemId);
+    return note
+      ? sourceEvidenceLinks(resolveMessageSource(note.message_id), {
+          noteStoragePath: note.storage_path,
+          createdAt: note.created_at,
+        })
+      : [];
+  }
+  if (normalized === "capture") {
+    const message = assistantMessages.getById(itemId);
+    return message ? sourceEvidenceLinks(sourceFromMessage(message), { createdAt: message.created_at }) : [];
+  }
+  if (normalized === "calendar") {
+    const event = assistantCalendarEvents.getById(itemId);
+    return event ? sourceEvidenceLinks(resolveMessageSource(event.message_id), { createdAt: event.created_at }) : [];
+  }
+  if (normalized === "workstream") {
+    const row = workstreams.getById(itemId);
+    return row
+      ? [
+          {
+            kind: "workstream",
+            label: row.name,
+            target: `/api/workstreams/${row.id}/status`,
+            sourceProjectId: row.project_id,
+            laneId: row.epic_id,
+            createdAt: row.created_at,
+          },
+        ]
+      : [];
+  }
+
+  return [];
+}
+
 function workstreamEvidenceLinks(workstream: WorkstreamStatusSnapshot): CommandCenterEvidenceLink[] {
   const links: CommandCenterEvidenceLink[] = [
     {
@@ -1022,6 +1703,186 @@ function parseJsonRecord(raw: string | null): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function buildAssignmentMap(): AssignmentMap {
+  return new Map(assistantItemAssignments.list().map((assignment) => [
+    assignmentKey(assignment.item_type, assignment.item_id),
+    assignment,
+  ]));
+}
+
+function assignmentKey(itemType: string, itemId: string): string {
+  return `${itemType}:${itemId}`;
+}
+
+function normalizeDashboardItemType(value: string | null | undefined): CommandCenterDashboardItemType | null {
+  return DASHBOARD_ITEM_TYPES.includes(value as CommandCenterDashboardItemType)
+    ? value as CommandCenterDashboardItemType
+    : null;
+}
+
+function normalizePlanSection(value: string | null | undefined): CommandCenterPlanSection | null {
+  return PLAN_SECTIONS.includes(value as CommandCenterPlanSection)
+    ? value as CommandCenterPlanSection
+    : null;
+}
+
+function requirePlanSection(value: string | null | undefined): CommandCenterPlanSection {
+  const section = normalizePlanSection(value);
+  if (!section) {
+    throw new Error(`Invalid plan section: ${value ?? ""}`);
+  }
+  return section;
+}
+
+function normalizeLaneId(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed && trimmed !== "general" ? trimmed : null;
+}
+
+function assertDashboardItemExists(itemType: CommandCenterDashboardItemType, itemId: string): void {
+  const found =
+    itemType === "task" ? assistantTasks.getById(itemId) :
+    itemType === "note" ? assistantNotes.getById(itemId) :
+    itemType === "capture" ? assistantMessages.getById(itemId) :
+    itemType === "calendar" ? assistantCalendarEvents.getById(itemId) :
+    itemType === "workstream" ? workstreams.getById(itemId) :
+    null;
+  if (!found) {
+    throw new Error(`${titleFromId(itemType)} not found: ${itemId}`);
+  }
+}
+
+function assertValidAssignment(orchestrator: Orchestrator, projectId: string, laneId: string | null): void {
+  const activeWorkstreams = orchestrator
+    .listActiveWorkstreams()
+    .map((workstream) => orchestrator.getWorkstreamStatusSnapshot(workstream.id))
+    .filter((snapshot): snapshot is WorkstreamStatusSnapshot => snapshot !== null);
+  const options = buildOrganizationOptions(orchestrator, activeWorkstreams);
+  const project = options.find((option) => option.projectId === projectId);
+  if (!project) {
+    throw new Error(`Unknown dashboard project: ${projectId}`);
+  }
+  if (!laneId) {
+    return;
+  }
+  if (!project.lanes.some((lane) => lane.laneId === laneId)) {
+    throw new Error(`Project "${projectId}" does not define lane "${laneId}".`);
+  }
+}
+
+function resolvePlanItemDefaults(
+  rawItemType: string | null,
+  itemId: string | null,
+): {
+  itemType: CommandCenterDashboardItemType | null;
+  itemId: string | null;
+  title: string;
+  details: string | null;
+  projectId: string | null;
+  laneId: string | null;
+} {
+  const itemType = normalizeDashboardItemType(rawItemType);
+  if (!itemType || !itemId) {
+    return {
+      itemType: itemType ?? null,
+      itemId: itemId ?? null,
+      title: "",
+      details: null,
+      projectId: null,
+      laneId: null,
+    };
+  }
+  assertDashboardItemExists(itemType, itemId);
+  const assignment = assistantItemAssignments.get(itemType, itemId);
+  if (itemType === "task") {
+    const task = assistantTasks.getById(itemId)!;
+    const source = resolveMessageSource(task.message_id);
+    return {
+      itemType,
+      itemId,
+      title: task.title,
+      details: task.details,
+      projectId: assignment?.project_id ?? source.sourceProjectId,
+      laneId: assignment?.lane_id ?? source.laneId,
+    };
+  }
+  if (itemType === "note") {
+    const note = assistantNotes.getById(itemId)!;
+    const source = resolveMessageSource(note.message_id);
+    return {
+      itemType,
+      itemId,
+      title: note.title,
+      details: truncate(note.content, 260),
+      projectId: assignment?.project_id ?? source.sourceProjectId,
+      laneId: assignment?.lane_id ?? source.laneId,
+    };
+  }
+  if (itemType === "capture") {
+    const message = assistantMessages.getById(itemId)!;
+    return {
+      itemType,
+      itemId,
+      title: summarizeDashboardTaskTitle(message.body),
+      details: message.body,
+      projectId: assignment?.project_id ?? message.project_id,
+      laneId: assignment?.lane_id ?? message.lane_id,
+    };
+  }
+  if (itemType === "calendar") {
+    const event = assistantCalendarEvents.getById(itemId)!;
+    const source = resolveMessageSource(event.message_id);
+    return {
+      itemType,
+      itemId,
+      title: event.title,
+      details: event.details,
+      projectId: assignment?.project_id ?? source.sourceProjectId,
+      laneId: assignment?.lane_id ?? source.laneId,
+    };
+  }
+  if (itemType === "workstream") {
+    const row = workstreams.getById(itemId)!;
+    return {
+      itemType,
+      itemId,
+      title: row.name,
+      details: row.current_goal ?? row.description,
+      projectId: assignment?.project_id ?? row.project_id,
+      laneId: assignment?.lane_id ?? row.epic_id,
+    };
+  }
+  return {
+    itemType,
+    itemId,
+    title: "",
+    details: null,
+    projectId: null,
+    laneId: null,
+  };
+}
+
+function nextPlanPosition(dateKey: string, section: CommandCenterPlanSection): number {
+  const positions = dashboardPlanItems
+    .listByDate(dateKey)
+    .filter((item) => item.section === section)
+    .map((item) => item.position);
+  return positions.length > 0 ? Math.max(...positions) + 1 : 0;
+}
+
+function requireNonBlank(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`${label} is required.`);
+  }
+  return normalized;
+}
+
+function summarizeDashboardTaskTitle(value: string): string {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  return truncate(normalized || "Dashboard task", 72);
 }
 
 function normalizeAssistantContext(value: string | null | undefined): AssistantPrimaryContext {

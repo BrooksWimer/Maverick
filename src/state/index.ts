@@ -19,6 +19,8 @@ export {
   assistantCalendarEvents,
   assistantReminders,
   assistantSettings,
+  assistantItemAssignments,
+  dashboardPlanItems,
   workstreamRuntimeBindings,
   activeWorkstreamOperations,
   invokeLocalStateOperation,
@@ -37,6 +39,8 @@ export type {
   AssistantCalendarEventRow,
   AssistantReminderRow,
   AssistantSettingRow,
+  AssistantItemAssignmentRow,
+  DashboardPlanItemRow,
   WorkstreamRuntimeBindingRow,
   ActiveWorkstreamOperationRow,
 } from "./repositories.js";

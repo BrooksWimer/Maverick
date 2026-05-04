@@ -16,6 +16,7 @@ import {
   assistantNotes,
   assistantTasks,
   closeDatabase,
+  events,
   getDatabase,
   initDatabase,
 } from "../../src/state/index.js";
@@ -324,6 +325,174 @@ describe("HTTP command-center dashboard route", () => {
     expect(detail.unresolvedCaptures[0].body).toContain("Android Wi-Fi");
   });
 
+  it("supports dashboard-safe task, assignment, promotion, and daily plan mutations", async () => {
+    orchestrator = new Orchestrator(config);
+    await orchestrator.initialize();
+    const assistant = createAssistantService(config);
+
+    const laneSeed = assistantMessages.create({
+      id: "message-netwise-lane",
+      source: "discord",
+      direction: "inbound",
+      project_id: "netwise",
+      lane_id: "mobile-wifi-scanner",
+      thread_id: "thread-mobile",
+      body: "Mobile Wi-Fi scanner lane seed.",
+      normalized_body: "mobile wi-fi scanner lane seed.",
+      status: "processed",
+    });
+    const task = assistantTasks.create({
+      id: "task-dashboard-edit",
+      message_id: laneSeed.id,
+      title: "Old task title",
+      details: "Old details.",
+      primary_context: "work",
+      status: "open",
+    });
+    const note = assistantNotes.create({
+      id: "note-dashboard-task",
+      message_id: laneSeed.id,
+      title: "Turn this note into a task",
+      content: "This note should become a linked task.",
+      note_context: "work",
+      note_kind: "project",
+    });
+    assistantMessages.create({
+      id: "capture-dashboard-task",
+      source: "discord",
+      direction: "inbound",
+      project_id: "netwise",
+      lane_id: "mobile-wifi-scanner",
+      thread_id: "thread-mobile",
+      body: "Capture this as a follow-up.",
+      normalized_body: "capture this as a follow-up.",
+      status: "received",
+    });
+
+    app = await createHttpServer(orchestrator, {
+      host: "127.0.0.1",
+      port: 0,
+      assistant,
+      assistantConfig: config.assistant,
+    });
+
+    const editResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/dashboard/tasks/${task.id}`,
+      payload: {
+        title: "Updated task title",
+        details: "Updated details.",
+        status: "scheduled",
+        scheduledFor: "2026-05-04T16:00:00-04:00",
+      },
+    });
+    expect(editResponse.statusCode).toBe(200);
+    expect(assistantTasks.getById(task.id)?.title).toBe("Updated task title");
+    expect(assistantTasks.getById(task.id)?.status).toBe("scheduled");
+
+    const assignmentResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/dashboard/items/task/${task.id}/assignment`,
+      payload: {
+        projectId: "netwise",
+        laneId: "mobile-wifi-scanner",
+      },
+    });
+    expect(assignmentResponse.statusCode).toBe(200);
+
+    const invalidAssignment = await app.inject({
+      method: "PATCH",
+      url: `/api/dashboard/items/task/${task.id}/assignment`,
+      payload: {
+        projectId: "netwise",
+        laneId: "missing-lane",
+      },
+    });
+    expect(invalidAssignment.statusCode).toBe(400);
+
+    const noteTaskResponse = await app.inject({
+      method: "POST",
+      url: `/api/dashboard/notes/${note.id}/task`,
+    });
+    expect(noteTaskResponse.statusCode).toBe(200);
+    expect(noteTaskResponse.json().note_id).toBe(note.id);
+
+    const captureTaskResponse = await app.inject({
+      method: "POST",
+      url: "/api/dashboard/captures/capture-dashboard-task/task",
+    });
+    expect(captureTaskResponse.statusCode).toBe(200);
+    expect(captureTaskResponse.json().message_id).toBe("capture-dashboard-task");
+
+    const planCreate = await app.inject({
+      method: "POST",
+      url: "/api/dashboard/plans/today/items",
+      payload: {
+        date: "2026-05-04",
+        section: "focus",
+        itemType: "task",
+        itemId: task.id,
+      },
+    });
+    expect(planCreate.statusCode).toBe(200);
+    const planItem = planCreate.json();
+    expect(planItem.title).toBe("Updated task title");
+
+    const planMove = await app.inject({
+      method: "PATCH",
+      url: `/api/dashboard/plans/today/items/${planItem.id}`,
+      payload: {
+        section: "next",
+        title: "Moved plan item",
+      },
+    });
+    expect(planMove.statusCode).toBe(200);
+    expect(planMove.json().section).toBe("next");
+
+    const snapshotResponse = await app.inject({
+      method: "GET",
+      url: "/api/dashboard/command-center",
+    });
+    expect(snapshotResponse.statusCode).toBe(200);
+    const snapshot = snapshotResponse.json() as Record<string, any>;
+    expect(snapshot.projectTabs.some((tab: { projectId: string }) => tab.projectId === "netwise")).toBe(true);
+    expect(snapshot.organizationOptions.some((option: { projectId: string }) => option.projectId === "netwise")).toBe(true);
+    expect(snapshot.todayPlan.planBoard.sections.next[0].title).toBe("Moved plan item");
+
+    const detailResponse = await app.inject({
+      method: "GET",
+      url: "/api/dashboard/projects/netwise",
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    const detail = detailResponse.json() as Record<string, any>;
+    const movedTask = detail.tasks.find((item: { id: string }) => item.id === task.id);
+    expect(movedTask.effectiveProjectId).toBe("netwise");
+    expect(movedTask.effectiveLaneId).toBe("mobile-wifi-scanner");
+    expect(movedTask.sourceProjectId).toBe("netwise");
+
+    const completeResponse = await app.inject({
+      method: "POST",
+      url: `/api/dashboard/tasks/${task.id}/complete`,
+    });
+    expect(completeResponse.statusCode).toBe(200);
+    expect(assistantTasks.getById(task.id)?.status).toBe("done");
+
+    const completedSnapshot = buildCommandCenterSnapshot({
+      orchestrator,
+      assistant,
+      now: new Date("2026-05-04T12:00:00-04:00"),
+    }) as Record<string, any>;
+    expect(completedSnapshot.todayPlan.planBoard.sections.next).toHaveLength(0);
+    expect(events.listByType("dashboard.task.completed", 5)).toHaveLength(1);
+    expect(events.listByType("dashboard.plan.updated", 5).length).toBeGreaterThan(0);
+
+    const deleteResponse = await app.inject({
+      method: "DELETE",
+      url: `/api/dashboard/plans/today/items/${planItem.id}`,
+    });
+    expect(deleteResponse.statusCode).toBe(200);
+  });
+
   it("protects dashboard routes when a dashboard token is configured", async () => {
     process.env.MAVERICK_DASHBOARD_TOKEN = "dashboard-secret";
     orchestrator = new Orchestrator(config);
@@ -344,6 +513,12 @@ describe("HTTP command-center dashboard route", () => {
       url: "/api/dashboard/projects/netwise",
     });
     expect(unauthorizedProject.statusCode).toBe(401);
+
+    const unauthorizedMutation = await app.inject({
+      method: "POST",
+      url: "/api/dashboard/tasks/missing/complete",
+    });
+    expect(unauthorizedMutation.statusCode).toBe(401);
 
     const authorized = await app.inject({
       method: "GET",
