@@ -10,6 +10,10 @@ import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantConfig } from "../config/index.js";
 import type { AssistantService } from "../assistant/index.js";
 import { validateTwilioSignature } from "../assistant/providers/sms.js";
+import {
+  buildCommandCenterProjectDetail,
+  buildCommandCenterSnapshot,
+} from "../dashboard/index.js";
 import { getStateBackendMode, invokeLocalStateOperation } from "../state/index.js";
 
 const log = createLogger("http");
@@ -41,6 +45,53 @@ export async function createHttpServer(
   // --- Health ---
 
   app.get("/health", async () => orchestrator.getHealthStatus());
+
+  // --- Dashboard ---
+
+  app.options("/api/dashboard/command-center", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    reply.code(204);
+    return null;
+  });
+
+  app.get("/api/dashboard/command-center", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+
+    return buildCommandCenterSnapshot({
+      orchestrator,
+      assistant: options.assistant ?? null,
+    });
+  });
+
+  app.options("/api/dashboard/projects/:projectId", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    reply.code(204);
+    return null;
+  });
+
+  app.get("/api/dashboard/projects/:projectId", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+
+    const { projectId } = req.params as { projectId: string };
+    const detail = buildCommandCenterProjectDetail({
+      orchestrator,
+      assistant: options.assistant ?? null,
+      projectId,
+    });
+    if (!detail) {
+      reply.code(404);
+      return { error: "Project not found" };
+    }
+    return detail;
+  });
 
   // --- Internal state RPC ---
 
@@ -428,6 +479,54 @@ function escapeXml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function applyDashboardCors(
+  req: { headers: { origin?: string | string[] } },
+  reply: {
+    header: (name: string, value: string) => unknown;
+  }
+): void {
+  const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+  const allowedOrigin = resolveDashboardAllowedOrigin(origin);
+  if (allowedOrigin) {
+    reply.header("Access-Control-Allow-Origin", allowedOrigin);
+    reply.header("Vary", "Origin");
+  }
+  reply.header("Access-Control-Allow-Methods", "GET, OPTIONS");
+  reply.header("Access-Control-Allow-Headers", "authorization, content-type");
+  reply.header("Access-Control-Max-Age", "86400");
+}
+
+function resolveDashboardAllowedOrigin(requestOrigin: string | undefined): string | null {
+  const configured = process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN?.trim();
+  if (!configured || configured === "*") {
+    return "*";
+  }
+
+  const allowed = configured
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (allowed.length === 0) {
+    return null;
+  }
+  if (requestOrigin && allowed.includes(requestOrigin)) {
+    return requestOrigin;
+  }
+  return allowed[0] ?? null;
+}
+
+function isDashboardAuthorized(req: { headers: { authorization?: string | string[] } }): boolean {
+  const token = process.env.MAVERICK_DASHBOARD_TOKEN?.trim();
+  if (!token) {
+    return true;
+  }
+
+  const authorization = Array.isArray(req.headers.authorization)
+    ? req.headers.authorization[0]
+    : req.headers.authorization;
+  return authorization === `Bearer ${token}`;
 }
 
 function resolveWebhookUrl(path: string, host: string | undefined, protocol: string): string {
