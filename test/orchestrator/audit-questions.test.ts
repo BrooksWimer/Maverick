@@ -91,7 +91,7 @@ describe("Review agent audit questions", () => {
           rationale: "Enables safe rollout with quick rollback on failure"
         }
       ];
-      expect(decisions[0].decision).toContain("blue-green");
+      expect(decisions[0].decision.toLowerCase()).toContain("blue-green");
     });
 
     it("should include rationale explaining why decision is sound", () => {
@@ -115,7 +115,7 @@ describe("Review agent audit questions", () => {
       const tradeoffDecision = {
         id: "performance-over-consistency",
         decision: "Accept eventual consistency for improved performance",
-        rationale: "10ms latency improvement justifies short consistency window"
+        rationale: "This trade-off accepts a short consistency window for a 10ms latency improvement"
       };
       expect(tradeoffDecision.rationale).toContain("trade");
     });

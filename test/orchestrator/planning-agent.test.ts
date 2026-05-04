@@ -302,7 +302,7 @@ describe("Orchestrator planning agent flow", () => {
     expect(resumedPlan.finalExecutionPrompt).toContain("/workstream answer-plan");
 
     const storedAfterResume = orchestrator.getWorkstream(workstream.id);
-    expect(storedAfterResume?.state).toBe("planning");
+    expect(storedAfterResume?.state).toBe("implementation");
     expect(storedAfterResume?.pending_decision).toBeNull();
     expect(storedAfterResume?.plan).toContain("Final Codex execution prompt");
     expect(storedAfterResume?.planning_context_json).toContain("discord-user");
@@ -417,7 +417,7 @@ describe("Orchestrator planning agent flow", () => {
     const instruction = "Plan the next migration slice.";
 
     const firstPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
-    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
+    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("implementation");
 
     // Change PROJECT_MEMORY.md to invalidate the fingerprint and force a fresh plan
     // (otherwise the manual re-call reuses the stored plan).
@@ -427,7 +427,7 @@ describe("Orchestrator planning agent flow", () => {
       "utf8",
     );
     const secondPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
-    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
+    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("implementation");
     const resumedPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual", {
       resumeExisting: true,
     });
@@ -435,7 +435,7 @@ describe("Orchestrator planning agent flow", () => {
     expect(firstPlan.finalExecutionPrompt).toBe("Final prompt one.");
     expect(secondPlan.finalExecutionPrompt).toBe("Final prompt two.");
     expect(resumedPlan.finalExecutionPrompt).toBe("Final dispatch prompt.");
-    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
+    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("implementation");
     expect(utilityAdapter.turnRequests).toHaveLength(3);
     expect(utilityAdapter.turnRequests[0]?.threadId).not.toBe(utilityAdapter.turnRequests[1]?.threadId);
     expect(utilityAdapter.turnRequests[1]?.instruction).not.toContain("Resume the stored planning flow");

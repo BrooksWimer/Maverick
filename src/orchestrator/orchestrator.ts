@@ -1125,6 +1125,11 @@ export class Orchestrator {
    * @param hint - Optional hint about what transition to try (e.g., "plan-approved")
    */
   async tryAutoAdvance(workstreamId: string, hint?: string): Promise<boolean> {
+    if (this.activeOperationByWorkstream.has(workstreamId)) {
+      log.debug({ workstreamId }, "Auto-advance skipped while an operation is active");
+      return false;
+    }
+
     // Acquire per-workstream lock to prevent concurrent auto-advances
     const existingLock = this.autoAdvanceLocks.get(workstreamId);
     if (existingLock) {
@@ -1132,6 +1137,7 @@ export class Orchestrator {
       return false;
     }
 
+    let advanced = false;
     const lockPromise = (async () => {
       try {
         const ws = workstreams.getById(workstreamId);
@@ -1152,6 +1158,45 @@ export class Orchestrator {
           }
           // Try the first available auto-advance transition
           transitionToAttempt = availableTransitions[0].trigger;
+        }
+
+        const ws_fresh = workstreams.getById(workstreamId);
+        if (!ws_fresh) return;
+
+        const transition = sm.canTransition(ws_fresh.state, transitionToAttempt);
+        if (!transition.allowed) {
+          log.debug(
+            { workstreamId, state: ws_fresh.state, trigger: transitionToAttempt, reason: transition.reason },
+            "Cannot auto-advance: transition not allowed",
+          );
+          return;
+        }
+
+        if (!transition.autoAdvance) {
+          log.debug(
+            { workstreamId, state: ws_fresh.state, trigger: transitionToAttempt },
+            "Cannot auto-advance: transition is not marked autoAdvance",
+          );
+          return;
+        }
+
+        if (transitionToAttempt === "plan-approved") {
+          const planningContext = parsePlanningContextRecord(ws_fresh.planning_context_json);
+          if (
+            !planningContext ||
+            planningContext.pendingQuestions.length > 0 ||
+            !(planningContext.finalExecutionPrompt ?? "").trim()
+          ) {
+            log.debug(
+              {
+                workstreamId,
+                pendingQuestionCount: planningContext?.pendingQuestions.length ?? null,
+                finalPromptReady: Boolean((planningContext?.finalExecutionPrompt ?? "").trim()),
+              },
+              "Cannot auto-advance planning: questions remain or no final execution prompt is ready",
+            );
+            return;
+          }
         }
 
         // Check loop detection: abort if same transition fires 3+ times in 60 seconds
@@ -1184,21 +1229,9 @@ export class Orchestrator {
           }
         }
 
-        // Attempt the transition
-        const ws_fresh = workstreams.getById(workstreamId);
-        if (!ws_fresh) return;
-
-        const canTransition = sm.canTransition(ws_fresh.state, transitionToAttempt);
-        if (!canTransition.allowed) {
-          log.debug(
-            { workstreamId, state: ws_fresh.state, trigger: transitionToAttempt, reason: canTransition.reason },
-            "Cannot auto-advance: transition not allowed",
-          );
-          return;
-        }
-
         // Perform the transition
         const updated = this.tryTransitionState(ws_fresh, transitionToAttempt);
+        advanced = updated.state !== ws_fresh.state;
         log.info(
           { workstreamId, from: ws_fresh.state, to: updated.state, trigger: transitionToAttempt },
           "Auto-advanced workstream",
@@ -1226,7 +1259,7 @@ export class Orchestrator {
 
     this.autoAdvanceLocks.set(workstreamId, lockPromise);
     await lockPromise;
-    return true;
+    return advanced;
   }
 
   async bootstrapProjectRoadmap(projectId: string): Promise<{ filePath: string; snippet: string }> {
@@ -1625,6 +1658,8 @@ export class Orchestrator {
     }
 
     const epicContextAnalysis = contextBundle.epicContext;
+    let result: GeneratedPlanResult | null = null;
+    let shouldAutoAdvance = false;
     this.beginActiveOperation(workstreamId, "planning");
     try {
       let checkpoint = this.checkpointPlanningContext({
@@ -1682,14 +1717,8 @@ export class Orchestrator {
         this.buildPlanOperatorReport(workstream, planningContext, trigger),
       );
 
-      // Auto-advance if planning completed with no pending questions
-      if (planningContext.pendingQuestions.length === 0 && planningContext.finalExecutionPrompt) {
-        this.tryAutoAdvance(workstreamId, "plan-approved").catch((err) => {
-          log.error({ workstreamId, error: err.message }, "Error during auto-advance after planning");
-        });
-      }
-
-      return {
+      shouldAutoAdvance = planningContext.pendingQuestions.length === 0 && Boolean(planningContext.finalExecutionPrompt);
+      result = {
         renderedPlan,
         planningContext,
         finalExecutionPrompt: planningContext.finalExecutionPrompt,
@@ -1698,6 +1727,15 @@ export class Orchestrator {
     } finally {
       this.completeActiveOperation(workstreamId);
     }
+
+    if (shouldAutoAdvance) {
+      await this.tryAutoAdvance(workstreamId, "plan-approved");
+    }
+
+    if (!result) {
+      throw new Error(`Planning did not produce a result for workstream ${workstreamId}.`);
+    }
+    return result;
   }
 
   getPlanningContext(workstreamId: string): PlanningContextRecord | null {
@@ -1781,6 +1819,8 @@ export class Orchestrator {
       throw new Error(`Workstream ${workstreamId} has no stored planning context to resume.`);
     }
 
+    let result: GeneratedPlanResult | null = null;
+    let shouldAutoAdvance = false;
     this.beginActiveOperation(workstreamId, "planning");
     try {
       const { mergedAnswers, appliedIds, unknownIds } = mergePlanningAnswers(existingContext, answers, {
@@ -1881,14 +1921,8 @@ export class Orchestrator {
         this.buildPlanOperatorReport(workstream, planningContext, "resume"),
       );
 
-      // Auto-advance if planning completed with no pending questions
-      if (planningContext.pendingQuestions.length === 0 && planningContext.finalExecutionPrompt) {
-        this.tryAutoAdvance(workstreamId, "plan-approved").catch((err) => {
-          log.error({ workstreamId, error: err.message }, "Error during auto-advance after answering decisions");
-        });
-      }
-
-      return {
+      shouldAutoAdvance = planningContext.pendingQuestions.length === 0 && Boolean(planningContext.finalExecutionPrompt);
+      result = {
         renderedPlan,
         planningContext,
         finalExecutionPrompt: planningContext.finalExecutionPrompt,
@@ -1897,6 +1931,15 @@ export class Orchestrator {
     } finally {
       this.completeActiveOperation(workstreamId);
     }
+
+    if (shouldAutoAdvance) {
+      await this.tryAutoAdvance(workstreamId, "plan-approved");
+    }
+
+    if (!result) {
+      throw new Error(`Planning answers did not produce a result for workstream ${workstreamId}.`);
+    }
+    return result;
   }
 
   forceUnblockWorkstream(workstreamId: string, repairedBy = "system"): WorkstreamRepairResult {
@@ -3734,6 +3777,9 @@ export class Orchestrator {
       // State transitions are byproducts of orchestrator action, not new
       // operator-supplied context. Including them would make the fingerprint
       // change every time planning runs and defeat reuse.
+      return false;
+    }
+    if (eventType === "workstream.autoAdvanced") {
       return false;
     }
     return true;
