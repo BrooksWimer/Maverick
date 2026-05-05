@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en" class="command-center-page">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
+  <!-- Optional deploy override for the Maverick dashboard API origin (leave empty to auto-pick by hostname). -->
+  <meta name="maverick-dashboard-api-base" content="" />
+  <title>Maverick Command Center</title>
+  <meta name="theme-color" content="#101418" />
+  <link rel="icon" href="images/BrooksWimer_Logo.png" />
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
+  <link rel="stylesheet" href="assets/css/command-center.css" />
+</head>
+<body>
+  <div class="command-shell" data-view="loading">
+    <header class="topbar">
+      <div class="brand-block">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <div>
+          <p class="eyebrow">Maverick</p>
+          <h1>Command Center</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="sync-pill" id="sync-status">Connecting</span>
+        <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh dashboard" title="Refresh">
+          <i class="fas fa-sync-alt" aria-hidden="true"></i>
+        </button>
+        <button class="icon-button" id="lock-button" type="button" aria-label="Lock dashboard" title="Lock">
+          <i class="fas fa-lock" aria-hidden="true"></i>
+        </button>
+      </div>
+    </header>
+
+    <section class="gate" id="gate-panel" aria-labelledby="gate-title">
+      <form class="gate-form" id="gate-form">
+        <div>
+          <p class="eyebrow">Private Access</p>
+          <h2 id="gate-title">Connect to Maverick</h2>
+        </div>
+        <label>
+          <span>API base</span>
+          <input id="api-base" name="apiBase" type="url" value="http://127.0.0.1:3847" autocomplete="url" required />
+        </label>
+        <label>
+          <span>Access token (optional if the API only uses Cloudflare Access and has no MAVERICK_DASHBOARD_TOKEN)</span>
+          <input id="api-token" name="apiToken" type="password" autocomplete="current-password" />
+        </label>
+        <p class="form-error" id="gate-error" role="alert"></p>
+        <button class="primary-button" type="submit">
+          <i class="fas fa-arrow-right" aria-hidden="true"></i>
+          Connect
+        </button>
+      </form>
+    </section>
+
+    <main class="dashboard" id="dashboard" aria-live="polite">
+      <section class="status-band" aria-label="Command center status">
+        <div class="status-copy">
+          <p class="eyebrow" id="generated-at">Waiting for data</p>
+          <h2 id="next-action">Loading command center state</h2>
+        </div>
+        <div class="metric-row">
+          <div class="metric">
+            <span class="metric-value" id="metric-health">--</span>
+            <span class="metric-label">Health</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value" id="metric-workstreams">0</span>
+            <span class="metric-label">Active</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value" id="metric-approvals">0</span>
+            <span class="metric-label">Approvals</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value" id="metric-tasks">0</span>
+            <span class="metric-label">Tasks</span>
+          </div>
+        </div>
+      </section>
+
+      <nav class="view-tabs" aria-label="Command Center views">
+        <a href="#/today" data-route-link="today">Today</a>
+        <a href="#/projects" data-route-link="projects">All</a>
+        <span class="project-nav-tabs" id="project-nav-tabs"></span>
+      </nav>
+
+      <section class="route-view" id="view-today" data-route-view="today">
+        <div class="grid grid-main">
+          <article class="panel panel-tasks">
+            <div class="panel-head">
+              <h2>Day Plan</h2>
+              <span id="task-total">0 total</span>
+            </div>
+            <div class="task-metrics" id="task-metrics"></div>
+            <div class="panel-subhead">
+              <h3>Plan Board</h3>
+              <button class="mini-action" type="button" data-action="plan-new" title="Add plan item">
+                <i class="fas fa-plus" aria-hidden="true"></i>
+              </button>
+            </div>
+            <div class="plan-board" id="today-plan-board"></div>
+            <div class="split-list">
+              <div>
+                <h3>Focus</h3>
+                <div class="queue-list" id="today-focus"></div>
+              </div>
+              <div>
+                <h3>Calendar</h3>
+                <div class="queue-list" id="today-calendar"></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel panel-approvals">
+            <div class="panel-head">
+              <h2>Approvals</h2>
+              <span id="approval-count">0 waiting</span>
+            </div>
+            <div class="queue-list" id="approval-list"></div>
+          </article>
+        </div>
+
+        <div class="grid grid-secondary">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Tasks</h2>
+              <span id="today-task-count">0 queued</span>
+            </div>
+            <div class="queue-list" id="today-tasks"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Personal</h2>
+              <span id="today-personal-count">0 queued</span>
+            </div>
+            <div class="queue-list" id="today-personal"></div>
+          </article>
+        </div>
+
+        <div class="grid grid-secondary">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Planning Notes</h2>
+              <span id="planning-note-count">0 recent</span>
+            </div>
+            <div class="queue-list" id="planning-notes"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Workstreams</h2>
+              <span id="workstream-count">0 active</span>
+            </div>
+            <div class="queue-list" id="workstream-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="route-view" id="view-projects" data-route-view="projects">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Project Reports</h2>
+            <span id="project-count">0 active</span>
+          </div>
+          <div class="project-tabs" id="project-tabs"></div>
+          <div class="project-grid" id="project-grid"></div>
+        </section>
+
+        <section class="grid grid-secondary">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Reports</h2>
+              <span id="report-count">0 recent</span>
+            </div>
+            <div class="queue-list" id="report-list"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Recent Notes</h2>
+              <span id="note-count">0 recent</span>
+            </div>
+            <div class="queue-list" id="note-list"></div>
+          </article>
+        </section>
+      </section>
+
+      <section class="route-view" id="view-project-detail" data-route-view="project-detail">
+        <section class="panel project-detail-panel">
+          <div class="detail-head">
+            <a class="back-link" href="#/projects">
+              <i class="fas fa-arrow-left" aria-hidden="true"></i>
+              Projects
+            </a>
+            <div>
+              <p class="eyebrow" id="detail-project-id">Project</p>
+              <h2 id="detail-project-name">Loading</h2>
+              <p id="detail-project-headline"></p>
+            </div>
+          </div>
+          <div class="detail-meta" id="detail-meta"></div>
+        </section>
+
+        <section class="grid grid-secondary">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Lanes</h2>
+              <span id="detail-lane-count">0 lanes</span>
+            </div>
+            <div class="queue-list" id="detail-lanes"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Action Items</h2>
+              <span id="detail-task-count">0 tasks</span>
+            </div>
+            <div class="queue-list" id="detail-tasks"></div>
+          </article>
+        </section>
+
+        <section class="grid grid-secondary">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Notes</h2>
+              <span id="detail-note-count">0 notes</span>
+            </div>
+            <div class="queue-list" id="detail-notes"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Evidence</h2>
+              <span id="detail-evidence-count">0 links</span>
+            </div>
+            <div class="queue-list" id="detail-evidence"></div>
+          </article>
+        </section>
+
+        <section class="grid grid-secondary">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Calendar</h2>
+              <span id="detail-calendar-count">0 events</span>
+            </div>
+            <div class="queue-list" id="detail-calendar"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Unresolved</h2>
+              <span id="detail-unresolved-count">0 captures</span>
+            </div>
+            <div class="queue-list" id="detail-unresolved"></div>
+          </article>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-shell" id="action-modal" hidden>
+    <div class="modal-backdrop" data-action="modal-close"></div>
+    <form class="action-drawer" id="action-form">
+      <div class="panel-head">
+        <h2 id="modal-title">Edit</h2>
+        <button class="icon-button" type="button" data-action="modal-close" aria-label="Close" title="Close">
+          <i class="fas fa-times" aria-hidden="true"></i>
+        </button>
+      </div>
+      <input type="hidden" id="modal-mode" />
+      <input type="hidden" id="modal-item-type" />
+      <input type="hidden" id="modal-item-id" />
+      <label class="modal-field" data-field="title">
+        <span>Title</span>
+        <input id="modal-title-input" type="text" autocomplete="off" />
+      </label>
+      <label class="modal-field" data-field="details">
+        <span>Details</span>
+        <textarea id="modal-details-input" rows="5"></textarea>
+      </label>
+      <label class="modal-field" data-field="status">
+        <span>Status</span>
+        <select id="modal-status-input">
+          <option value="inbox">Inbox</option>
+          <option value="open">Open</option>
+          <option value="scheduled">Scheduled</option>
+          <option value="done">Done</option>
+          <option value="archived">Archived</option>
+        </select>
+      </label>
+      <label class="modal-field" data-field="scheduled">
+        <span>Schedule</span>
+        <input id="modal-scheduled-input" type="datetime-local" />
+      </label>
+      <label class="modal-field" data-field="section">
+        <span>Section</span>
+        <select id="modal-section-input">
+          <option value="focus">Focus</option>
+          <option value="next">Next</option>
+          <option value="later">Later</option>
+          <option value="waiting">Waiting</option>
+        </select>
+      </label>
+      <label class="modal-field" data-field="project">
+        <span>Project</span>
+        <select id="modal-project-input"></select>
+      </label>
+      <label class="modal-field" data-field="lane">
+        <span>Lane</span>
+        <select id="modal-lane-input"></select>
+      </label>
+      <p class="form-error" id="modal-error" role="alert"></p>
+      <div class="drawer-actions">
+        <button class="primary-button" type="submit">
+          <i class="fas fa-check" aria-hidden="true"></i>
+          Save
+        </button>
+        <button class="secondary-button" type="button" data-action="modal-close">Cancel</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="assets/js/command-center.js"></script>
+</body>
+</html>

@@ -23,6 +23,7 @@ import {
   updateDashboardTodayPlanItem,
 } from "../dashboard/index.js";
 import { getStateBackendMode, invokeLocalStateOperation } from "../state/index.js";
+import { registerCommandCenterStaticRoutes } from "./command-center-static.js";
 
 const log = createLogger("http");
 
@@ -53,6 +54,8 @@ export async function createHttpServer(
   // --- Health ---
 
   app.get("/health", async () => orchestrator.getHealthStatus());
+
+  registerCommandCenterStaticRoutes(app);
 
   // --- Dashboard ---
 
