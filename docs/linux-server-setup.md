@@ -134,7 +134,9 @@ CLOUDFLARE_ACCESS_CLIENT_ID=<service-token-client-id>
 CLOUDFLARE_ACCESS_CLIENT_SECRET=<service-token-client-secret>
 ```
 
-Linux canonical instance should keep `STATE_BACKEND=sqlite`, set `DATABASE_PATH`, and enable `MAVERICK_STATE_TOKEN` so Linux accepts `POST /internal/state/operation` from Windows. The portfolio command center should call the **dashboard** host for `/api/dashboard/*`, not the state host.
+Linux canonical instance should keep `STATE_BACKEND=sqlite`, set `DATABASE_PATH`, and enable `MAVERICK_STATE_TOKEN` so Linux accepts `POST /internal/state/operation` from Windows. The command center UI should call the **dashboard** host for `/api/dashboard/*`, not the state host.
+
+When the dashboard API is exposed on a public hostname (for example `https://maverick.example.com`), Maverick also serves the bundled command center at **`/command-center.html`** (and redirects **`/`** there) from the `public/` directory shipped with the app. Set `MAVERICK_DASHBOARD_ALLOWED_ORIGIN` to that same origin (scheme + host only) if the browser loads the UI from that hostname and uses credentialed fetches.
 
 ## State Migration
 
