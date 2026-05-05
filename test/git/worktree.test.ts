@@ -52,6 +52,54 @@ describe("deriveWorktreeNames", () => {
     ]);
   });
 
+  it("dedupes the lane segment when it equals the project id", () => {
+    const names = deriveWorktreeNames({
+      projectId: "maverick",
+      workstreamId: "abcdefab-1234-1234-1234-123456789abc",
+      name: "implement claude planning",
+      lane: "maverick",
+    });
+
+    expect(names.branch).toBe("maverick/maverick/implement-claude-planning-abcdefab");
+    expect(names.relativeSegments).toEqual([
+      "maverick",
+      "implement-claude-planning-abcdefab",
+    ]);
+    expect(names.laneSegment).toBeNull();
+  });
+
+  it("rejects worktree provisioning without a base ref", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "maverick-worktree-noref-"));
+    try {
+      const origin = join(tempDir, "origin.git");
+      const repo = join(tempDir, "repo");
+      const generatedRoot = join(tempDir, "generated");
+
+      mkdirSync(origin, { recursive: true });
+      git(origin, ["init", "--bare"]);
+      git(tempDir, ["clone", origin, repo]);
+      git(repo, ["config", "user.email", "maverick@example.test"]);
+      git(repo, ["config", "user.name", "Maverick Test"]);
+      commitFile(repo, "README.md", "# Test\n", "initial");
+      git(repo, ["branch", "-M", "master"]);
+      git(repo, ["push", "-u", "origin", "master"]);
+
+      await expect(
+        provisionWorktree({
+          repoPath: repo,
+          projectId: "no-ref",
+          workstreamId: "11111111-2222-3333-4444-555555555555",
+          name: "missing base",
+          lane: "missing",
+          baseRef: undefined,
+          generatedRoot,
+        })
+      ).rejects.toThrow(/without a base ref/i);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
   it("can provision from an origin lane branch when no local branch exists", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "maverick-worktree-"));
     try {

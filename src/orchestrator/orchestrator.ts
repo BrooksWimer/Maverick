@@ -3512,7 +3512,10 @@ export class Orchestrator {
   private planningAgentGuardrails(stage: "scope" | "model" | "plan") {
     return {
       maxBudgetUsd: stage === "plan" ? 0.75 : 0.25,
-      noSessionPersistence: true,
+      // Allow Claude session persistence so successive planning turns benefit from
+      // automatic prompt caching on the cached system + context prefix instead of
+      // re-tokenizing the full bundle every call.
+      noSessionPersistence: false,
       tools: ["Read", "Grep", "Glob"],
       disallowedTools: ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"],
       jsonSchema: stage === "plan" ? this.planningResultJsonSchema() : { type: "object" },
