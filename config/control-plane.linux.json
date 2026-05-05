@@ -53,13 +53,7 @@
             "deep": "sonnet"
           },
           "agents": {
-            "intake": "cheap",
-            "goalFraming": "cheap",
-            "modeling": "default",
-            "testDesign": "cheap",
             "planning": "deep",
-            "operatorFeedback": "cheap",
-            "responseFormatting": "cheap",
             "epicContext": "default"
           }
         }
@@ -118,13 +112,7 @@
             "deep": "sonnet"
           },
           "agents": {
-            "intake": "cheap",
-            "goalFraming": "cheap",
-            "modeling": "default",
-            "testDesign": "cheap",
             "planning": "deep",
-            "operatorFeedback": "cheap",
-            "responseFormatting": "cheap",
             "epicContext": "default"
           }
         }
@@ -163,11 +151,5 @@
         "ownerInstanceId": "linux"
       }
     ]
-  },
-  "brief": {
-    "storagePath": "/var/lib/maverick/briefs"
-  },
-  "dailyBrief": {
-    "artifactDirectory": "/var/lib/maverick/daily-briefs"
   }
 }

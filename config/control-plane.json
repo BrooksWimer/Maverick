@@ -323,13 +323,7 @@
             "deep": "sonnet"
           },
           "agents": {
-            "intake": "cheap",
-            "goalFraming": "cheap",
-            "modeling": "default",
-            "testDesign": "cheap",
             "planning": "deep",
-            "operatorFeedback": "cheap",
-            "responseFormatting": "cheap",
             "epicContext": "default"
           }
         }
@@ -440,13 +434,7 @@
             "deep": "sonnet"
           },
           "agents": {
-            "intake": "cheap",
-            "goalFraming": "cheap",
-            "modeling": "default",
-            "testDesign": "cheap",
             "planning": "deep",
-            "operatorFeedback": "cheap",
-            "responseFormatting": "cheap",
             "epicContext": "default"
           }
         }
@@ -486,16 +474,10 @@
       }
     ]
   },
-  "brief": {
-    "storagePath": "./data/briefs"
-  },
   "assistant": {
     "discord": {
       "enabled": false,
       "channelIds": []
     }
-  },
-  "dailyBrief": {
-    "artifactDirectory": "./data/daily-briefs"
   }
 }

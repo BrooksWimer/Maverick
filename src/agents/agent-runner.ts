@@ -21,18 +21,12 @@ import type {
 
 // Agent registry — import each agent definition
 import { intakeAgent } from "./intake-agent.js";
-import { goalFramingAgent } from "./goal-framing-agent.js";
 import { planningAgent } from "./planning-agent.js";
-import { operatorFeedbackAgent } from "./operator-feedback-agent.js";
-import { responseFormattingAgent } from "./response-formatting-agent.js";
-import { modelingAgent } from "./modeling-agent.js";
-import { testDesignAgent } from "./test-design-agent.js";
 import { verificationAgent } from "./verification-agent.js";
 import { reviewAgent } from "./review-agent.js";
 import { epicContextAgent } from "./epic-context-agent.js";
 import { mergeAgent } from "./merge-agent.js";
 import { incidentTriageAgent } from "./incident-triage-agent.js";
-import { briefAgent } from "./brief-agent.js";
 
 const log = createLogger("agent-runner");
 
@@ -42,18 +36,12 @@ const log = createLogger("agent-runner");
 
 const AGENT_REGISTRY: Map<AgentId, AgentDefinition> = new Map([
   ["intake", intakeAgent],
-  ["goal-framing", goalFramingAgent],
   ["planning", planningAgent],
-  ["operator-feedback", operatorFeedbackAgent],
-  ["response-formatting", responseFormattingAgent],
-  ["modeling", modelingAgent],
-  ["test-design", testDesignAgent],
   ["verification", verificationAgent],
   ["review", reviewAgent],
   ["epic-context", epicContextAgent],
   ["merge", mergeAgent],
   ["incident-triage", incidentTriageAgent],
-  ["brief", briefAgent],
 ]);
 
 export function getAgent(id: AgentId): AgentDefinition | undefined {

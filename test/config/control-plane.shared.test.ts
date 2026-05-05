@@ -69,13 +69,7 @@ describe("control-plane.shared.json", () => {
         deep: "sonnet",
       }),
       agents: expect.objectContaining({
-        intake: "cheap",
-        goalFraming: "cheap",
-        modeling: "default",
-        testDesign: "cheap",
         planning: "deep",
-        operatorFeedback: "cheap",
-        responseFormatting: "cheap",
         epicContext: "default",
       }),
     }));

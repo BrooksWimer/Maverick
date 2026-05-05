@@ -17,7 +17,8 @@ Make AI workstreams reliable enough to use as everyday project infrastructure: D
 ## Planning Context Rules
 
 - Prefer deterministic context bundles and stored state over fresh repo sweeps.
-- Planning agents receive project context, epic context, AGENTS doctrine, recent relevant state, changed evidence, and operator instruction.
+- Planning agents receive project context, PROJECT_MEMORY.md, epic context, AGENTS doctrine, recent relevant state, changed evidence, and operator instruction.
+- PROJECT_MEMORY.md is the durable, operator-editable cross-workstream memory file. Maverick appends completion notes there when workstreams are archived.
 - If fingerprints are unchanged, reuse the existing model where possible.
 - If fingerprints changed, update only model sections affected by the changed evidence.
 - Agents may request broader inspection only with exact paths or search patterns and a concrete reason.
@@ -29,8 +30,4 @@ Make AI workstreams reliable enough to use as everyday project infrastructure: D
 - Claude planning cost control and resumable checkpoints.
 - Windows/Linux deployment health and shared state safety.
 - Worktree cleanup that never deletes durable branches or history.
-
-## TODO
-
-- Add deeper diagrams for cross-host runtime ownership after the state-sync work settles.
-- Add a concise operator runbook for restarting Windows and Linux bots.
+- Keep `docs/maverick/RUNBOOK.md` current whenever operator recovery behavior changes.

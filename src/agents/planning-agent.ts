@@ -18,6 +18,7 @@ export const planningAgent: AgentDefinition = {
 - Ground every claim in the repository and workstream context provided to you.
 - Treat the supplied bounded context bundle as the default evidence set.
 - Do not perform a full repo sweep. Use changed evidence and durable context first.
+- Perform intake-quality scoping inside this single planning call: identify the operator's real request, explicit scope, out-of-scope boundaries, acceptance criteria, risks, and any true clarification blockers before planning implementation.
 - If broader inspection is absolutely necessary, keep requiredAnswers empty and put the exact missing paths/patterns and reason in remainingUnknowns; do not spend the planning turn exploring unrelated files.
 - Treat src/agents as Maverick's orchestration-facing cognition layer and src/claude as the lower-level runtime/transport layer unless the code clearly proves an exception.
 - Prefer the smallest durable next slice that makes meaningful progress.
@@ -43,9 +44,13 @@ export const planningAgent: AgentDefinition = {
 
 You will receive the real project path, workstream metadata, AGENTS.md doctrine, durable project/epic context docs, recent turn history, context fingerprints, changed evidence, and any previously stored planning context or operator answers.
 
+You will receive PROJECT_ROADMAP.md as the project's north star — the long-term plan and destination. Every recommended slice must demonstrably advance toward roadmap goals. When formulating the next slice, identify which roadmap milestone it serves. If the roadmap is empty or absent, ask the operator for direction (requiredAnswers).
+
 Use that evidence to determine:
+- the scoped interpretation of the operator request
 - what is already true in the codebase
 - what the best next implementation slice is
+- which roadmap milestone the slice advances
 - which files and verification steps matter
 - what is still unknown
 - whether any operator answers are still required before execution
@@ -58,6 +63,7 @@ Return JSON that matches this structure exactly. The JSON object is the source o
 {
   "currentStateSummary": "What is already true in the repo and workstream",
   "recommendedNextSlice": "The best next implementation slice to execute next",
+  "roadmapMilestone": "Optional: which PROJECT_ROADMAP.md milestone this slice advances (omit if roadmap absent)",
   "requiredAnswers": [
     {
       "id": "stable-id",

@@ -17,14 +17,17 @@ import { Orchestrator } from "../../src/orchestrator/index.js";
 import { closeDatabase, initDatabase } from "../../src/state/index.js";
 
 class QueuedAdapter implements ExecutionBackendAdapter {
+  readonly name: string;
   readonly turnRequests: TurnRequest[] = [];
   private readonly threads = new Map<string, ExecutionThread>();
   private nextThreadId = 1;
 
   constructor(
-    readonly name: string,
+    name: string,
     private readonly turnResults: TurnResult[],
-  ) {}
+  ) {
+    this.name = name;
+  }
 
   async initialize(): Promise<void> {}
 
@@ -56,66 +59,76 @@ class QueuedAdapter implements ExecutionBackendAdapter {
   }
 
   async steerTurn(_request: SteerRequest): Promise<void> {}
-
   async interruptTurn(_threadId: string): Promise<void> {}
-
   async resolveApproval(_threadId: string, _approvalId: string, _approved: boolean): Promise<void> {}
 
   async startReview(_request: ReviewRequest): Promise<ReviewResult> {
-    return {
-      findings: "clean",
-      severity: "clean",
-      suggestions: [],
-    };
+    return { findings: "clean", severity: "clean", suggestions: [] };
   }
 
   onOutput(_callback: (threadId: string, content: string, isPartial: boolean) => void): void {}
-
   onApprovalRequest(_callback: (threadId: string, request: ApprovalRequest) => void): void {}
 }
 
-function agentOutput(payload: Record<string, unknown>, summary: string): TurnResult {
+function readyPlanningOutput(suffix: string): TurnResult {
+  const payload = {
+    currentStateSummary: `Current ${suffix}`,
+    recommendedNextSlice: "Move planning forward.",
+    requiredAnswers: [],
+    importantDecisions: [],
+    draftExecutionPrompt: `Implement the slice (${suffix}).`,
+    finalExecutionPrompt: `Implement the slice (${suffix}).`,
+    remainingUnknowns: [],
+    steps: [
+      {
+        order: 1,
+        description: "Do the thing.",
+        files: ["src/file.ts"],
+        verification: "npm test",
+        canParallelize: false,
+      },
+    ],
+    risks: [],
+    dependencies: [],
+    estimatedTurns: 1,
+    testStrategy: "Add tests.",
+    rollbackPlan: "Revert the change.",
+  };
   return {
-    backendTurnId: "agent-turn",
+    backendTurnId: `planning-turn-${suffix}`,
     status: "completed",
-    output: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`\n\n${summary}`,
-    summary,
+    output: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`\n\nReady to dispatch.`,
+    summary: "Planning ready.",
   };
 }
 
-const planningRouting = {
-  profiles: {
-    cheap: "haiku",
-    default: "sonnet",
-    deep: "sonnet",
-  },
-  agents: {
-    planning: "deep",
-    epicContext: "default",
-  },
-} as const;
-
-describe("Orchestrator epic-context agent integration", () => {
+describe("Orchestrator planning fingerprint reuse", () => {
   let tempDir: string;
   let repoPath: string;
   let config: OrchestratorConfig;
   let orchestrator: Orchestrator | null = null;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "maverick-epic-context-agent-"));
+    tempDir = mkdtempSync(join(tmpdir(), "maverick-fingerprint-reuse-"));
     repoPath = join(tempDir, "repo");
     mkdirSync(repoPath, { recursive: true });
     writeFileSync(join(repoPath, "AGENTS.md"), "# Test doctrine", "utf8");
     writeFileSync(join(repoPath, "package.json"), '{"name":"repo"}', "utf8");
+    mkdirSync(join(repoPath, "src"), { recursive: true });
     mkdirSync(join(repoPath, "docs", "maverick", "epics"), { recursive: true });
     writeFileSync(
       join(repoPath, "docs", "maverick", "PROJECT_CONTEXT.md"),
-      "# Astra Context\n\nAstra turns local network facts into ordinary-user insight.",
+      "# Maverick Context\n\nKeep planning bounded.",
       "utf8",
     );
     writeFileSync(
-      join(repoPath, "docs", "maverick", "epics", "router-admin-ingestion.md"),
-      "# Router Admin Ingestion\n\nDo not overfit to Xfinity-only selectors.",
+      join(repoPath, "docs", "maverick", "PROJECT_MEMORY.md"),
+      "# Project Memory\n\nInitial memory.",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoPath, "docs", "maverick", "epics", "control-plane.md"),
+      "# Control Plane Epic\n\nLifecycle work.",
       "utf8",
     );
 
@@ -124,45 +137,37 @@ describe("Orchestrator epic-context agent integration", () => {
     config = OrchestratorConfigSchema.parse({
       version: 1,
       defaults: {
-        executionBackend: {
-          type: "mock",
-          responseDelay: 0,
-        },
+        executionBackend: { type: "mock", responseDelay: 0 },
       },
       projects: [
         {
-          id: "netwise",
-          name: "Netwise",
+          id: "maverick",
+          name: "Maverick",
           repoPath,
-          executionBackend: {
-            type: "mock",
-            responseDelay: 0,
-          },
-          claudePlanning: {
-            enabled: true,
-            autoOnPlanningState: false,
-            model: "sonnet",
-          },
+          workspaceKind: "notes",
+          productionBranch: "main",
           epicBranches: [
             {
-              id: "router-admin-ingestion",
-              branch: "codex/router-admin-ingestion",
+              id: "control-plane",
+              branch: "control-plane",
+              workstreamPrefix: "control-plane",
               charter: {
-                summary: "Router admin ingestion is a real product capability.",
-                bullets: ["Prefer durable router-vendor generalization."],
+                summary: "Lifecycle work.",
                 docs: [
                   {
                     path: "docs/maverick/PROJECT_CONTEXT.md",
                     purpose: "Project context.",
                   },
                   {
-                    path: "docs/maverick/epics/router-admin-ingestion.md",
+                    path: "docs/maverick/epics/control-plane.md",
                     purpose: "Epic context.",
                   },
                 ],
               },
             },
           ],
+          executionBackend: { type: "mock", responseDelay: 0 },
+          claudePlanning: { enabled: true, autoOnPlanningState: false, model: "sonnet" },
         },
       ],
     });
@@ -177,50 +182,45 @@ describe("Orchestrator epic-context agent integration", () => {
     rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("feeds bounded repo-owned epic context into the planning agent", async () => {
-    config.projects[0]!.claudePlanning!.routing = planningRouting;
+  it("reuses stored plan when context fingerprint is unchanged and re-plans when memory changes", async () => {
     orchestrator = new Orchestrator(config);
     await orchestrator.initialize();
 
     const utilityAdapter = new QueuedAdapter("utility", [
-      agentOutput(
-        {
-          currentStateSummary: "Planning has dynamic epic context available.",
-          recommendedNextSlice: "Use the epic context summary while shaping the next implementation slice.",
-          requiredAnswers: [],
-          importantDecisions: [],
-          draftExecutionPrompt: "Implement the next router-admin slice without overfitting to one vendor UI.",
-          finalExecutionPrompt: "Implement the next router-admin slice without overfitting to one vendor UI.",
-          remainingUnknowns: [],
-          steps: [],
-          risks: [],
-          dependencies: [],
-          estimatedTurns: 1,
-          testStrategy: "Add focused tests.",
-          rollbackPlan: "Revert.",
-        },
-        "Planning ready.",
-      ),
+      readyPlanningOutput("first"),
+      readyPlanningOutput("second"),
     ]);
 
     (orchestrator as { utilityClaudeAdapter: ExecutionBackendAdapter | null }).utilityClaudeAdapter = utilityAdapter;
 
     const workstream = await orchestrator.createWorkstream({
-      projectId: "netwise",
-      name: "router admin capture",
-      epicId: "router-admin-ingestion",
+      projectId: "maverick",
+      name: "fingerprint reuse",
+      epicId: "control-plane",
     });
 
-    await orchestrator.generatePlan(
-      workstream.id,
-      "Plan the next router-admin ingestion slice.",
-      "manual",
-    );
+    const instruction = "Move planning forward and dispatch a slice.";
 
+    // First call: should call Claude.
+    const firstPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
+    expect(firstPlan.needsAnswers).toBe(false);
+    expect(firstPlan.finalExecutionPrompt).toContain("Implement the slice (first)");
     expect(utilityAdapter.turnRequests).toHaveLength(1);
-    expect(utilityAdapter.turnRequests[0]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Bounded Epic Context");
-    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Do not overfit to Xfinity-only selectors.");
-    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Epic Context Analysis");
+
+    // Second call with no context changes: Claude should NOT be called.
+    const reusedPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
+    expect(utilityAdapter.turnRequests).toHaveLength(1);
+    expect(reusedPlan.needsAnswers).toBe(false);
+    expect(reusedPlan.finalExecutionPrompt).toContain("Implement the slice (first)");
+
+    // Third call after modifying PROJECT_MEMORY.md: Claude IS called.
+    writeFileSync(
+      join(repoPath, "docs", "maverick", "PROJECT_MEMORY.md"),
+      "# Project Memory\n\nUpdated content that changes the fingerprint.",
+      "utf8",
+    );
+    const replannedPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
+    expect(utilityAdapter.turnRequests).toHaveLength(2);
+    expect(replannedPlan.finalExecutionPrompt).toContain("Implement the slice (second)");
   });
 });
