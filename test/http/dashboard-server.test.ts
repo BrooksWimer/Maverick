@@ -556,4 +556,61 @@ describe("HTTP command-center dashboard route", () => {
     expect(payload.health.staleWorkstreamCount).toBe(1);
     expect(payload.nextAction).toContain("stale workstream");
   });
+
+  it("dashboard CORS preflight echoes an allowlisted Origin with credentials support", async () => {
+    const previous = process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN;
+    process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN =
+      "https://brookswimer.com,https://www.brookswimer.com";
+    try {
+      orchestrator = new Orchestrator(config);
+      await orchestrator.initialize();
+      app = await createHttpServer(orchestrator, {
+        host: "127.0.0.1",
+        port: 0,
+      });
+
+      const res = await app.inject({
+        method: "OPTIONS",
+        url: "/api/dashboard/command-center",
+        headers: { origin: "https://www.brookswimer.com" },
+      });
+      expect(res.statusCode).toBe(204);
+      expect(res.headers["access-control-allow-origin"]).toBe("https://www.brookswimer.com");
+      expect(res.headers["access-control-allow-credentials"]).toBe("true");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN;
+      } else {
+        process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN = previous;
+      }
+    }
+  });
+
+  it("dashboard CORS preflight does not reflect a non-allowlisted Origin", async () => {
+    const previous = process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN;
+    process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN = "https://brookswimer.com";
+    try {
+      orchestrator = new Orchestrator(config);
+      await orchestrator.initialize();
+      app = await createHttpServer(orchestrator, {
+        host: "127.0.0.1",
+        port: 0,
+      });
+
+      const res = await app.inject({
+        method: "OPTIONS",
+        url: "/api/dashboard/command-center",
+        headers: { origin: "https://evil.example" },
+      });
+      expect(res.statusCode).toBe(204);
+      expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+      expect(res.headers["access-control-allow-credentials"]).toBeUndefined();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN;
+      } else {
+        process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN = previous;
+      }
+    }
+  });
 });
