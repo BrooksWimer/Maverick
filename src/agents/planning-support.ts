@@ -1,10 +1,5 @@
 import type {
-  ExplanationResult,
-  GoalFrameResult,
   IntakeResult,
-  ModelingResult,
-  OperatorFeedbackQuestion,
-  OperatorFeedbackResult,
   PendingPlanningDecision,
   PlanStep,
   PlanningAnswer,
@@ -13,13 +8,8 @@ import type {
   PlanningContextRecord,
   PlanningDecision,
   PlanningResult,
-  TestDesignCase,
-  TestDesignResult,
 } from "./types.js";
-import { parseGoalFrameResult, parseIntakeResult, renderGoalFrameMarkdown, renderIntakeMarkdown } from "./goal-framing-support.js";
-import { renderModelingMarkdown } from "./modeling-support.js";
-import { coerceOperatorFeedbackResult, renderOperatorFeedbackMarkdown } from "./operator-feedback-support.js";
-import { renderTestDesignMarkdown } from "./test-design-support.js";
+import { parseIntakeResult, renderIntakeMarkdown } from "./intake-agent.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -150,37 +140,6 @@ function isFallbackPlanningResult(result: PlanningResult): boolean {
   );
 }
 
-function synthesizePendingQuestionsFromFeedback(
-  feedbackRequest: OperatorFeedbackResult | null,
-): PendingPlanningDecision[] {
-  if (!feedbackRequest) {
-    return [];
-  }
-
-  return feedbackRequest.questions.map((question) => ({
-    id: question.questionId,
-    question: question.prompt,
-    whyItMatters: question.whyItMatters || "Maverick needs this answer before dispatch is safe.",
-    options: question.options,
-    kind: question.label.toLowerCase().includes("decision") ? "important-decision" : "required-answer",
-  }));
-}
-
-function feedbackMatchesPendingQuestions(
-  feedbackRequest: OperatorFeedbackResult | null,
-  pendingQuestions: PendingPlanningDecision[],
-): boolean {
-  if (pendingQuestions.length === 0) {
-    return true;
-  }
-
-  const feedbackQuestionIds = new Set(feedbackRequest?.questions.map((question) => question.questionId) ?? []);
-  return (
-    pendingQuestions.every((question) => feedbackQuestionIds.has(question.id)) &&
-    feedbackQuestionIds.size === pendingQuestions.length
-  );
-}
-
 function synthesizePendingQuestionsFromIntake(intake: IntakeResult | null): PendingPlanningDecision[] {
   const clarificationQuestions = intake?.clarificationQuestions ?? [];
   if (clarificationQuestions.length === 0) {
@@ -196,26 +155,9 @@ function synthesizePendingQuestionsFromIntake(intake: IntakeResult | null): Pend
   }));
 }
 
-function synthesizePendingQuestionsFromModeling(modeling: ModelingResult | null): PendingPlanningDecision[] {
-  const openQuestions = modeling?.openQuestions ?? [];
-  if (openQuestions.length === 0) {
-    return [];
-  }
-
-  return openQuestions.map((question, index) => ({
-    id: `open-question-${index + 1}`,
-    question,
-    whyItMatters: "The system model marked this as unresolved before Maverick can dispatch safely.",
-    options: [],
-    kind: "required-answer",
-  }));
-}
-
 function buildPendingQuestions(params: {
   result: PlanningResult;
   intake?: IntakeResult | null;
-  modeling?: ModelingResult | null;
-  feedbackRequest?: OperatorFeedbackResult | null;
 }): PendingPlanningDecision[] {
   const structuredQuestions = collectPendingPlanningQuestions(params.result);
   if (structuredQuestions.length > 0) {
@@ -224,20 +166,6 @@ function buildPendingQuestions(params: {
 
   if (!isFallbackPlanningResult(params.result)) {
     return [];
-  }
-
-  const feedbackQuestions = synthesizePendingQuestionsFromFeedback(params.feedbackRequest ?? null);
-  const modelingQuestions = synthesizePendingQuestionsFromModeling(params.modeling ?? null);
-  if (modelingQuestions.length > feedbackQuestions.length) {
-    return modelingQuestions;
-  }
-
-  if (feedbackQuestions.length > 0) {
-    return feedbackQuestions;
-  }
-
-  if (modelingQuestions.length > 0) {
-    return modelingQuestions;
   }
 
   return synthesizePendingQuestionsFromIntake(params.intake ?? null);
@@ -308,9 +236,12 @@ function normalizeResultFromStructured(
         .filter((entry): entry is PlanningDecision => entry !== null)
     : [];
 
+  const roadmapMilestone = asTrimmedString(structured.roadmapMilestone) || null;
+
   return {
     currentStateSummary,
     recommendedNextSlice,
+    roadmapMilestone,
     requiredAnswers,
     importantDecisions,
     draftExecutionPrompt: asTrimmedString(structured.draftExecutionPrompt),
@@ -329,6 +260,7 @@ function fallbackPlanningResult(rawOutput: string): PlanningResult {
   return {
     currentStateSummary: "Planning returned unstructured output. Review the stored raw plan text before dispatch.",
     recommendedNextSlice: "Review the raw planning output and answer any pending planning questions before dispatch.",
+    roadmapMilestone: null,
     requiredAnswers: [],
     importantDecisions: [],
     draftExecutionPrompt: "",
@@ -416,7 +348,7 @@ function extractStepsFromPrompt(finalExecutionPrompt: string, fallbackFiles: str
       order: Number.parseInt(match[1], 10),
       description: stripMarkdownNoise(match[2] ?? ""),
       files: fallbackFiles,
-      verification: "Use the verification checklist from the durable planning brief.",
+      verification: "Use the verification checklist from the durable planning record.",
       canParallelize: false,
     }))
     .filter((step) => step.description);
@@ -429,7 +361,7 @@ function extractStepsFromPrompt(finalExecutionPrompt: string, fallbackFiles: str
     order: 1,
     description: "Implement the recovered planning prompt.",
     files: fallbackFiles,
-    verification: "Use the verification checklist from the durable planning brief.",
+    verification: "Use the verification checklist from the durable planning record.",
     canParallelize: false,
   }];
 }
@@ -482,7 +414,8 @@ export function structureRawPlanningOutput(params: {
 
   return {
     currentStateSummary: summarizeStructuredPlan(rawAgentOutput, finalExecutionPrompt),
-    recommendedNextSlice: "Dispatch the recovered execution prompt from the durable planning brief.",
+    recommendedNextSlice: "Dispatch the recovered execution prompt from the durable planning record.",
+    roadmapMilestone: null,
     requiredAnswers: [],
     importantDecisions: [],
     draftExecutionPrompt: finalExecutionPrompt,
@@ -526,144 +459,6 @@ function normalizeIntake(value: unknown, instruction: string): IntakeResult | nu
   return parseIntakeResult(value, instruction);
 }
 
-function normalizeGoalFrame(value: unknown, intake: IntakeResult | null, instruction: string): GoalFrameResult | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  return parseGoalFrameResult(value, intake ?? parseIntakeResult(null, instruction));
-}
-
-function normalizeFeedbackQuestion(value: unknown): OperatorFeedbackQuestion | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const questionId = asTrimmedString(value.questionId);
-  const prompt = asTrimmedString(value.prompt);
-  if (!questionId || !prompt) {
-    return null;
-  }
-
-  return {
-    questionId,
-    label: asTrimmedString(value.label) || questionId,
-    prompt,
-    whyItMatters: asTrimmedString(value.whyItMatters),
-    options: asStringArray(value.options),
-    recommendedOption: asTrimmedString(value.recommendedOption) || undefined,
-  };
-}
-
-function normalizeFeedbackRequest(value: unknown): OperatorFeedbackResult | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const questions = Array.isArray(value.questions)
-    ? value.questions
-        .map((question) => normalizeFeedbackQuestion(question))
-        .filter((question): question is OperatorFeedbackQuestion => question !== null)
-    : [];
-
-  return {
-    headline: asTrimmedString(value.headline) || "Operator input needed",
-    preface: asTrimmedString(value.preface),
-    questions,
-    answerInstructions: asTrimmedString(value.answerInstructions),
-    suggestedReplyFormat: asTrimmedString(value.suggestedReplyFormat),
-  };
-}
-
-function normalizeExplanation(value: unknown): ExplanationResult | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const markdown = asTrimmedString(value.markdown);
-  if (!markdown) {
-    return null;
-  }
-
-  return {
-    headline: asTrimmedString(value.headline),
-    summary: asTrimmedString(value.summary),
-    markdown,
-    nextAction: asTrimmedString(value.nextAction),
-  };
-}
-
-function normalizeModeling(value: unknown): ModelingResult | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  return {
-    systemSummary: asTrimmedString(value.systemSummary),
-    mermaid: asTrimmedString(value.mermaid),
-    keyEntities: asStringArray(value.keyEntities),
-    criticalFlows: asStringArray(value.criticalFlows),
-    openQuestions: asStringArray(value.openQuestions),
-    needsBroaderInspection: Array.isArray(value.needsBroaderInspection)
-      ? value.needsBroaderInspection
-          .map((entry) => {
-            if (!isRecord(entry)) {
-              return null;
-            }
-            const reason = asTrimmedString(entry.reason);
-            if (!reason) {
-              return null;
-            }
-            return {
-              paths: asStringArray(entry.paths),
-              patterns: asStringArray(entry.patterns),
-              reason,
-            };
-          })
-          .filter((entry): entry is NonNullable<ModelingResult["needsBroaderInspection"]>[number] => entry !== null)
-      : [],
-  };
-}
-
-function normalizeTestCase(value: unknown): TestDesignCase | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const name = asTrimmedString(value.name);
-  const purpose = asTrimmedString(value.purpose);
-  if (!name || !purpose) {
-    return null;
-  }
-
-  return {
-    name,
-    scope:
-      value.scope === "unit" || value.scope === "integration" || value.scope === "e2e"
-        ? value.scope
-        : "integration",
-    purpose,
-    files: asStringArray(value.files),
-  };
-}
-
-function normalizeTestDesign(value: unknown): TestDesignResult | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  return {
-    strategySummary: asTrimmedString(value.strategySummary),
-    testCases: Array.isArray(value.testCases)
-      ? value.testCases
-          .map((testCase) => normalizeTestCase(testCase))
-          .filter((testCase): testCase is TestDesignCase => testCase !== null)
-      : [],
-    verificationChecklist: asStringArray(value.verificationChecklist),
-    suggestedCommands: asStringArray(value.suggestedCommands),
-  };
-}
-
 function normalizeChangedFileSummary(value: unknown): PlanningChangedFileSummary | null {
   if (!isRecord(value)) {
     return null;
@@ -695,6 +490,10 @@ function normalizePlanningContextBundle(value: unknown): PlanningContextBundle |
     schemaVersion: asPositiveInteger(value.schemaVersion, 1),
     projectContextPath: asTrimmedString(value.projectContextPath) || null,
     projectContext: asTrimmedString(value.projectContext),
+    projectMemoryPath: asTrimmedString(value.projectMemoryPath) || null,
+    projectMemory: asTrimmedString(value.projectMemory),
+    roadmapPath: asTrimmedString(value.roadmapPath) || null,
+    roadmap: asTrimmedString(value.roadmap),
     epicContextPath: asTrimmedString(value.epicContextPath) || null,
     epicContext: asTrimmedString(value.epicContext),
     agentsPath: asTrimmedString(value.agentsPath) || null,
@@ -766,11 +565,7 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
       result = parsePlanningResult(null, rawAgentOutput);
     }
     const intake = normalizeIntake(parsed.intake, originalInstruction);
-    const goalFrame = normalizeGoalFrame(parsed.goalFrame, intake, originalInstruction);
-    const modeling = normalizeModeling(parsed.modeling);
-    const testDesign = normalizeTestDesign(parsed.testDesign);
     const contextBundle = normalizePlanningContextBundle(parsed.contextBundle);
-    let feedbackRequest = normalizeFeedbackRequest(parsed.feedbackRequest);
     const answersSource = isRecord(parsed.answers) ? parsed.answers : {};
     const answers = Object.fromEntries(
       Object.entries(answersSource)
@@ -790,7 +585,7 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
           })
           .filter((entry): entry is PendingPlanningDecision => entry !== null)
       : [];
-    const synthesizedPendingQuestions = buildPendingQuestions({ result, intake, modeling, feedbackRequest });
+    const synthesizedPendingQuestions = buildPendingQuestions({ result, intake });
     const pendingQuestions = (isFallbackPlanningResult(result) && synthesizedPendingQuestions.length > parsedPendingQuestions.length
         ? synthesizedPendingQuestions
         : parsedPendingQuestions.length > 0
@@ -801,16 +596,9 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
       return !existingAnswer || !existingAnswer.answer.trim();
     });
 
-    if (pendingQuestions.length === 0 && isFallbackPlanningResult(result)) {
-      feedbackRequest = null;
-    } else if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
-      feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
-    }
-
     const createdAt = asTrimmedString(parsed.createdAt) || new Date().toISOString();
     const updatedAt = asTrimmedString(parsed.updatedAt) || createdAt;
     const finalExecutionPrompt = asTrimmedString(parsed.finalExecutionPrompt) || null;
-    const explanation = normalizeExplanation(parsed.explanation);
     const status =
       pendingQuestions.length > 0
         ? "needs-answers"
@@ -828,11 +616,6 @@ export function parsePlanningContextRecord(value: string | null): PlanningContex
       planningThreadId: asTrimmedString(parsed.planningThreadId) || null,
       contextBundle,
       intake,
-      goalFrame,
-      modeling,
-      testDesign,
-      feedbackRequest,
-      explanation,
       result,
       pendingQuestions,
       answers,
@@ -852,12 +635,7 @@ export function buildPlanningContextRecord(params: {
   result: PlanningResult;
   rawAgentOutput: string;
   intake?: IntakeResult | null;
-  goalFrame?: GoalFrameResult | null;
-  modeling?: ModelingResult | null;
-  testDesign?: TestDesignResult | null;
   contextBundle?: PlanningContextBundle | null;
-  feedbackRequest?: OperatorFeedbackResult | null;
-  explanation?: ExplanationResult | null;
   answers?: Record<string, PlanningAnswer>;
   planningThreadId?: string | null;
   previous?: PlanningContextRecord | null;
@@ -868,21 +646,10 @@ export function buildPlanningContextRecord(params: {
   const pendingQuestions = buildPendingQuestions({
     result: params.result,
     intake: params.intake ?? params.previous?.intake ?? null,
-    modeling: params.modeling ?? params.previous?.modeling ?? null,
-    feedbackRequest: params.feedbackRequest ?? params.previous?.feedbackRequest ?? null,
   }).filter((question) => {
     const existingAnswer = answers[question.id];
     return !existingAnswer || !existingAnswer.answer.trim();
   });
-  let feedbackRequest =
-    params.feedbackRequest
-    ?? params.previous?.feedbackRequest
-    ?? (pendingQuestions.length > 0 ? coerceOperatorFeedbackResult(null, pendingQuestions) : null);
-  if (pendingQuestions.length === 0 && isFallbackPlanningResult(params.result)) {
-    feedbackRequest = null;
-  } else if (!feedbackMatchesPendingQuestions(feedbackRequest, pendingQuestions)) {
-    feedbackRequest = coerceOperatorFeedbackResult(null, pendingQuestions);
-  }
   const finalExecutionPrompt = params.result.finalExecutionPrompt.trim() || null;
   const status =
     pendingQuestions.length > 0
@@ -897,11 +664,6 @@ export function buildPlanningContextRecord(params: {
     planningThreadId: params.planningThreadId ?? params.previous?.planningThreadId ?? null,
     contextBundle: params.contextBundle ?? params.previous?.contextBundle ?? null,
     intake: params.intake ?? params.previous?.intake ?? null,
-    goalFrame: params.goalFrame ?? params.previous?.goalFrame ?? null,
-    modeling: params.modeling ?? params.previous?.modeling ?? null,
-    testDesign: params.testDesign ?? params.previous?.testDesign ?? null,
-    feedbackRequest,
-    explanation: params.explanation ?? params.previous?.explanation ?? null,
     result: params.result,
     pendingQuestions,
     answers,
@@ -961,14 +723,8 @@ export function renderPlanningSummary(
     includeRawOutput?: boolean;
   },
 ): string {
-  const includeAgentSections = options?.includeAgentSections ?? true;
   const includeRawOutput = options?.includeRawOutput ?? true;
   const intakeSummary = context.intake ? renderIntakeMarkdown(context.intake) : "None recorded.";
-  const goalFrameSummary = context.goalFrame ? renderGoalFrameMarkdown(context.goalFrame) : "None recorded.";
-  const modelingSummary = context.modeling ? renderModelingMarkdown(context.modeling) : "None recorded.";
-  const testDesignSummary = context.testDesign ? renderTestDesignMarkdown(context.testDesign) : "None recorded.";
-  const feedbackSummary = context.feedbackRequest ? renderOperatorFeedbackMarkdown(context.feedbackRequest) : "None recorded.";
-  const explanationSummary = context.explanation?.markdown ?? "None recorded.";
   const contextBundleSummary = context.contextBundle
     ? [
         `Fingerprint: ${context.contextBundle.contextFingerprint}`,
@@ -976,6 +732,12 @@ export function renderPlanningSummary(
         context.contextBundle.changedEvidence.length > 0
           ? `Changed evidence: ${context.contextBundle.changedEvidence.join("; ")}`
           : "Changed evidence: none",
+        context.contextBundle.projectMemoryPath
+          ? `Project memory: ${context.contextBundle.projectMemoryPath}`
+          : "Project memory: none",
+        context.contextBundle.roadmapPath
+          ? `Project roadmap: ${context.contextBundle.roadmapPath}`
+          : "Project roadmap: none",
       ].join("\n")
     : "None recorded.";
   const pendingQuestions = context.pendingQuestions.length > 0
@@ -1009,16 +771,6 @@ export function renderPlanningSummary(
     ? ["", "Raw planning output:", context.rawAgentOutput]
     : [];
   const isFallback = isFallbackPlanningResult(context.result);
-  const agentSections = includeAgentSections
-    ? [
-        "",
-        "Operator feedback request:",
-        feedbackSummary,
-        "",
-        "Discord explanation:",
-        explanationSummary,
-      ]
-    : [];
 
   return [
     "Structured intake:",
@@ -1027,21 +779,14 @@ export function renderPlanningSummary(
     "Bounded planning context:",
     contextBundleSummary,
     "",
-    "Goal frame:",
-    goalFrameSummary,
-    "",
-    "System model:",
-    modelingSummary,
-    "",
-    "Test design:",
-    testDesignSummary,
-    ...agentSections,
-    "",
     "Current state summary:",
     context.result.currentStateSummary || "None recorded.",
     "",
     "Recommended next slice:",
     context.result.recommendedNextSlice || "None recorded.",
+    "",
+    "Roadmap milestone served:",
+    context.result.roadmapMilestone || "None recorded.",
     "",
     "Pending planning questions:",
     pendingQuestions,

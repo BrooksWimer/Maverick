@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS workstreams (
 
   -- Codex binding
   codex_thread_id     TEXT,
-  execution_backend   TEXT NOT NULL DEFAULT 'codex-cli',
+  execution_backend   TEXT NOT NULL DEFAULT 'codex-app-server',
 
   -- Discord binding
   discord_channel_id  TEXT,

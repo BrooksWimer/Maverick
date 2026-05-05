@@ -15,18 +15,12 @@ import type { ClaudePermissionMode } from "../claude/types.js";
 
 export type AgentId =
   | "intake"
-  | "goal-framing"
   | "planning"
-  | "operator-feedback"
-  | "response-formatting"
-  | "modeling"
-  | "test-design"
   | "verification"
   | "review"
   | "epic-context"
   | "merge"
-  | "incident-triage"
-  | "brief";
+  | "incident-triage";
 
 export interface AgentDefinition {
   /** Unique agent identifier */
@@ -186,65 +180,6 @@ export interface IntakeResult {
   clarificationQuestions?: string[];
 }
 
-/** Goal framing agent output */
-export interface GoalFrameResult {
-  objective: string;
-  problemStatement: string;
-  successCriteria: string[];
-  constraints: string[];
-  assumptions: string[];
-  autonomyGuidance: string;
-  operatorDecisionPolicy: string;
-}
-
-/** Operator feedback agent output */
-export interface OperatorFeedbackResult {
-  headline: string;
-  preface: string;
-  questions: OperatorFeedbackQuestion[];
-  answerInstructions: string;
-  suggestedReplyFormat: string;
-}
-
-export interface OperatorFeedbackQuestion {
-  questionId: string;
-  label: string;
-  prompt: string;
-  whyItMatters: string;
-  options: string[];
-  recommendedOption?: string;
-}
-
-/** Response formatting / explanation output */
-export interface ExplanationResult {
-  headline: string;
-  summary: string;
-  markdown: string;
-  nextAction: string;
-}
-
-/** Modeling agent output */
-export interface ModelingResult {
-  systemSummary: string;
-  mermaid: string;
-  keyEntities: string[];
-  criticalFlows: string[];
-  openQuestions: string[];
-  needsBroaderInspection?: Array<{
-    paths: string[];
-    patterns: string[];
-    reason: string;
-  }>;
-}
-
-/** Test design agent output */
-export interface TestDesignResult {
-  strategySummary: string;
-  testCases: TestDesignCase[];
-  verificationChecklist: string[];
-  suggestedCommands: string[];
-}
-
 export interface PlanningChangedFileSummary {
   path: string;
   status: string;
@@ -255,6 +190,10 @@ export interface PlanningContextBundle {
   schemaVersion: number;
   projectContextPath: string | null;
   projectContext: string;
+  projectMemoryPath: string | null;
+  projectMemory: string;
+  roadmapPath: string | null;
+  roadmap: string;
   epicContextPath: string | null;
   epicContext: string;
   agentsPath: string | null;
@@ -269,17 +208,11 @@ export interface PlanningContextBundle {
   boundedAddDirs: string[];
 }
 
-export interface TestDesignCase {
-  name: string;
-  scope: "unit" | "integration" | "e2e";
-  purpose: string;
-  files: string[];
-}
-
 /** Planning agent output */
 export interface PlanningResult {
   currentStateSummary: string;
   recommendedNextSlice: string;
+  roadmapMilestone?: string | null;
   requiredAnswers: PlanningDecision[];
   importantDecisions: PlanningDecision[];
   draftExecutionPrompt: string;
@@ -325,11 +258,6 @@ export interface PlanningContextRecord {
   planningThreadId: string | null;
   contextBundle: PlanningContextBundle | null;
   intake: IntakeResult | null;
-  goalFrame: GoalFrameResult | null;
-  modeling: ModelingResult | null;
-  testDesign: TestDesignResult | null;
-  feedbackRequest: OperatorFeedbackResult | null;
-  explanation: ExplanationResult | null;
   result: PlanningResult;
   pendingQuestions: PendingPlanningDecision[];
   answers: Record<string, PlanningAnswer>;
@@ -380,6 +308,8 @@ export interface ReviewResult {
   correctnessFindings: ReviewFinding[];
   conventionFindings: ReviewFinding[];
   suggestions: string[];
+  requiredAnswers?: ReviewAnswer[];
+  importantDecisions?: ImportantDecision[];
 }
 
 export interface ReviewPass {
@@ -395,6 +325,19 @@ export interface ReviewFinding {
   category: string;
   description: string;
   suggestion?: string;
+}
+
+export interface ReviewAnswer {
+  id: string;
+  question: string;
+  context: string;
+  severity: "warning" | "error";
+}
+
+export interface ImportantDecision {
+  id: string;
+  decision: string;
+  rationale: string;
 }
 
 /** Epic context agent output */
@@ -430,20 +373,3 @@ export interface IncidentTriageResult {
   escalationReason?: string;
 }
 
-/** Brief agent output */
-export interface BriefResult {
-  sections: BriefSection[];
-  criticalAlerts: string[];
-  velocityTrend: "accelerating" | "steady" | "slowing" | "stalled";
-  stuckWorkstreams: string[];
-  risksIdentified: string[];
-  recommendedActions: string[];
-}
-
-export interface BriefSection {
-  projectId: string;
-  headline: string;
-  delta: string;
-  blockers: string[];
-  nextActions: string[];
-}

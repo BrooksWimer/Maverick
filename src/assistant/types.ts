@@ -3,7 +3,6 @@ import type { AssistantModelProfileName, AssistantModelRoutingConfig } from "../
 export type AssistantMessageSource = "sms" | "discord" | "api";
 
 export type AssistantPrimaryContext = "work" | "personal" | "home" | "errands" | "health" | "planning";
-export type WorkNoteKind = "general" | "project" | "study" | "acceptance-criteria";
 export type AssistantTaskStatus = "inbox" | "open" | "scheduled" | "done" | "archived";
 export type AssistantQueryType = "agenda" | "inbox" | "search";
 export type AssistantModelFeature = "classification" | "query" | "summary" | "planning" | "verification" | "review";
@@ -20,25 +19,10 @@ export interface AssistantAttachment {
   height?: number | null;
 }
 
-export interface WorkSmartGoal {
-  id: string;
-  title: string;
-  description: string;
-}
-
-export interface WorkNotesConfig {
-  projectId: string;
-  repoPath: string;
-  smartGoals: WorkSmartGoal[];
-}
-
 export interface AssistantStructuredNoteInput {
   title?: string | null;
   content?: string | null;
   context?: AssistantPrimaryContext;
-  noteKind?: WorkNoteKind;
-  projectName?: string | null;
-  smartGoalIds?: string[];
 }
 
 export type ParsedAssistantIntent =
@@ -48,9 +32,6 @@ export type ParsedAssistantIntent =
       content: string;
       confidence: number;
       context?: AssistantPrimaryContext;
-      noteKind?: WorkNoteKind;
-      projectName?: string | null;
-      smartGoalIds?: string[];
     }
   | {
       kind: "task";

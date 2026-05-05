@@ -35,28 +35,15 @@ import type {
   ParsedAssistantIntent,
   ReminderDispatchResult,
   SmsProvider,
-  WorkNoteKind,
-  WorkNotesConfig,
 } from "./types.js";
-import {
-  normalizeSmartGoalIds,
-  normalizeWorkNoteKind,
-  persistWorkNote,
-} from "./work-notes.js";
 
 const log = createLogger("assistant");
-
-type AssistantMirror = {
-  queueSync(reason: string): void;
-};
 
 type AssistantServiceOptions = {
   calendarProvider?: CalendarProvider;
   smsProvider?: SmsProvider;
   interpreter?: AssistantInterpreter;
   now?: () => Date;
-  workNotes?: WorkNotesConfig | null;
-  mirror?: AssistantMirror | null;
 };
 
 type ReminderDispatcher = (params: {
@@ -70,8 +57,6 @@ export class AssistantService {
   private readonly smsProvider: SmsProvider;
   private readonly interpreter: AssistantInterpreter | null;
   private readonly now: () => Date;
-  private readonly workNotes: WorkNotesConfig | null;
-  private readonly mirror: AssistantMirror | null;
   private reminderDispatcher: ReminderDispatcher | null = null;
   private reminderTimer: NodeJS.Timeout | null = null;
 
@@ -83,8 +68,6 @@ export class AssistantService {
     this.smsProvider = options.smsProvider ?? createSmsProvider(config);
     this.interpreter = options.interpreter ?? null;
     this.now = options.now ?? (() => new Date());
-    this.workNotes = options.workNotes ?? null;
-    this.mirror = options.mirror ?? null;
   }
 
   start(): void {
@@ -203,7 +186,6 @@ export class AssistantService {
             defaultEventDurationMinutes: this.config.calendar.defaultEventDurationMinutes,
             requireTimeForReminders: this.config.reminders.requireTimeForReminders,
             attachments: params.attachments ?? [],
-            workSmartGoals: this.workNotes?.smartGoals ?? [],
           });
       } catch (error) {
         log.warn({ err: error }, "Assistant interpreter failed; falling back to parser");
@@ -212,7 +194,6 @@ export class AssistantService {
           defaultEventDurationMinutes: this.config.calendar.defaultEventDurationMinutes,
           requireTimeForReminders: this.config.reminders.requireTimeForReminders,
           attachments: params.attachments ?? [],
-          workSmartGoals: this.workNotes?.smartGoals ?? [],
         });
       }
     }
@@ -445,8 +426,7 @@ export class AssistantService {
         taskId,
       },
       source: "assistant",
-    });
-    this.queueMirrorSync("assistant.task.completed");
+    });
     return this.toTaskSnapshot(completed!);
   }
 
@@ -478,8 +458,7 @@ export class AssistantService {
         whenIso,
       },
       source: "assistant",
-    });
-    this.queueMirrorSync("assistant.task.snoozed");
+    });
     return this.toTaskSnapshot(updated!);
   }
 
@@ -496,8 +475,7 @@ export class AssistantService {
           context,
         },
         source: "assistant",
-      });
-      this.queueMirrorSync("assistant.task.retagged");
+      });
       return { type: "task", id: itemId };
     }
 
@@ -513,8 +491,7 @@ export class AssistantService {
           context,
         },
         source: "assistant",
-      });
-      this.queueMirrorSync("assistant.note.retagged");
+      });
       return { type: "note", id: itemId };
     }
 
@@ -557,9 +534,7 @@ export class AssistantService {
       scope_id: params.scopeId,
       feature: params.feature,
       profile: params.profile,
-    });
-
-    this.queueMirrorSync("assistant.model-override.updated");
+    });
     return {
       scope: row.scope_type as AssistantModelOverrideScope,
       scopeId: row.scope_id,
@@ -610,8 +585,7 @@ export class AssistantService {
       failed += 1;
     }
 
-    if (sent > 0 || failed > 0) {
-      this.queueMirrorSync("assistant.reminders.processed");
+    if (sent > 0 || failed > 0) {
     }
 
     return { sent, failed };
@@ -627,34 +601,10 @@ export class AssistantService {
     const noteId = randomUUID();
     const createdAt = this.now().toISOString();
     const normalizedContext = intent.context ?? "personal";
-    const isWorkNote = normalizedContext === "work" && this.workNotes !== null;
-    const noteKind = isWorkNote
-      ? normalizeWorkNoteKind(intent.noteKind as WorkNoteKind | undefined, intent.projectName ?? null)
-      : null;
-    const smartGoalIds = isWorkNote
-      ? normalizeSmartGoalIds(intent.smartGoalIds, noteKind!, this.workNotes!)
-      : [];
 
     let storagePath: string | null = null;
     let persistedAttachmentsJson: string | null = null;
-    if (isWorkNote) {
-      const persisted = await persistWorkNote({
-        workNotes: this.workNotes!,
-        noteId,
-        title: intent.title,
-        content: intent.content,
-        noteKind: noteKind!,
-        projectName: intent.projectName ?? null,
-        smartGoalIds,
-        source,
-        sourceContact: from,
-        createdAt,
-        attachments,
-      });
-
-      storagePath = persisted.storagePath;
-      persistedAttachmentsJson = JSON.stringify(persisted.attachments);
-    } else if (attachments.length > 0) {
+    if (attachments.length > 0) {
       persistedAttachmentsJson = JSON.stringify(
         attachments.map((attachment) => ({
           originalName: attachment.name ?? "attachment",
@@ -671,18 +621,14 @@ export class AssistantService {
       title: intent.title,
       content: intent.content,
       note_context: normalizedContext,
-      note_kind: noteKind,
-      project_name: isWorkNote ? intent.projectName ?? null : null,
-      smart_goal_ids_json: smartGoalIds.length > 0 ? JSON.stringify(smartGoalIds) : null,
+      note_kind: null,
+      project_name: null,
+      smart_goal_ids_json: null,
       attachments_json: persistedAttachmentsJson,
       storage_path: storagePath,
     });
 
     const reply = buildNoteReply(note.title, {
-      isWorkNote,
-      noteKind,
-      projectName: isWorkNote ? intent.projectName ?? null : null,
-      smartGoalIds,
       storagePath,
       attachmentCount: attachments.length,
       context: normalizedContext,
@@ -694,9 +640,6 @@ export class AssistantService {
         noteId: note.id,
         confidence: intent.confidence,
         noteContext: normalizedContext,
-        noteKind,
-        projectName: isWorkNote ? intent.projectName ?? null : null,
-        smartGoalIds,
         storagePath,
       }),
     });
@@ -708,14 +651,11 @@ export class AssistantService {
         noteId: note.id,
         title: note.title,
         noteContext: normalizedContext,
-        noteKind,
-        projectName: isWorkNote ? intent.projectName ?? null : null,
       },
       source: "assistant",
     });
 
-    this.recordReply(reply, source, from);
-    this.queueMirrorSync("assistant.note.created");
+    this.recordReply(reply, source, from);
 
     return {
       reply,
@@ -767,8 +707,7 @@ export class AssistantService {
       source: "assistant",
     });
 
-    this.recordReply(reply, source, from);
-    this.queueMirrorSync("assistant.task.created");
+    this.recordReply(reply, source, from);
 
     return {
       reply,
@@ -795,18 +734,12 @@ export class AssistantService {
       };
     }
 
-    const noteKind = structuredNote.noteKind;
-    const projectName = normalizeAssistantText(structuredNote.projectName ?? "");
-
     return {
       kind: "note",
-      title: explicitTitle || defaultStructuredNoteTitle(noteKind, projectName || null, content, hasAttachments),
-      content: content || explicitTitle || fallbackAttachmentContent(noteKind, projectName || null, attachments),
+      title: explicitTitle || defaultStructuredNoteTitle(content, hasAttachments),
+      content: content || explicitTitle || fallbackAttachmentContent(attachments),
       confidence: 0.98,
       context: structuredNote.context ?? "work",
-      noteKind,
-      projectName: projectName || null,
-      smartGoalIds: structuredNote.smartGoalIds ?? [],
     };
   }
 
@@ -868,8 +801,7 @@ export class AssistantService {
       source: "assistant",
     });
 
-    this.recordReply(reply, source, from);
-    this.queueMirrorSync("assistant.reminder.created");
+    this.recordReply(reply, source, from);
 
     return {
       reply,
@@ -971,8 +903,7 @@ export class AssistantService {
       intent.recurrenceRule
     );
 
-    this.recordReply(reply, source, from);
-    this.queueMirrorSync("assistant.calendar.created");
+    this.recordReply(reply, source, from);
 
     return {
       reply,
@@ -1323,41 +1254,18 @@ export class AssistantService {
     return typeof metadata?.threadId === "string" ? metadata.threadId : null;
   }
 
-  private queueMirrorSync(reason: string): void {
-    this.mirror?.queueSync(reason);
-  }
 }
 
 function buildNoteReply(
   title: string,
   params: {
-    isWorkNote: boolean;
-    noteKind: WorkNoteKind | null;
-    projectName: string | null;
-    smartGoalIds: string[];
     storagePath: string | null;
     attachmentCount: number;
     context: AssistantPrimaryContext;
   }
 ): string {
-  if (!params.isWorkNote) {
-    return `Saved ${params.context} note: "${title}"`;
-  }
-
-  const details = [
-    params.noteKind ? `kind: ${params.noteKind}` : null,
-    params.projectName ? `project: ${params.projectName}` : null,
-    params.smartGoalIds.length > 0 ? `smart goals: ${params.smartGoalIds.join(", ")}` : null,
-    params.attachmentCount > 0 ? `attachments: ${params.attachmentCount}` : null,
-  ].filter(Boolean);
-
-  return [
-    `Saved work note: "${title}"`,
-    details.length > 0 ? `(${details.join("; ")})` : null,
-    params.storagePath ? `File: ${params.storagePath}` : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const attachmentSuffix = params.attachmentCount > 0 ? ` with ${params.attachmentCount} attachment${params.attachmentCount === 1 ? "" : "s"}` : "";
+  return `Saved ${params.context} note: "${title}"${attachmentSuffix}.`;
 }
 
 function buildTaskReply(
@@ -1371,46 +1279,18 @@ function buildTaskReply(
   return `Captured ${context} task: "${title}" [${status}]${dueSuffix}.`;
 }
 
-function defaultStructuredNoteTitle(
-  noteKind: WorkNoteKind | undefined,
-  projectName: string | null,
-  content: string,
-  hasAttachments: boolean
-): string {
+function defaultStructuredNoteTitle(content: string, hasAttachments: boolean): string {
   const trimmed = content.trim();
   if (trimmed) {
     return trimmed.length <= 72 ? trimmed : `${trimmed.slice(0, 69).trimEnd()}...`;
   }
 
-  switch (noteKind) {
-    case "acceptance-criteria":
-      return projectName ? `${projectName} acceptance criteria` : "Acceptance criteria capture";
-    case "study":
-      return projectName ? `${projectName} study note` : "Study note";
-    case "project":
-      return projectName ? `${projectName} project note` : "Project note";
-    case "general":
-    default:
-      return hasAttachments ? "Work attachment note" : "Work note";
-  }
+  return hasAttachments ? "Attachment note" : "Note";
 }
 
-function fallbackAttachmentContent(
-  noteKind: WorkNoteKind | undefined,
-  projectName: string | null,
-  attachments: AssistantAttachment[]
-): string {
+function fallbackAttachmentContent(attachments: AssistantAttachment[]): string {
   const attachmentNames = attachments.map((attachment) => attachment.name ?? "attachment").join(", ");
-  const prefix =
-    noteKind === "acceptance-criteria"
-      ? "Acceptance criteria attachment"
-      : noteKind === "study"
-        ? "Study attachment"
-        : noteKind === "project"
-          ? "Project attachment"
-          : "Work attachment";
-
-  return `${prefix}${projectName ? ` for ${projectName}` : ""}: ${attachmentNames}`;
+  return `Attachment note: ${attachmentNames}`;
 }
 
 function formatDateTime(iso: string, timeZone: string): string {

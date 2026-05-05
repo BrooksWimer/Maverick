@@ -1,5 +1,5 @@
 import type { ReviewResult as ExecutionReviewResult } from "../codex/types.js";
-import type { ReviewFinding, ReviewPass } from "./types.js";
+import type { ReviewFinding, ReviewPass, ReviewAnswer, ImportantDecision } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -77,6 +77,47 @@ function normalizeReviewFinding(value: unknown): ReviewFinding | null {
   };
 }
 
+function normalizeReviewAnswer(value: unknown): ReviewAnswer | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asTrimmedString(value.id);
+  const question = asTrimmedString(value.question);
+  const context = asTrimmedString(value.context);
+  if (!id || !question || !context) {
+    return null;
+  }
+
+  const severity = value.severity === "warning" || value.severity === "error" ? value.severity : "warning";
+
+  return {
+    id,
+    question,
+    context,
+    severity,
+  };
+}
+
+function normalizeImportantDecision(value: unknown): ImportantDecision | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = asTrimmedString(value.id);
+  const decision = asTrimmedString(value.decision);
+  const rationale = asTrimmedString(value.rationale);
+  if (!id || !decision || !rationale) {
+    return null;
+  }
+
+  return {
+    id,
+    decision,
+    rationale,
+  };
+}
+
 function extractNarrative(output: string): string {
   return output.replace(/```(?:json)?\s*[\s\S]+?\s*```/i, "").trim();
 }
@@ -133,6 +174,16 @@ export function coerceReviewAgentResult(
         .filter((finding): finding is ReviewFinding => finding !== null)
     : [];
   const suggestions = asStringArray(structured.suggestions);
+  const requiredAnswers = Array.isArray(structured.requiredAnswers)
+    ? structured.requiredAnswers
+        .map((answer) => normalizeReviewAnswer(answer))
+        .filter((answer): answer is ReviewAnswer => answer !== null)
+    : [];
+  const importantDecisions = Array.isArray(structured.importantDecisions)
+    ? structured.importantDecisions
+        .map((decision) => normalizeImportantDecision(decision))
+        .filter((decision): decision is ImportantDecision => decision !== null)
+    : [];
 
   const narrative = extractNarrative(output);
   const sections = [

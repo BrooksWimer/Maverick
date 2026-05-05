@@ -173,15 +173,6 @@ describe("planning context records", () => {
         recommendation: "proceed",
         clarificationQuestions: [],
       },
-      goalFrame: {
-        objective: "Make planning durable.",
-        problemStatement: "Planning cannot yet survive operator answer loops cleanly.",
-        successCriteria: ["Stored final prompt is trustworthy"],
-        constraints: ["Preserve existing behavior"],
-        assumptions: ["Current repo state is the source of truth"],
-        autonomyGuidance: "Keep work moving until a real decision gate appears.",
-        operatorDecisionPolicy: "Escalate missing facts and high-ramification choices.",
-      },
       result: parsePlanningResult(
         {
           currentStateSummary: "Planning analysis is complete.",
@@ -205,7 +196,6 @@ describe("planning context records", () => {
     expect(context.status).toBe("needs-final-prompt");
     expect(context.finalExecutionPrompt).toBeNull();
     expect(renderPlanningSummary(context)).toContain("Structured intake");
-    expect(renderPlanningSummary(context)).toContain("Goal frame");
     expect(renderPlanningSummary(context)).toContain("Draft Codex execution prompt");
   });
 
@@ -278,7 +268,7 @@ describe("planning context records", () => {
     expect(parsePlanningContextRecord(JSON.stringify(resumed))?.answers["answer-flow"]?.answer).toContain("Yes");
   });
 
-  it("round-trips stored intake and goal framing context", () => {
+  it("round-trips stored intake context", () => {
     const context = buildPlanningContextRecord({
       originalInstruction: "Implement intake-aware planning.",
       rawAgentOutput: "raw",
@@ -291,57 +281,6 @@ describe("planning context records", () => {
         complexity: "medium",
         recommendation: "proceed",
         clarificationQuestions: [],
-      },
-      goalFrame: {
-        objective: "Add durable pre-planning layers.",
-        problemStatement: "Planning should not start from raw operator text alone.",
-        successCriteria: ["Goal frame is visible in stored planning summaries"],
-        constraints: ["Use the existing src/agents layer"],
-        assumptions: ["Resume should reuse stored framing"],
-        autonomyGuidance: "Reuse the stored frame when answers arrive later.",
-        operatorDecisionPolicy: "Escalate only missing facts or impactful design choices.",
-      },
-      modeling: {
-        systemSummary: "Planning now has explicit pre-planning layers.",
-        mermaid: "flowchart TD\n  A[Intake] --> B[Goal frame]\n  B --> C[Planning]",
-        keyEntities: ["intake", "goal frame", "planning"],
-        criticalFlows: ["fresh plan", "resume"],
-        openQuestions: [],
-      },
-      testDesign: {
-        strategySummary: "Test the planning context and resume path first.",
-        testCases: [
-          {
-            name: "Planning context round-trip",
-            scope: "integration",
-            purpose: "Preserves the stored pre-planning layers.",
-            files: ["test/agents/planning-support.test.ts"],
-          },
-        ],
-        verificationChecklist: ["Run planning support tests"],
-        suggestedCommands: ["npx vitest run test/agents/planning-support.test.ts"],
-      },
-      feedbackRequest: {
-        headline: "Operator input needed",
-        preface: "One short answer will unblock dispatch.",
-        questions: [
-          {
-            questionId: "scope-choice",
-            label: "Scope choice",
-            prompt: "Keep this scoped to planning?",
-            whyItMatters: "The next slice depends on whether broader scope is allowed.",
-            options: ["Planning only", "Broader redesign"],
-            recommendedOption: "Planning only",
-          },
-        ],
-        answerInstructions: "Use /workstream answer-plan.",
-        suggestedReplyFormat: "scope-choice: Planning only",
-      },
-      explanation: {
-        headline: "Planning ready",
-        summary: "The stored plan is ready to dispatch.",
-        markdown: "## Planning Ready\nDispatch with the stored prompt.",
-        nextAction: "Dispatch the workstream.",
       },
       result: parsePlanningResult(
         {
@@ -367,11 +306,9 @@ describe("planning context records", () => {
 
     expect(parsed?.schemaVersion).toBe(5);
     expect(parsed?.intake?.scope).toContain("goal framing");
-    expect(parsed?.goalFrame?.objective).toContain("pre-planning");
-    expect(parsed?.modeling?.keyEntities).toContain("goal frame");
-    expect(parsed?.testDesign?.testCases[0]?.name).toContain("round-trip");
-    expect(parsed?.feedbackRequest?.questions[0]?.questionId).toBe("scope-choice");
-    expect(parsed?.explanation?.headline).toBe("Planning ready");
+    expect(parsed?.result.currentStateSummary).toContain("Intake and goal framing are persisted");
+    expect(parsed?.pendingQuestions).toEqual([]);
+    expect(parsed?.status).toBe("ready");
   });
 
   it("synthesizes pending questions from intake clarification questions when planning falls back", () => {
@@ -402,11 +339,10 @@ describe("planning context records", () => {
 
     expect(context.status).toBe("needs-answers");
     expect(context.pendingQuestions).toHaveLength(2);
-    expect(context.feedbackRequest?.questions).toHaveLength(2);
-    expect(context.feedbackRequest?.suggestedReplyFormat).toContain("clarification-1:");
+    expect(context.pendingQuestions.map((question) => question.id)).toEqual(["clarification-1", "clarification-2"]);
   });
 
-  it("prefers granular system-model open questions when fallback planning has broad intake questions", () => {
+  it("uses intake clarification questions when fallback planning has no structured questions", () => {
     const context = buildPlanningContextRecord({
       originalInstruction: "Audit the portfolio and prepare update questions.",
       rawAgentOutput: "Unstructured portfolio planning summary.",
@@ -423,29 +359,16 @@ describe("planning context records", () => {
           "Should quick wins be bundled or committed separately?",
         ],
       },
-      modeling: {
-        systemSummary: "Portfolio site audit.",
-        mermaid: "",
-        keyEntities: [],
-        criticalFlows: [],
-        openQuestions: [
-          "What is the current employer, title, and start date?",
-          "What email address should replace the stale contact email?",
-          "What should happen with the non-functional contact form?",
-        ],
-      },
       result: parsePlanningResult(null, "Unstructured portfolio planning summary."),
     });
 
     expect(context.pendingQuestions.map((question) => question.id)).toEqual([
-      "open-question-1",
-      "open-question-2",
-      "open-question-3",
+      "clarification-1",
+      "clarification-2",
     ]);
-    expect(context.feedbackRequest?.suggestedReplyFormat).toContain("open-question-1:");
   });
 
-  it("replaces stale feedback when building fallback context with more granular open questions", () => {
+  it("does not preserve stale persisted questions when building fallback context", () => {
     const context = buildPlanningContextRecord({
       originalInstruction: "Audit the portfolio and prepare update questions.",
       rawAgentOutput: "Unstructured portfolio planning summary.",
@@ -462,41 +385,12 @@ describe("planning context records", () => {
           "Should the resume PDF be replaced?",
         ],
       },
-      modeling: {
-        systemSummary: "Portfolio site audit.",
-        mermaid: "",
-        keyEntities: [],
-        criticalFlows: [],
-        openQuestions: [
-          "What is the current employer, title, and start date?",
-          "What email address should replace the stale contact email?",
-          "What should happen with the non-functional contact form?",
-        ],
-      },
-      feedbackRequest: {
-        headline: "Old two-question summary",
-        questions: [
-          {
-            questionId: "clarification-1",
-            label: "Old question",
-            prompt: "What new projects should be added?",
-            whyItMatters: "Old feedback question.",
-            options: [],
-          },
-        ],
-      },
       result: parsePlanningResult(null, "Unstructured portfolio planning summary."),
     });
 
     expect(context.pendingQuestions.map((question) => question.id)).toEqual([
-      "open-question-1",
-      "open-question-2",
-      "open-question-3",
-    ]);
-    expect(context.feedbackRequest?.questions.map((question) => question.questionId)).toEqual([
-      "open-question-1",
-      "open-question-2",
-      "open-question-3",
+      "clarification-1",
+      "clarification-2",
     ]);
   });
 
@@ -540,11 +434,11 @@ describe("planning context records", () => {
     const parsed = parsePlanningContextRecord(stored);
 
     expect(parsed?.pendingQuestions).toHaveLength(1);
-    expect(parsed?.feedbackRequest?.questions[0]?.questionId).toBe("clarification-1");
+    expect(parsed?.pendingQuestions[0]?.id).toBe("clarification-1");
     expect(parsed?.status).toBe("needs-answers");
   });
 
-  it("replaces stale feedback questions when fallback re-hydration finds more current open questions", () => {
+  it("keeps persisted fallback questions when re-hydrating stored context", () => {
     const stored = JSON.stringify({
       schemaVersion: 4,
       originalInstruction: "Audit the portfolio and prepare a plan.",
@@ -557,28 +451,6 @@ describe("planning context records", () => {
         complexity: "large",
         recommendation: "needs-clarification",
         clarificationQuestions: ["What new projects should be added?"],
-      },
-      modeling: {
-        systemSummary: "Portfolio site audit.",
-        mermaid: "",
-        keyEntities: [],
-        criticalFlows: [],
-        openQuestions: [
-          "What is the current employer?",
-          "What email should replace the stale contact email?",
-        ],
-      },
-      feedbackRequest: {
-        headline: "Old two-question summary",
-        questions: [
-          {
-            questionId: "clarification-1",
-            label: "Old question",
-            prompt: "What new projects should be added?",
-            whyItMatters: "Old feedback question.",
-            options: [],
-          },
-        ],
       },
       result: {
         currentStateSummary: "Planning returned unstructured output. Review the stored raw plan text before dispatch.",
@@ -610,12 +482,7 @@ describe("planning context records", () => {
     const parsed = parsePlanningContextRecord(stored);
 
     expect(parsed?.pendingQuestions.map((question) => question.id)).toEqual([
-      "open-question-1",
-      "open-question-2",
-    ]);
-    expect(parsed?.feedbackRequest?.questions.map((question) => question.questionId)).toEqual([
-      "open-question-1",
-      "open-question-2",
+      "clarification-1",
     ]);
   });
 
@@ -686,7 +553,6 @@ describe("planning context records", () => {
 
     expect(parsed?.result.currentStateSummary).toContain("almost ready");
     expect(parsed?.pendingQuestions.map((question) => question.id)).toEqual(["repo-read-access"]);
-    expect(parsed?.feedbackRequest?.questions.map((question) => question.questionId)).toEqual(["repo-read-access"]);
   });
 
   it("includes the full raw planning output and skips empty structured sections on fallback", () => {
@@ -727,10 +593,6 @@ describe("planning context records", () => {
         complexity: "large",
         recommendation: "needs-clarification",
         clarificationQuestions: ["What email address should replace bwimer@bu.edu?"],
-      },
-      explanation: {
-        headline: "Old formatted summary",
-        markdown: "Answer clarification-2 and clarification-4.",
       },
       result: parsePlanningResult(null, "Before approving, answer old-question-1."),
     });

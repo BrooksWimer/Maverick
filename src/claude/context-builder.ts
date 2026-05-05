@@ -1,27 +1,4 @@
-import type { BriefContext, PlanningContextPayload, ReviewContextPayload } from "./types.js";
-
-export function buildBriefSystemPrompt(): string {
-  return [
-    "You are Maverick's nightly operations analyst.",
-    "Write a concise operating brief grounded only in the supplied evidence.",
-    "Lead with what matters most, call out risk explicitly, and separate completed work from open issues.",
-    "Do not invent activity that is not present in the context.",
-  ].join(" ");
-}
-
-export function buildBriefInstruction(context: BriefContext): string {
-  return [
-    "Synthesize the following Maverick control-plane context into a concise daily brief.",
-    "Format requirements:",
-    "- Start with a short title line.",
-    "- Then include sections: Top Priorities, Project Snapshot, Pending Decisions, Upcoming Items.",
-    "- Use bullets where helpful, but keep it readable in Discord and Markdown.",
-    "- Mention concrete project ids, workstream names, branches, dirty repos, pending approvals, and reminders when they matter.",
-    "",
-    "Context JSON:",
-    JSON.stringify(context, null, 2),
-  ].join("\n");
-}
+import type { PlanningContextPayload, ReviewContextPayload } from "./types.js";
 
 export function buildReviewSystemPrompt(): string {
   return [

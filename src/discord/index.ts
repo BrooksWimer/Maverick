@@ -2,7 +2,6 @@ import { createLogger } from "../logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantService } from "../assistant/index.js";
-import type { DailyBriefService } from "../daily-brief/index.js";
 import { DiscordBot } from "./bot.js";
 
 const log = createLogger("discord");
@@ -24,8 +23,7 @@ function isUnsetOrPlaceholder(value: string | undefined): boolean {
 export function createDiscordBot(
   orchestrator: Orchestrator,
   config: OrchestratorConfig,
-  assistant?: AssistantService | null,
-  dailyBrief?: DailyBriefService | null
+  assistant?: AssistantService | null
 ) {
   const token = process.env.DISCORD_BOT_TOKEN;
   const applicationId = process.env.DISCORD_APPLICATION_ID;
@@ -42,5 +40,5 @@ export function createDiscordBot(
     token: token!,
     applicationId: applicationId!,
     guildId: guildId || undefined,
-  }, assistant ?? null, dailyBrief ?? null);
+  }, assistant ?? null);
 }

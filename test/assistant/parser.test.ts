@@ -86,21 +86,8 @@ describe("parseAssistantIntent", () => {
     expect(intent.recurrenceRule).toBe("RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR");
   });
 
-  it("classifies work study notes toward the engineering learning smart goal", () => {
-    const intent = parseAssistantIntent("Study note: read a distributed systems article and write takeaways", {
-      workSmartGoals: [
-        {
-          id: "business-context",
-          title: "Business Context Deep Dives",
-          description: "Business learning",
-        },
-        {
-          id: "engineering-learning",
-          title: "Independent Engineering Learning",
-          description: "Engineering learning",
-        },
-      ],
-    });
+  it("classifies work study notes as work notes", () => {
+    const intent = parseAssistantIntent("Work study note: read a distributed systems article and write takeaways");
 
     expect(intent.kind).toBe("note");
     if (intent.kind !== "note") {
@@ -108,8 +95,7 @@ describe("parseAssistantIntent", () => {
     }
 
     expect(intent.context).toBe("work");
-    expect(intent.noteKind).toBe("study");
-    expect(intent.smartGoalIds).toContain("engineering-learning");
+    expect(intent.title).toContain("Work study note");
   });
 
   it("treats attachment-only captures as notes instead of clarification", () => {
@@ -121,13 +107,6 @@ describe("parseAssistantIntent", () => {
           url: "https://example.test/acceptance-criteria.png",
         },
       ],
-      workSmartGoals: [
-        {
-          id: "business-context",
-          title: "Business Context Deep Dives",
-          description: "Business learning",
-        },
-      ],
     });
 
     expect(intent.kind).toBe("note");
@@ -136,6 +115,6 @@ describe("parseAssistantIntent", () => {
     }
 
     expect(intent.context).toBe("work");
-    expect(intent.noteKind).toBe("acceptance-criteria");
+    expect(intent.content).toContain("acceptance-criteria.png");
   });
 });

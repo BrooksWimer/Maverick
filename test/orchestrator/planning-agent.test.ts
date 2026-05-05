@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -86,30 +86,6 @@ function planningOutput(payload: Record<string, unknown>, summary: string): Turn
   };
 }
 
-function intakeOutput(payload: Record<string, unknown>, summary: string): TurnResult {
-  return planningOutput(payload, summary);
-}
-
-function goalFrameOutput(payload: Record<string, unknown>, summary: string): TurnResult {
-  return planningOutput(payload, summary);
-}
-
-function feedbackOutput(payload: Record<string, unknown>, summary: string): TurnResult {
-  return planningOutput(payload, summary);
-}
-
-function formattingOutput(payload: Record<string, unknown>, summary: string): TurnResult {
-  return planningOutput(payload, summary);
-}
-
-function modelingOutput(payload: Record<string, unknown>, summary: string): TurnResult {
-  return planningOutput(payload, summary);
-}
-
-function testDesignOutput(payload: Record<string, unknown>, summary: string): TurnResult {
-  return planningOutput(payload, summary);
-}
-
 const planningRouting = {
   profiles: {
     cheap: "haiku",
@@ -117,13 +93,7 @@ const planningRouting = {
     deep: "sonnet",
   },
   agents: {
-    intake: "cheap",
-    goalFraming: "cheap",
-    modeling: "default",
-    testDesign: "cheap",
     planning: "deep",
-    operatorFeedback: "cheap",
-    responseFormatting: "cheap",
     epicContext: "default",
   },
 } as const;
@@ -145,6 +115,11 @@ describe("Orchestrator planning agent flow", () => {
     writeFileSync(
       join(repoPath, "docs", "maverick", "PROJECT_CONTEXT.md"),
       "# Maverick Context\n\nKeep planning bounded and durable.",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoPath, "docs", "maverick", "PROJECT_MEMORY.md"),
+      "# Project Memory\n\n- Decision: keep planning context bounded across workstreams.",
       "utf8",
     );
     writeFileSync(
@@ -220,30 +195,6 @@ describe("Orchestrator planning agent flow", () => {
     const instruction = "Implement the corrected decision-gated planning migration.";
 
     const utilityAdapter = new QueuedAdapter("utility", [
-      intakeOutput(
-        {
-          request: instruction,
-          scope: "Move live planning onto the existing src/agents path with durable decision gates.",
-          outOfScope: "Rebuilding src/agents from scratch.",
-          acceptanceCriteria: ["Planning context persists structurally."],
-          risks: ["Answer ids must remain stable across replanning."],
-          complexity: "medium",
-          recommendation: "proceed",
-          clarificationQuestions: [],
-        },
-        "Intake is scoped.",
-      ),
-      modelingOutput(
-        {
-          systemSummary: "Planning depends on the orchestration layer, persisted workstream state, and Discord operator handoff.",
-          mermaid:
-            "flowchart TD\n  A[Operator instruction] --> B[Intake]\n  B --> C[Goal frame]\n  C --> D[Planning context]\n  D --> E[Discord follow-up]",
-          keyEntities: ["orchestrator", "planning_context_json", "discord bot"],
-          criticalFlows: ["Plan generation", "Answer resume"],
-          openQuestions: [],
-        },
-        "Model is ready.",
-      ),
       planningOutput(
         {
           currentStateSummary: "Live planning still bypasses src/agents.",
@@ -275,16 +226,6 @@ describe("Orchestrator planning agent flow", () => {
           rollbackPlan: "Revert the planning-specific schema and orchestrator changes.",
         },
         "Planning needs one operator answer.",
-      ),
-      modelingOutput(
-        {
-          systemSummary: "Planning model updated only from the operator answer checkpoint.",
-          mermaid: "flowchart TD\n  A[Stored context] --> B[Answered decision]\n  B --> C[Final plan]",
-          keyEntities: ["planning_context_json", "operator answers"],
-          criticalFlows: ["Answer resume"],
-          openQuestions: [],
-        },
-        "Model update is bounded to answers.",
       ),
       planningOutput(
         {
@@ -336,20 +277,15 @@ describe("Orchestrator planning agent flow", () => {
     const initialPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
     expect(initialPlan.needsAnswers).toBe(true);
     expect(initialPlan.planningContext.pendingQuestions).toHaveLength(1);
-    expect(initialPlan.planningContext.intake?.scope).toContain("decision gates");
-    expect(initialPlan.planningContext.goalFrame?.objective).toContain("decision gates");
-    expect(initialPlan.planningContext.modeling?.keyEntities).toContain("orchestrator");
-    expect(initialPlan.planningContext.testDesign?.testCases[0]?.name).toBe("Acceptance criterion 1");
-    expect(initialPlan.planningContext.feedbackRequest?.questions).toHaveLength(1);
-    expect(initialPlan.planningContext.explanation?.markdown).toContain("Operator input needed");
+    expect(initialPlan.planningContext.intake).toBeNull();
     expect(initialPlan.planningContext.contextBundle?.projectContext).toContain("bounded");
+    expect(initialPlan.planningContext.contextBundle?.projectMemory).toContain("planning context bounded");
     expect(initialPlan.planningContext.contextBundle?.epicContext).toContain("Planning cost");
 
     const storedAfterInitial = orchestrator.getWorkstream(workstream.id);
     expect(storedAfterInitial?.state).toBe("awaiting-decisions");
     expect(storedAfterInitial?.pending_decision).toContain("discord-ux");
     expect(storedAfterInitial?.planning_context_json).toContain("discord-ux");
-    expect(storedAfterInitial?.planning_context_json).toContain("\"goalFrame\"");
     expect(storedAfterInitial?.plan).toContain("Pending planning questions");
     expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.health).toBe("awaiting-input");
     expect(orchestrator.getWorkstreamStatusSnapshot(workstream.id)?.latestReport?.kind).toBe("plan");
@@ -366,7 +302,7 @@ describe("Orchestrator planning agent flow", () => {
     expect(resumedPlan.finalExecutionPrompt).toContain("/workstream answer-plan");
 
     const storedAfterResume = orchestrator.getWorkstream(workstream.id);
-    expect(storedAfterResume?.state).toBe("planning");
+    expect(storedAfterResume?.state).toBe("implementation");
     expect(storedAfterResume?.pending_decision).toBeNull();
     expect(storedAfterResume?.plan).toContain("Final Codex execution prompt");
     expect(storedAfterResume?.planning_context_json).toContain("discord-user");
@@ -381,12 +317,9 @@ describe("Orchestrator planning agent flow", () => {
 
     expect(dispatchAdapter.turnRequests[0]?.instruction).toContain("Execution workspace rules:");
     expect(dispatchAdapter.turnRequests[0]?.instruction).toContain(resumedPlan.finalExecutionPrompt ?? "");
-    expect(utilityAdapter.turnRequests).toHaveLength(5);
-    expect(utilityAdapter.turnRequests[0]?.model).toBe("haiku");
+    expect(utilityAdapter.turnRequests).toHaveLength(2);
+    expect(utilityAdapter.turnRequests[0]?.model).toBe("sonnet");
     expect(utilityAdapter.turnRequests[1]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[2]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[3]?.model).toBe("sonnet");
-    expect(utilityAdapter.turnRequests[4]?.model).toBe("sonnet");
     for (const request of utilityAdapter.turnRequests) {
       // Planning calls now opt INTO Claude session persistence so successive turns
       // can benefit from automatic prompt caching on the cached prefix.
@@ -397,20 +330,20 @@ describe("Orchestrator planning agent flow", () => {
       expect(request.disallowedTools).toContain("WebSearch");
     }
     expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Bounded Project Context");
-    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Changed Evidence");
-    expect(utilityAdapter.turnRequests[1]?.instruction).toContain("Previous System Model");
-    expect(utilityAdapter.turnRequests[1]?.instruction).toContain("Changed Evidence");
-    expect(utilityAdapter.turnRequests[3]?.instruction).toContain("Previous System Model");
-    expect(utilityAdapter.turnRequests[3]?.instruction).toContain("Changed Evidence");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Structured Intake");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Goal Frame");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("System Model");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Test Design");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Context Fingerprint");
-    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Broader Inspection Policy");
-    expect(utilityAdapter.turnRequests[4]?.threadId).toBe(utilityAdapter.turnRequests[2]?.threadId);
-    expect(utilityAdapter.turnRequests[4]?.instruction).toContain("Resume the stored planning flow");
-    expect(utilityAdapter.turnRequests[4]?.instruction).toContain("Yes. Use /workstream answer-plan as the fallback.");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Project Memory");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("planning context bounded");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("changedEvidence");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Context Fingerprint");
+    expect(utilityAdapter.turnRequests[0]?.instruction).toContain("Broader Inspection Policy");
+    expect(utilityAdapter.turnRequests[0]?.instruction).not.toContain("Structured Intake");
+    expect(utilityAdapter.turnRequests[1]?.threadId).toBe(utilityAdapter.turnRequests[0]?.threadId);
+    expect(utilityAdapter.turnRequests[1]?.instruction).toContain("Resume the stored planning flow");
+    expect(utilityAdapter.turnRequests[1]?.instruction).toContain("Yes. Use /workstream answer-plan as the fallback.");
+
+    await orchestrator.archive(workstream.id, "test");
+    const memory = readFileSync(join(repoPath, "docs", "maverick", "PROJECT_MEMORY.md"), "utf8");
+    expect(memory).toContain("planning migration");
+    expect(memory).toContain("Completed by: test");
   });
 
   it("starts a fresh planning flow by default and only reuses the thread when resume is explicit", async () => {
@@ -418,29 +351,6 @@ describe("Orchestrator planning agent flow", () => {
     await orchestrator.initialize();
 
     const utilityAdapter = new QueuedAdapter("utility", [
-      intakeOutput(
-        {
-          request: "Plan the next migration slice.",
-          scope: "Capture a fresh plan.",
-          outOfScope: "",
-          acceptanceCriteria: ["A fresh planning context exists."],
-          risks: [],
-          complexity: "small",
-          recommendation: "proceed",
-          clarificationQuestions: [],
-        },
-        "First intake.",
-      ),
-      modelingOutput(
-        {
-          systemSummary: "First plan model.",
-          mermaid: "flowchart TD\n  A[First] --> B[Plan]",
-          keyEntities: ["planner"],
-          criticalFlows: ["fresh plan"],
-          openQuestions: [],
-        },
-        "First model.",
-      ),
       planningOutput(
         {
           currentStateSummary: "Fresh plan one.",
@@ -458,29 +368,6 @@ describe("Orchestrator planning agent flow", () => {
           rollbackPlan: "Revert.",
         },
         "First draft only.",
-      ),
-      intakeOutput(
-        {
-          request: "Plan the next migration slice.",
-          scope: "Capture a second fresh plan.",
-          outOfScope: "",
-          acceptanceCriteria: ["A second planning context exists."],
-          risks: [],
-          complexity: "small",
-          recommendation: "proceed",
-          clarificationQuestions: [],
-        },
-        "Second intake.",
-      ),
-      modelingOutput(
-        {
-          systemSummary: "Second plan model.",
-          mermaid: "flowchart TD\n  A[Second] --> B[Plan]",
-          keyEntities: ["planner"],
-          criticalFlows: ["fresh plan"],
-          openQuestions: [],
-        },
-        "Second model.",
       ),
       planningOutput(
         {
@@ -530,9 +417,17 @@ describe("Orchestrator planning agent flow", () => {
     const instruction = "Plan the next migration slice.";
 
     const firstPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
-    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
+    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("implementation");
+
+    // Change PROJECT_MEMORY.md to invalidate the fingerprint and force a fresh plan
+    // (otherwise the manual re-call reuses the stored plan).
+    writeFileSync(
+      join(repoPath, "docs", "maverick", "PROJECT_MEMORY.md"),
+      "# Project Memory\n\nUpdated entry forces a fresh plan.",
+      "utf8",
+    );
     const secondPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual");
-    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
+    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("implementation");
     const resumedPlan = await orchestrator.generatePlan(workstream.id, instruction, "manual", {
       resumeExisting: true,
     });
@@ -540,12 +435,12 @@ describe("Orchestrator planning agent flow", () => {
     expect(firstPlan.finalExecutionPrompt).toBe("Final prompt one.");
     expect(secondPlan.finalExecutionPrompt).toBe("Final prompt two.");
     expect(resumedPlan.finalExecutionPrompt).toBe("Final dispatch prompt.");
-    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("planning");
-    expect(utilityAdapter.turnRequests).toHaveLength(7);
-    expect(utilityAdapter.turnRequests[2]?.threadId).not.toBe(utilityAdapter.turnRequests[5]?.threadId);
-    expect(utilityAdapter.turnRequests[5]?.instruction).not.toContain("Resume the stored planning flow");
-    expect(utilityAdapter.turnRequests[6]?.threadId).toBe(utilityAdapter.turnRequests[5]?.threadId);
-    expect(utilityAdapter.turnRequests[6]?.instruction).toContain("Resume the stored planning flow");
+    expect(orchestrator.getWorkstream(workstream.id)?.state).toBe("implementation");
+    expect(utilityAdapter.turnRequests).toHaveLength(3);
+    expect(utilityAdapter.turnRequests[0]?.threadId).not.toBe(utilityAdapter.turnRequests[1]?.threadId);
+    expect(utilityAdapter.turnRequests[1]?.instruction).not.toContain("Resume the stored planning flow");
+    expect(utilityAdapter.turnRequests[2]?.threadId).toBe(utilityAdapter.turnRequests[1]?.threadId);
+    expect(utilityAdapter.turnRequests[2]?.instruction).toContain("Resume the stored planning flow");
     expect(new Set(utilityAdapter.turnRequests.map((request) => request.model))).toEqual(new Set(["sonnet"]));
   });
 
@@ -554,29 +449,6 @@ describe("Orchestrator planning agent flow", () => {
     await orchestrator.initialize();
 
     const utilityAdapter = new QueuedAdapter("utility", [
-      intakeOutput(
-        {
-          request: "Plan a bounded implementation.",
-          scope: "Bounded implementation.",
-          outOfScope: "",
-          acceptanceCriteria: ["A structured plan exists."],
-          risks: [],
-          complexity: "small",
-          recommendation: "proceed",
-          clarificationQuestions: [],
-        },
-        "Intake.",
-      ),
-      modelingOutput(
-        {
-          systemSummary: "Bounded model.",
-          mermaid: "flowchart TD\n  A[Context] --> B[Plan]",
-          keyEntities: ["context"],
-          criticalFlows: ["planning"],
-          openQuestions: [],
-        },
-        "Model.",
-      ),
       {
         backendTurnId: "bad-plan",
         status: "completed",
@@ -597,7 +469,7 @@ describe("Orchestrator planning agent flow", () => {
       .toThrow("deterministic structurer could not find");
   });
 
-  it("uses static-site verification for Portfolio instead of generic npm test/build", async () => {
+  it("feeds static-site context into Portfolio planning", async () => {
     const portfolioRepo = join(tempDir, "portfolio");
     mkdirSync(join(portfolioRepo, "docs", "maverick", "epics"), { recursive: true });
     writeFileSync(join(portfolioRepo, "AGENTS.md"), "# Portfolio doctrine", "utf8");
@@ -647,29 +519,6 @@ describe("Orchestrator planning agent flow", () => {
     await orchestrator.initialize();
 
     const utilityAdapter = new QueuedAdapter("utility", [
-      intakeOutput(
-        {
-          request: "Plan portfolio polish.",
-          scope: "Static site polish.",
-          outOfScope: "",
-          acceptanceCriteria: ["Portfolio can be reviewed locally."],
-          risks: [],
-          complexity: "medium",
-          recommendation: "proceed",
-          clarificationQuestions: [],
-        },
-        "Intake.",
-      ),
-      modelingOutput(
-        {
-          systemSummary: "Static portfolio site.",
-          mermaid: "flowchart TD\n  A[index.html] --> B[Browser]",
-          keyEntities: ["index.html"],
-          criticalFlows: ["static render"],
-          openQuestions: [],
-        },
-        "Model.",
-      ),
       planningOutput(
         {
           currentStateSummary: "Portfolio context is loaded.",
@@ -699,9 +548,9 @@ describe("Orchestrator planning agent flow", () => {
 
     await orchestrator.generatePlan(workstream.id, "Plan portfolio polish.", "manual");
 
-    const planningRequest = utilityAdapter.turnRequests[2];
-    expect(planningRequest?.instruction).toContain("npx html-validate index.html");
-    expect(planningRequest?.instruction).toContain("Manual browser review at desktop and 375px mobile viewport");
+    const planningRequest = utilityAdapter.turnRequests[0];
+    expect(planningRequest?.instruction).toContain("Static HTML portfolio.");
+    expect(planningRequest?.instruction).toContain("Portfolio polish.");
     expect(planningRequest?.instruction).not.toContain("Suggested commands: npm test");
   });
 });

@@ -3,7 +3,6 @@ import type {
   AssistantPrimaryContext,
   AssistantTaskStatus,
   ParsedAssistantIntent,
-  WorkSmartGoal,
 } from "./types.js";
 
 const WEEKDAY_INDEX: Record<string, number> = {
@@ -22,7 +21,6 @@ type ParseAssistantIntentOptions = {
   defaultReminderHour?: number;
   requireTimeForReminders?: boolean;
   attachments?: AssistantAttachment[];
-  workSmartGoals?: WorkSmartGoal[];
 };
 
 type ScheduleParseResult = {
@@ -295,10 +293,7 @@ function parseNoteIntent(text: string, options: ParseAssistantIntentOptions): Pa
       ? `Attachment note captured: ${attachments.map((attachment) => attachment.name ?? "attachment").join(", ")}`
       : text;
   const content = text.replace(/^(?:note|remember|memo)[:\s-]*/i, "").trim() || fallbackContent;
-  const workMetadata = inferWorkNoteMetadata(content, attachments, options.workSmartGoals ?? []);
-  const context = workMetadata.context === "work"
-    ? "work"
-    : inferPrimaryContext(content, attachments);
+  const context = inferPrimaryContext(content, attachments);
 
   return {
     kind: "note",
@@ -306,9 +301,6 @@ function parseNoteIntent(text: string, options: ParseAssistantIntentOptions): Pa
     content,
     confidence: context === "work" ? 0.72 : 0.75,
     context,
-    noteKind: workMetadata.noteKind,
-    projectName: workMetadata.projectName,
-    smartGoalIds: workMetadata.smartGoalIds,
   };
 }
 
@@ -383,83 +375,6 @@ function extractContextHint(text: string): AssistantPrimaryContext | null {
   }
 
   return null;
-}
-
-function inferWorkNoteMetadata(
-  content: string,
-  attachments: AssistantAttachment[],
-  workSmartGoals: WorkSmartGoal[]
-): {
-  context: "personal" | "work";
-  noteKind: "general" | "project" | "study" | "acceptance-criteria" | undefined;
-  projectName: string | null;
-  smartGoalIds: string[];
-} {
-  const lowered = normalizeAssistantText(content).toLowerCase();
-  const attachmentLabel = attachments
-    .map((attachment) => `${attachment.name ?? ""} ${attachment.contentType ?? ""}`.trim().toLowerCase())
-    .join(" ");
-
-  const smartGoalIds = new Set<string>();
-  const allowedSmartGoals = new Set(workSmartGoals.map((goal) => goal.id));
-  let context: "personal" | "work" = "personal";
-  let noteKind: "general" | "project" | "study" | "acceptance-criteria" | undefined;
-  let projectName: string | null = null;
-
-  if (
-    /\b(study|reading|read|article|paper|book|learning|course|tutorial)\b/.test(lowered)
-  ) {
-    context = "work";
-    noteKind = "study";
-    if (allowedSmartGoals.has("engineering-learning")) {
-      smartGoalIds.add("engineering-learning");
-    }
-  }
-
-  if (
-    /\b(acceptance criteria|acceptance-criteria|user story|ticket|requirement|jira)\b/.test(lowered) ||
-    /\b(acceptance|criteria|ticket|story)\b/.test(attachmentLabel)
-  ) {
-    context = "work";
-    noteKind = "acceptance-criteria";
-    if (allowedSmartGoals.has("business-context")) {
-      smartGoalIds.add("business-context");
-    }
-  }
-
-  const projectMatch = content.match(/^(?:project|ticket)\s+([^:\-]+?)\s*[:\-]\s*(.+)$/i);
-  if (projectMatch) {
-    context = "work";
-    noteKind = noteKind === "acceptance-criteria" ? noteKind : "project";
-    projectName = cleanupSentence(projectMatch[1]);
-  } else {
-    const explicitProject = content.match(/\bfor project\s+([a-z0-9][a-z0-9 ._#/-]{1,60})$/i);
-    if (explicitProject) {
-      context = "work";
-      noteKind = noteKind === "acceptance-criteria" ? noteKind : "project";
-      projectName = cleanupSentence(explicitProject[1]);
-    }
-  }
-
-  if (
-    context === "personal" &&
-    /\b(work note|manager|standup|sprint|retro|ticket|acceptance criteria|project|prod|production)\b/.test(lowered)
-  ) {
-    context = "work";
-    noteKind = projectName ? "project" : "general";
-  }
-
-  if (context === "personal" && attachments.length > 0 && /\b(ticket|criteria|work|study)\b/.test(attachmentLabel)) {
-    context = "work";
-    noteKind = noteKind ?? "general";
-  }
-
-  return {
-    context,
-    noteKind,
-    projectName,
-    smartGoalIds: [...smartGoalIds],
-  };
 }
 
 function splitDescriptionAndSchedule(text: string): {

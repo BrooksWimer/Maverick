@@ -35,7 +35,7 @@ export const DEFAULT_WORKFLOW: z.infer<typeof WorkflowSchema> = {
     { from: "blocked", to: "intake", trigger: "info-supplied", autoAdvance: false },
     { from: "planning", to: "awaiting-decisions", trigger: "operator-input-required", autoAdvance: true },
     { from: "awaiting-decisions", to: "planning", trigger: "operator-input-received", autoAdvance: true },
-    { from: "planning", to: "implementation", trigger: "plan-approved", autoAdvance: false },
+    { from: "planning", to: "implementation", trigger: "plan-approved", autoAdvance: true },
     { from: "implementation", to: "verification", trigger: "implementation-complete", autoAdvance: true },
     { from: "verification", to: "review", trigger: "verification-passed", autoAdvance: true },
     { from: "verification", to: "implementation", trigger: "verification-failed", autoAdvance: true },
@@ -68,11 +68,6 @@ export const ExecutionBackendSchema = z.discriminatedUnion("type", [
     websocketPort: z.number().int().min(1024).max(65535).default(8765),
     persistExtendedHistory: z.boolean().default(true),
     experimentalRawEvents: z.boolean().default(false),
-  }),
-  z.object({
-    type: z.literal("codex-cli"),
-    model: z.string().default("gpt-5.4"),
-    approvalMode: z.enum(["auto-edit", "full-auto", "suggest"]).default("auto-edit"),
   }),
   z.object({
     type: z.literal("claude-code"),
@@ -140,22 +135,10 @@ export const DefaultLaneSchema = z.object({
 export const PlanningModelProfileNameSchema = z.enum(["cheap", "default", "deep"]);
 
 export const PlanningAgentRoutingSchema = z.object({
-  intake: PlanningModelProfileNameSchema.default("cheap"),
-  goalFraming: PlanningModelProfileNameSchema.default("cheap"),
-  modeling: PlanningModelProfileNameSchema.default("default"),
-  testDesign: PlanningModelProfileNameSchema.default("cheap"),
   planning: PlanningModelProfileNameSchema.default("deep"),
-  operatorFeedback: PlanningModelProfileNameSchema.default("cheap"),
-  responseFormatting: PlanningModelProfileNameSchema.default("cheap"),
   epicContext: PlanningModelProfileNameSchema.default("default"),
 }).default({
-  intake: "cheap",
-  goalFraming: "cheap",
-  modeling: "default",
-  testDesign: "cheap",
   planning: "deep",
-  operatorFeedback: "cheap",
-  responseFormatting: "cheap",
   epicContext: "default",
 });
 
@@ -368,43 +351,6 @@ export const AssistantConfigSchema = z.object({
   }),
 });
 
-// --- Daily brief ---
-
-export const DailyBriefConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  timeZone: z.string().optional().describe(
-    "Optional timezone override for the brief schedule; falls back to assistant.timeZone"
-  ),
-  deliveryHour: z.number().int().min(0).max(23).default(21).describe("Local hour for nightly brief delivery"),
-  deliveryMinute: z.number().int().min(0).max(59).default(0).describe("Local minute for nightly brief delivery"),
-  pollIntervalMs: z.number().int().min(60_000).max(3_600_000).default(300_000).describe(
-    "How often Maverick checks whether the nightly brief should run"
-  ),
-  channelId: z.string().nullable().optional().describe(
-    "Optional Discord channel override for the nightly brief; falls back to the Discord default notification channel"
-  ),
-  artifactDirectory: z.string().default("./data/daily-briefs").describe(
-    "Directory where generated daily brief markdown artifacts are stored"
-  ),
-  maxProjectsInDigest: z.number().int().min(1).max(20).default(10).describe(
-    "Maximum project sections to include in the generated report"
-  ),
-  maxNotesInDigest: z.number().int().min(0).max(20).default(8).describe(
-    "Maximum recent notes to include in the generated report"
-  ),
-  maxRemindersInDigest: z.number().int().min(0).max(20).default(5).describe(
-    "Maximum scheduled reminders to include in the generated report"
-  ),
-});
-
-export const BriefConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  schedule: z.string().optional().describe("Five-field cron expression interpreted in the assistant time zone"),
-  discordChannelId: z.string().nullable().optional(),
-  storagePath: z.string().default("./data/briefs"),
-  model: z.string().optional(),
-});
-
 // --- Top-level config ---
 
 export const OrchestratorConfigSchema = z.object({
@@ -436,6 +382,7 @@ export const OrchestratorConfigSchema = z.object({
     enabled: z.boolean().default(true),
     routes: z.array(DiscordRouteSchema).default([]),
     defaultNotificationChannelId: z.string().nullable().optional(),
+    dmFallbackUserIds: z.array(z.string()).default([]),
   }).default({ enabled: true, routes: [] }),
 
   http: z.object({
@@ -496,22 +443,6 @@ export const OrchestratorConfigSchema = z.object({
     },
   }),
 
-  dailyBrief: DailyBriefConfigSchema.default({
-    enabled: false,
-    deliveryHour: 21,
-    deliveryMinute: 0,
-    pollIntervalMs: 300_000,
-    artifactDirectory: "./data/daily-briefs",
-    maxProjectsInDigest: 10,
-    maxNotesInDigest: 8,
-    maxRemindersInDigest: 5,
-  }),
-
-  brief: BriefConfigSchema.default({
-    enabled: false,
-    discordChannelId: null,
-    storagePath: "./data/briefs",
-  }),
 });
 
 // Type exports
@@ -540,5 +471,3 @@ export type PlanningModelProfileName = z.infer<typeof PlanningModelProfileNameSc
 export type PlanningAgentRoutingConfig = z.infer<typeof PlanningAgentRoutingSchema>;
 export type PlanningModelRoutingConfig = z.infer<typeof PlanningModelRoutingConfigSchema>;
 export type AssistantDriveConfig = z.infer<typeof AssistantDriveConfigSchema>;
-export type DailyBriefConfig = z.infer<typeof DailyBriefConfigSchema>;
-export type BriefConfig = z.infer<typeof BriefConfigSchema>;
