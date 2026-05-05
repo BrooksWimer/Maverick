@@ -247,6 +247,10 @@ export function shouldPostPlanGeneratedMessage(event: { needsAnswers: boolean })
   return !event.needsAnswers;
 }
 
+export function shouldHandleAssistantDiscordMessages(config: Pick<OrchestratorConfig, "assistant">): boolean {
+  return config.assistant.enabled && config.assistant.discord.enabled;
+}
+
 function buildPlanningQuestionsNotificationMessage(params: {
   workstreamName: string;
   instruction: string;
@@ -1418,6 +1422,10 @@ export class DiscordBot {
 
   private async handleMessageCreate(message: Message): Promise<void> {
     if (!this.assistant?.isEnabled()) {
+      return;
+    }
+
+    if (!shouldHandleAssistantDiscordMessages(this.config)) {
       return;
     }
 

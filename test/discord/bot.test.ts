@@ -8,6 +8,7 @@ import {
   notificationChannelCandidateIds,
   persistedEpicIdForResolvedEpic,
   resolveWorkstreamChannelBindingForIds,
+  shouldHandleAssistantDiscordMessages,
   shouldAttachReplyPreview,
   shouldPostPlanGeneratedMessage,
   splitDiscordMessageContent,
@@ -196,6 +197,34 @@ describe("shouldPostPlanGeneratedMessage", () => {
 
   it("does not duplicate question-gated planning messages", () => {
     expect(shouldPostPlanGeneratedMessage({ needsAnswers: true })).toBe(false);
+  });
+});
+
+describe("shouldHandleAssistantDiscordMessages", () => {
+  it("keeps slash-command capable bots from handling ambient assistant messages when Discord assistant is disabled", () => {
+    expect(
+      shouldHandleAssistantDiscordMessages({
+        assistant: {
+          enabled: true,
+          discord: {
+            enabled: false,
+          },
+        },
+      } as any)
+    ).toBe(false);
+  });
+
+  it("allows ambient assistant messages only when the assistant and Discord surface are both enabled", () => {
+    expect(
+      shouldHandleAssistantDiscordMessages({
+        assistant: {
+          enabled: true,
+          discord: {
+            enabled: true,
+          },
+        },
+      } as any)
+    ).toBe(true);
   });
 });
 

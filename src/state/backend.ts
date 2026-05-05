@@ -71,9 +71,18 @@ export function invokeRemoteStateOperation<T>(
     throw new Error("Remote state backend is not configured.");
   }
 
+  const accessClientId = process.env.CLOUDFLARE_ACCESS_CLIENT_ID?.trim();
+  const accessClientSecret = process.env.CLOUDFLARE_ACCESS_CLIENT_SECRET?.trim();
+  const extraHeaders: Record<string, string> = {};
+  if (accessClientId && accessClientSecret) {
+    extraHeaders["CF-Access-Client-Id"] = accessClientId;
+    extraHeaders["CF-Access-Client-Secret"] = accessClientSecret;
+  }
+
   const request = {
     url: `${backendConfig.url}/internal/state/operation`,
     token: backendConfig.token,
+    extraHeaders,
     repository,
     method,
     args,
@@ -89,12 +98,16 @@ let raw = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) raw += chunk;
 const request = JSON.parse(raw);
-const response = await fetch(request.url, {
-  method: "POST",
-  headers: {
+const headers = Object.assign(
+  {
     "content-type": "application/json",
     "authorization": "Bearer " + request.token,
   },
+  request.extraHeaders && typeof request.extraHeaders === "object" ? request.extraHeaders : {},
+);
+const response = await fetch(request.url, {
+  method: "POST",
+  headers,
   body: JSON.stringify({
     repository: request.repository,
     method: request.method,

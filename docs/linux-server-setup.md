@@ -99,7 +99,9 @@ MAVERICK_STATE_TOKEN=<same-long-secret-on-linux-and-windows>
 
 The HTTP server is already bound to `127.0.0.1` by default in the shared control-plane config. The internal state API is only enabled when `MAVERICK_STATE_TOKEN` is set.
 
-Windows keeps the existing Discord command routing and instance behavior, but uses the Linux state service:
+Windows keeps the existing Discord command routing and instance behavior, but uses the Linux state service.
+
+**SSH tunnel (legacy / local-forward):**
 
 ```dotenv
 MAVERICK_INSTANCE_ID=windows
@@ -115,6 +117,23 @@ Start the tunnel before starting the Windows bot:
 ```
 
 This forwards `127.0.0.1:3848` on Windows to the Linux service on `127.0.0.1:3847`. If the tunnel or Linux state API is unavailable, Windows remote state calls fail closed instead of opening its own SQLite database.
+
+**Cloudflare Tunnel + Access (hosted state hostname):**
+
+Point `MAVERICK_STATE_URL` at the public state host (no path suffix; the client appends `/internal/state/operation`). When that hostname sits behind Cloudflare Access **service authentication**, set the Access client id/secret so every remote state POST includes the required headers:
+
+```dotenv
+MAVERICK_INSTANCE_ID=windows
+STATE_BACKEND=remote
+MAVERICK_STATE_URL=https://maverick-state.example.com
+MAVERICK_STATE_TOKEN=<same-long-secret-as-linux-MAVERICK_STATE_TOKEN>
+CLOUDFLARE_ACCESS_CLIENT_ID=<service-token-client-id>
+CLOUDFLARE_ACCESS_CLIENT_SECRET=<service-token-client-secret>
+```
+
+Linux canonical instance should keep `STATE_BACKEND=sqlite`, set `DATABASE_PATH`, and enable `MAVERICK_STATE_TOKEN` so Linux accepts `POST /internal/state/operation` from Windows. The command center UI should call the **dashboard** host for `/api/dashboard/*`, not the state host.
+
+When the dashboard API is exposed on a public hostname (for example `https://maverick.example.com`), Maverick also serves the bundled command center at **`/command-center.html`** (and redirects **`/`** there) from the `public/` directory shipped with the app. Set `MAVERICK_DASHBOARD_ALLOWED_ORIGIN` to that same origin (scheme + host only) if the browser loads the UI from that hostname and uses credentialed fetches.
 
 ## State Migration
 
