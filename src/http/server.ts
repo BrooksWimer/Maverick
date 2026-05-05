@@ -640,6 +640,9 @@ function applyDashboardCors(
   if (allowedOrigin) {
     reply.header("Access-Control-Allow-Origin", allowedOrigin);
     reply.header("Vary", "Origin");
+    if (allowedOrigin !== "*") {
+      reply.header("Access-Control-Allow-Credentials", "true");
+    }
   }
   reply.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   reply.header("Access-Control-Allow-Headers", "authorization, content-type");
@@ -673,10 +676,11 @@ function resolveDashboardAllowedOrigin(requestOrigin: string | undefined): strin
   if (allowed.length === 0) {
     return null;
   }
+  // Only reflect a caller origin when it is explicitly allowlisted (required for credentialed CORS).
   if (requestOrigin && allowed.includes(requestOrigin)) {
     return requestOrigin;
   }
-  return allowed[0] ?? null;
+  return null;
 }
 
 function isDashboardAuthorized(req: { headers: { authorization?: string | string[] } }): boolean {
