@@ -476,9 +476,8 @@
   },
   "assistant": {
     "discord": {
-      "channelIds": [
-        "1490188914861019197"
-      ]
+      "enabled": false,
+      "channelIds": []
     }
   }
 }

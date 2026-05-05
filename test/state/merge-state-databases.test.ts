@@ -74,6 +74,14 @@ describe("merge-state-databases", () => {
       "{}",
       "windows"
     );
+    windows.prepare(`
+      INSERT INTO assistant_item_assignments (item_type, item_id, project_id, lane_id)
+      VALUES (?, ?, ?, ?)
+    `).run("task", "task-windows", "maverick", "ops");
+    windows.prepare(`
+      INSERT INTO dashboard_plan_items (id, date_key, section, title, item_type, item_id, project_id, lane_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("plan-windows", "2026-05-04", "focus", "Windows plan item", "task", "task-windows", "maverick", "ops");
     windows.close();
 
     execFileSync(process.execPath, [
@@ -103,6 +111,8 @@ describe("merge-state-databases", () => {
       expect(merged.prepare("SELECT id FROM workstreams WHERE id = ?").get("windows-only")).toBeTruthy();
       expect(merged.prepare("SELECT id FROM turns WHERE id = ?").get("turn-windows")).toBeTruthy();
       expect(merged.prepare("SELECT thread_id FROM discord_thread_bindings WHERE thread_id = ?").get("thread-windows")).toBeTruthy();
+      expect(merged.prepare("SELECT item_id FROM assistant_item_assignments WHERE item_id = ?").get("task-windows")).toBeTruthy();
+      expect(merged.prepare("SELECT id FROM dashboard_plan_items WHERE id = ?").get("plan-windows")).toBeTruthy();
       expect(merged.prepare("SELECT COUNT(*) AS count FROM events").get()).toEqual({ count: 2 });
       expect(
         merged

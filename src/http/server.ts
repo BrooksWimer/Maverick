@@ -10,6 +10,18 @@ import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { AssistantConfig } from "../config/index.js";
 import type { AssistantService } from "../assistant/index.js";
 import { validateTwilioSignature } from "../assistant/providers/sms.js";
+import {
+  assignDashboardItem,
+  buildCommandCenterProjectDetail,
+  buildCommandCenterSnapshot,
+  completeDashboardTask,
+  createDashboardTodayPlanItem,
+  deleteDashboardTodayPlanItem,
+  promoteDashboardCaptureToTask,
+  promoteDashboardNoteToTask,
+  updateDashboardTask,
+  updateDashboardTodayPlanItem,
+} from "../dashboard/index.js";
 import { getStateBackendMode, invokeLocalStateOperation } from "../state/index.js";
 
 const log = createLogger("http");
@@ -41,6 +53,193 @@ export async function createHttpServer(
   // --- Health ---
 
   app.get("/health", async () => orchestrator.getHealthStatus());
+
+  // --- Dashboard ---
+
+  app.options("/api/dashboard/command-center", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    reply.code(204);
+    return null;
+  });
+
+  app.get("/api/dashboard/command-center", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+
+    return buildCommandCenterSnapshot({
+      orchestrator,
+      assistant: options.assistant ?? null,
+    });
+  });
+
+  app.options("/api/dashboard/projects/:projectId", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    reply.code(204);
+    return null;
+  });
+
+  app.get("/api/dashboard/projects/:projectId", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+
+    const { projectId } = req.params as { projectId: string };
+    const detail = buildCommandCenterProjectDetail({
+      orchestrator,
+      assistant: options.assistant ?? null,
+      projectId,
+    });
+    if (!detail) {
+      reply.code(404);
+      return { error: "Project not found" };
+    }
+    return detail;
+  });
+
+  app.options("/api/dashboard/*", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    reply.code(204);
+    return null;
+  });
+
+  app.post("/api/dashboard/tasks/:id/complete", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const { id } = req.params as { id: string };
+      return await completeDashboardTask({
+        assistant: options.assistant ?? null,
+        taskId: id,
+      });
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
+
+  app.patch("/api/dashboard/tasks/:id", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const { id } = req.params as { id: string };
+      return updateDashboardTask({
+        taskId: id,
+        patch: (req.body ?? {}) as Record<string, unknown>,
+      });
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
+
+  app.patch("/api/dashboard/items/:type/:id/assignment", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const { type, id } = req.params as { type: string; id: string };
+      const body = (req.body ?? {}) as { projectId?: string; laneId?: string | null };
+      return assignDashboardItem({
+        orchestrator,
+        patch: {
+          itemType: type as never,
+          itemId: id,
+          projectId: String(body.projectId ?? ""),
+          laneId: body.laneId ?? null,
+        },
+      });
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
+
+  app.post("/api/dashboard/notes/:id/task", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const { id } = req.params as { id: string };
+      return promoteDashboardNoteToTask({ orchestrator, noteId: id });
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
+
+  app.post("/api/dashboard/captures/:messageId/task", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const { messageId } = req.params as { messageId: string };
+      return promoteDashboardCaptureToTask({ orchestrator, messageId });
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
+
+  app.post("/api/dashboard/plans/today/items", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return createDashboardTodayPlanItem({
+        orchestrator,
+        item: (req.body ?? {}) as never,
+        timeZone: options.assistantConfig?.timeZone,
+      });
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
+
+  app.patch("/api/dashboard/plans/today/items/:id", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const { id } = req.params as { id: string };
+      return updateDashboardTodayPlanItem({
+        orchestrator,
+        itemId: id,
+        patch: (req.body ?? {}) as never,
+      });
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
+
+  app.delete("/api/dashboard/plans/today/items/:id", async (req, reply) => {
+    applyDashboardCors(req, reply);
+    if (!isDashboardAuthorized(req)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const { id } = req.params as { id: string };
+      return deleteDashboardTodayPlanItem(id);
+    } catch (error) {
+      return dashboardError(reply, error);
+    }
+  });
 
   // --- Internal state RPC ---
 
@@ -428,6 +627,72 @@ function escapeXml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function applyDashboardCors(
+  req: { headers: { origin?: string | string[] } },
+  reply: {
+    header: (name: string, value: string) => unknown;
+  }
+): void {
+  const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+  const allowedOrigin = resolveDashboardAllowedOrigin(origin);
+  if (allowedOrigin) {
+    reply.header("Access-Control-Allow-Origin", allowedOrigin);
+    reply.header("Vary", "Origin");
+    if (allowedOrigin !== "*") {
+      reply.header("Access-Control-Allow-Credentials", "true");
+    }
+  }
+  reply.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+  reply.header("Access-Control-Allow-Headers", "authorization, content-type");
+  reply.header("Access-Control-Max-Age", "86400");
+}
+
+function dashboardError(
+  reply: { code: (statusCode: number) => unknown },
+  error: unknown,
+): { error: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  const statusCode = /\bnot found\b/i.test(message)
+    ? 404
+    : /\b(invalid|unknown|required|does not define)\b/i.test(message)
+      ? 400
+      : 500;
+  reply.code(statusCode);
+  return { error: message };
+}
+
+function resolveDashboardAllowedOrigin(requestOrigin: string | undefined): string | null {
+  const configured = process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN?.trim();
+  if (!configured || configured === "*") {
+    return "*";
+  }
+
+  const allowed = configured
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (allowed.length === 0) {
+    return null;
+  }
+  // Only reflect a caller origin when it is explicitly allowlisted (required for credentialed CORS).
+  if (requestOrigin && allowed.includes(requestOrigin)) {
+    return requestOrigin;
+  }
+  return null;
+}
+
+function isDashboardAuthorized(req: { headers: { authorization?: string | string[] } }): boolean {
+  const token = process.env.MAVERICK_DASHBOARD_TOKEN?.trim();
+  if (!token) {
+    return true;
+  }
+
+  const authorization = Array.isArray(req.headers.authorization)
+    ? req.headers.authorization[0]
+    : req.headers.authorization;
+  return authorization === `Bearer ${token}`;
 }
 
 function resolveWebhookUrl(path: string, host: string | undefined, protocol: string): string {

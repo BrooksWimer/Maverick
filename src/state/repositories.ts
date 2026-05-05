@@ -205,6 +205,32 @@ export interface AssistantSettingRow {
   updated_at: string;
 }
 
+export interface AssistantItemAssignmentRow {
+  item_type: string;
+  item_id: string;
+  project_id: string;
+  lane_id: string | null;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DashboardPlanItemRow {
+  id: string;
+  date_key: string;
+  section: string;
+  item_type: string | null;
+  item_id: string | null;
+  title: string;
+  details: string | null;
+  project_id: string | null;
+  lane_id: string | null;
+  position: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkstreamRuntimeBindingRow {
   workstream_id: string;
   instance_id: string;
@@ -1156,6 +1182,153 @@ const localAssistantSettings = {
   },
 };
 
+// --- Dashboard item assignments ---
+
+const localAssistantItemAssignments = {
+  upsert(data: {
+    item_type: string;
+    item_id: string;
+    project_id: string;
+    lane_id?: string | null;
+    updated_by?: string;
+  }): AssistantItemAssignmentRow {
+    const db = getDatabase();
+    db.prepare(`
+      INSERT INTO assistant_item_assignments (item_type, item_id, project_id, lane_id, updated_by)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(item_type, item_id) DO UPDATE SET
+        project_id = excluded.project_id,
+        lane_id = excluded.lane_id,
+        updated_by = excluded.updated_by,
+        updated_at = datetime('now')
+    `).run(
+      data.item_type,
+      data.item_id,
+      data.project_id,
+      data.lane_id ?? null,
+      data.updated_by ?? "dashboard"
+    );
+    return localAssistantItemAssignments.get(data.item_type, data.item_id)!;
+  },
+
+  get(itemType: string, itemId: string): AssistantItemAssignmentRow | undefined {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_item_assignments
+      WHERE item_type = ? AND item_id = ?
+    `).get(itemType, itemId) as AssistantItemAssignmentRow | undefined;
+  },
+
+  list(): AssistantItemAssignmentRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_item_assignments
+      ORDER BY updated_at DESC
+    `).all() as AssistantItemAssignmentRow[];
+  },
+
+  listByProject(projectId: string): AssistantItemAssignmentRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM assistant_item_assignments
+      WHERE project_id = ?
+      ORDER BY updated_at DESC
+    `).all(projectId) as AssistantItemAssignmentRow[];
+  },
+
+  delete(itemType: string, itemId: string): boolean {
+    const db = getDatabase();
+    const result = db.prepare(`
+      DELETE FROM assistant_item_assignments
+      WHERE item_type = ? AND item_id = ?
+    `).run(itemType, itemId);
+    return result.changes > 0;
+  },
+};
+
+// --- Dashboard daily plan items ---
+
+const localDashboardPlanItems = {
+  create(data: {
+    id?: string;
+    date_key: string;
+    section: string;
+    item_type?: string | null;
+    item_id?: string | null;
+    title: string;
+    details?: string | null;
+    project_id?: string | null;
+    lane_id?: string | null;
+    position?: number;
+    status?: string;
+  }): DashboardPlanItemRow {
+    const db = getDatabase();
+    const id = data.id ?? randomUUID();
+    db.prepare(`
+      INSERT INTO dashboard_plan_items (
+        id, date_key, section, item_type, item_id, title, details, project_id, lane_id, position, status
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.date_key,
+      data.section,
+      data.item_type ?? null,
+      data.item_id ?? null,
+      data.title,
+      data.details ?? null,
+      data.project_id ?? null,
+      data.lane_id ?? null,
+      data.position ?? 0,
+      data.status ?? "active"
+    );
+    return localDashboardPlanItems.getById(id)!;
+  },
+
+  getById(id: string): DashboardPlanItemRow | undefined {
+    const db = getDatabase();
+    return db.prepare("SELECT * FROM dashboard_plan_items WHERE id = ?").get(id) as DashboardPlanItemRow | undefined;
+  },
+
+  listByDate(dateKey: string): DashboardPlanItemRow[] {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT * FROM dashboard_plan_items
+      WHERE date_key = ?
+      ORDER BY section ASC, position ASC, created_at ASC
+    `).all(dateKey) as DashboardPlanItemRow[];
+  },
+
+  update(
+    id: string,
+    fields: Partial<Pick<DashboardPlanItemRow,
+      "date_key" | "section" | "item_type" | "item_id" | "title" | "details" |
+      "project_id" | "lane_id" | "position" | "status"
+    >>
+  ): DashboardPlanItemRow | undefined {
+    const db = getDatabase();
+    const sets: string[] = ["updated_at = datetime('now')"];
+    const values: unknown[] = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined) {
+        sets.push(`${key} = ?`);
+        values.push(value);
+      }
+    }
+
+    values.push(id);
+    db.prepare(`UPDATE dashboard_plan_items SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    return localDashboardPlanItems.getById(id);
+  },
+
+  delete(id: string): boolean {
+    const db = getDatabase();
+    const result = db.prepare("DELETE FROM dashboard_plan_items WHERE id = ?").run(id);
+    return result.changes > 0;
+  },
+};
+
 // --- Per-instance runtime bindings ---
 
 const localWorkstreamRuntimeBindings = {
@@ -1337,6 +1510,8 @@ const localRepositories = {
   assistantCalendarEvents: localAssistantCalendarEvents,
   assistantReminders: localAssistantReminders,
   assistantSettings: localAssistantSettings,
+  assistantItemAssignments: localAssistantItemAssignments,
+  dashboardPlanItems: localDashboardPlanItems,
   workstreamRuntimeBindings: localWorkstreamRuntimeBindings,
   activeWorkstreamOperations: localActiveWorkstreamOperations,
 };
@@ -1375,6 +1550,8 @@ export const assistantTasks = createRepositoryProxy("assistantTasks", localAssis
 export const assistantCalendarEvents = createRepositoryProxy("assistantCalendarEvents", localAssistantCalendarEvents);
 export const assistantReminders = createRepositoryProxy("assistantReminders", localAssistantReminders);
 export const assistantSettings = createRepositoryProxy("assistantSettings", localAssistantSettings);
+export const assistantItemAssignments = createRepositoryProxy("assistantItemAssignments", localAssistantItemAssignments);
+export const dashboardPlanItems = createRepositoryProxy("dashboardPlanItems", localDashboardPlanItems);
 export const workstreamRuntimeBindings = createRepositoryProxy("workstreamRuntimeBindings", localWorkstreamRuntimeBindings);
 export const activeWorkstreamOperations = createRepositoryProxy("activeWorkstreamOperations", localActiveWorkstreamOperations);
 
