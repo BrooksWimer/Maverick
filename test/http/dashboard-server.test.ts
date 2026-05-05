@@ -560,7 +560,7 @@ describe("HTTP command-center dashboard route", () => {
   it("dashboard CORS preflight echoes an allowlisted Origin with credentials support", async () => {
     const previous = process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN;
     process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN =
-      "https://brookswimer.com,https://www.brookswimer.com";
+      "https://maverick.brookswimer.com,https://dashboard-allowlisted.example";
     try {
       orchestrator = new Orchestrator(config);
       await orchestrator.initialize();
@@ -572,10 +572,10 @@ describe("HTTP command-center dashboard route", () => {
       const res = await app.inject({
         method: "OPTIONS",
         url: "/api/dashboard/command-center",
-        headers: { origin: "https://www.brookswimer.com" },
+        headers: { origin: "https://dashboard-allowlisted.example" },
       });
       expect(res.statusCode).toBe(204);
-      expect(res.headers["access-control-allow-origin"]).toBe("https://www.brookswimer.com");
+      expect(res.headers["access-control-allow-origin"]).toBe("https://dashboard-allowlisted.example");
       expect(res.headers["access-control-allow-credentials"]).toBe("true");
     } finally {
       if (previous === undefined) {
@@ -588,7 +588,7 @@ describe("HTTP command-center dashboard route", () => {
 
   it("dashboard CORS preflight does not reflect a non-allowlisted Origin", async () => {
     const previous = process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN;
-    process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN = "https://brookswimer.com";
+    process.env.MAVERICK_DASHBOARD_ALLOWED_ORIGIN = "https://maverick.brookswimer.com";
     try {
       orchestrator = new Orchestrator(config);
       await orchestrator.initialize();
